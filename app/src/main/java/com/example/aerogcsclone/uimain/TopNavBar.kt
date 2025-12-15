@@ -57,18 +57,12 @@ fun TopNavBar(
     }
 
     // Set nav bar gradient colors based on connection status
-    val navBarAlpha = 0.5f // decreased alpha for more transparency
-    val navBarColors = if (telemetryState.connected) {
-        listOf(
-            Color(0xFF87CEEB).copy(alpha = navBarAlpha),
-            Color(0xFF4A90E2).copy(alpha = navBarAlpha)
-        )
-    } else {
-        listOf(
-            Color(0xFFfd5c63).copy(alpha = navBarAlpha),
-            Color(0xFFFF320A).copy(alpha = navBarAlpha)
-        )
-    }
+    // Top nav bar color palette — use the provided three-color theme (UI-only)
+    val navBarColors = listOf(
+        Color(0xFF0A0E27),
+        Color(0xFF1A1F3A),
+        Color(0xFF0F1419)
+    )
 
     Box(
         modifier = modifier
