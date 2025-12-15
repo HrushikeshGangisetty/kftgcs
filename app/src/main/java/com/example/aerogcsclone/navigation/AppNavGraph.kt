@@ -36,6 +36,7 @@ import com.example.aerogcsclone.uimain.MainPage
 import com.example.aerogcsclone.uimain.PlanScreen
 import com.example.aerogcsclone.uimain.TopNavBar
 import com.example.aerogcsclone.uimain.SettingsScreen
+import com.example.aerogcsclone.uimain.SecurityScreen
 import com.example.aerogcsclone.uimain.CalibrationsScreen
 import com.example.aerogcsclone.uimain.SprayCalibrationScreen
 import com.example.aerogcsclone.uimain.LevelSensorCalibrationScreen
@@ -75,6 +76,7 @@ sealed class Screen(val route: String) {
     object LevelSensorCalibration : Screen("level_sensor_calibration")
     object PumpCalibration : Screen("pump_calibration")
     object SpraySystemTest : Screen("spray_system_test")
+    object Security : Screen("security")
 }
 
 @Composable
@@ -249,6 +251,12 @@ fun AppNavGraph(navController: NavHostController) {
 
             // TopNavBar removed - show settings directly
             SettingsScreen(navController = navController)
+        }
+
+        composable(Screen.Security.route) {
+            val telemetryState by sharedViewModel.telemetryState.collectAsState()
+            // TopNavBar removed - show security screen directly
+            SecurityScreen(navController = navController)
         }
 
         // Actual screens for Barometer Calibration and Remote Controller
