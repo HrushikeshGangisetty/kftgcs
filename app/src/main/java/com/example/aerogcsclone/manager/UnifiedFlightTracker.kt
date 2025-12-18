@@ -377,9 +377,13 @@ class UnifiedFlightTracker(
         val finalDistance = totalDistanceMeters
         val finalTime = elapsedSeconds
 
+        // Capture consumed litres from spray telemetry
+        val finalConsumedLitres = sharedViewModel.telemetryState.value.sprayTelemetry.consumedLiters
+
         Log.i(tag, "📊 Final flight metrics:")
         Log.i(tag, "   Duration: ${formatTime(finalTime)}")
         Log.i(tag, "   Distance: ${formatDistance(finalDistance)}")
+        Log.i(tag, "   Consumed: ${finalConsumedLitres?.let { "%.2f L".format(it) } ?: "N/A"}")
         Log.i(tag, "   Mode: ${missionMode?.name}")
 
         // Stop telemetry logging
@@ -396,7 +400,7 @@ class UnifiedFlightTracker(
 
             tlogViewModel.endFlight(
                 area = null,  // Calculate if needed
-                consumedLiquid = null  // Get from spray telemetry if available
+                consumedLiquid = finalConsumedLitres
             )
 
             Log.i(tag, "✅ Flight data saved to database")
@@ -421,7 +425,7 @@ class UnifiedFlightTracker(
             completed = true
         )
 
-        Log.i(tag, "✅ Updated SharedViewModel with final values - Time: ${finalTime}s, Distance: ${finalDistance}m")
+        Log.i(tag, "✅ Updated SharedViewModel with final values - Time: ${finalTime}s, Distance: ${finalDistance}m, Litres: ${finalConsumedLitres}L")
 
         // Give UI time to capture the values before we reset
         delay(500)

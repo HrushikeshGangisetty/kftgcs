@@ -238,63 +238,44 @@ fun MainPage(
         // Mission Complete Popup (must be inside the composable)
         var lastMissionTime by remember { mutableStateOf<Long?>(null) }
         var lastMissionDistance by remember { mutableStateOf<Float?>(null) }
+        var lastLitresConsumed by remember { mutableStateOf<Float?>(null) }
         var prevMissionCompleted by remember { mutableStateOf(false) }
-        var prevMissionElapsedSec by remember { mutableStateOf<Long?>(null) }
         var missionJustCompleted by remember { mutableStateOf(false) }
-        var missionWaitingForLanding by remember { mutableStateOf(false) }
 
-        LaunchedEffect(telemetryState.missionCompleted, telemetryState.missionElapsedSec, telemetryState.altitudeRelative, telemetryState.totalDistanceMeters) {
-            // Capture distance and time IMMEDIATELY when they become available
-            // This happens when the flight tracker updates the state with final values
-            if (telemetryState.totalDistanceMeters != null && telemetryState.missionCompleted) {
-                lastMissionDistance = telemetryState.totalDistanceMeters
-                Log.d("MainPage", "📊 Captured distance: ${telemetryState.totalDistanceMeters}m")
-            }
-
-            if (telemetryState.lastMissionElapsedSec != null) {
+        LaunchedEffect(telemetryState.missionCompleted, telemetryState.lastMissionElapsedSec, telemetryState.totalDistanceMeters, telemetryState.sprayTelemetry.consumedLiters) {
+            // Check if mission just completed
+            if (telemetryState.missionCompleted && !prevMissionCompleted) {
+                // Capture final values
                 lastMissionTime = telemetryState.lastMissionElapsedSec
-                Log.d("MainPage", "⏱️ Captured time: ${telemetryState.lastMissionElapsedSec}s")
-            }
+                lastMissionDistance = telemetryState.totalDistanceMeters
+                lastLitresConsumed = telemetryState.sprayTelemetry.consumedLiters
 
-            // Check if mission just completed (traveling done)
-            val completedNow = !prevMissionCompleted && telemetryState.missionCompleted && telemetryState.missionElapsedSec == null && prevMissionElapsedSec != null
-            if (completedNow) {
-                // Capture final values if not already captured
-                if (lastMissionTime == null) {
-                    lastMissionTime = telemetryState.lastMissionElapsedSec
-                }
-                if (lastMissionDistance == null) {
-                    lastMissionDistance = telemetryState.totalDistanceMeters
-                }
-                Log.i("MainPage", "✅ Mission completed - Time: ${lastMissionTime}s, Distance: ${lastMissionDistance}m")
+                Log.i("MainPage", "✅ Mission completed - Time: ${lastMissionTime}s, Distance: ${lastMissionDistance}m, Litres: ${lastLitresConsumed}L")
 
-                // Don't show dialog yet, wait for altitude to reach 0
-                missionWaitingForLanding = true
-            }
-
-            // Check if drone has landed (altitude is 0 or very close to 0)
-            val altitude = telemetryState.altitudeRelative ?: 0f
-            val isLanded = altitude <= 0.5f // Consider landed if altitude is less than or equal to 0.5 meters
-
-            // Show dialog only when mission is waiting for landing AND altitude reaches 0
-            if (missionWaitingForLanding && isLanded) {
-                Log.i("MainPage", "🛬 Drone landed - showing completion dialog")
+                // Show popup immediately
                 missionJustCompleted = true
-                missionWaitingForLanding = false
             }
 
             prevMissionCompleted = telemetryState.missionCompleted
-            prevMissionElapsedSec = telemetryState.missionElapsedSec
         }
+
         if (missionJustCompleted) {
             AlertDialog(
                 onDismissRequest = {
                     missionJustCompleted = false
+                    // Reset values after dismissing
+                    lastMissionTime = null
+                    lastMissionDistance = null
+                    lastLitresConsumed = null
                 },
                 confirmButton = {
                     Button(
                         onClick = {
                             missionJustCompleted = false
+                            // Reset values after dismissing
+                            lastMissionTime = null
+                            lastMissionDistance = null
+                            lastLitresConsumed = null
                         },
                         colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary)
                     ) {
@@ -302,7 +283,7 @@ fun MainPage(
                     }
                 },
                 title = {
-                    Text("Mission completed!", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
+                    Text("Mission Completed!", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
                 },
                 text = {
                     Column(horizontalAlignment = Alignment.CenterHorizontally) {
@@ -313,12 +294,18 @@ fun MainPage(
                             if (h > 0) "%02d:%02d:%02d".format(h, m, s) else "%02d:%02d".format(m, s)
                         } ?: "N/A"
                         val distStr = lastMissionDistance?.let { dist ->
-                            if (dist < 1000f) "%.0f m".format(dist)
+                            if (dist < 1000f) "%.1f m".format(dist)
                             else "%.2f km".format(dist / 1000f)
                         } ?: "N/A"
+                        val litresStr = lastLitresConsumed?.let { litres ->
+                            "%.2f L".format(litres)
+                        } ?: "N/A"
+
                         Text("Total time taken: $timeStr", style = MaterialTheme.typography.bodyLarge)
                         Spacer(modifier = Modifier.height(8.dp))
                         Text("Total distance covered: $distStr", style = MaterialTheme.typography.bodyLarge)
+                        Spacer(modifier = Modifier.height(8.dp))
+                        Text("Liquid consumed: $litresStr", style = MaterialTheme.typography.bodyLarge)
                     }
                 }
             )

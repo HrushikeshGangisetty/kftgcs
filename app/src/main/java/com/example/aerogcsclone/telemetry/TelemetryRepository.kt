@@ -567,14 +567,21 @@ class MavlinkTelemetryRepository(
                         val formattedFlowRate = flowRateLiterPerMin?.let {
                             "%.2f L/min".format(it)
                         }
-                        val formattedConsumed = consumedLiters?.let {
-                            if (it < 1f) "%.0f mL".format(it * 1000f)
-                            else "%.2f L".format(it)
+
+                        // Format consumed volume - show in mL for small amounts, L for larger amounts
+                        val formattedConsumed = when {
+                            consumedLiters == null -> null
+                            consumedLiters == 0f -> "0 mL"
+                            consumedLiters < 1f -> {
+                                val mL = (consumedLiters * 1000f).toInt()
+                                "$mL mL"
+                            }
+                            else -> "%.2f L".format(consumedLiters)
                         }
 
                         Log.i("Spray Telemetry", "📊 BATT2 Summary:")
                         Log.i("Spray Telemetry", "   Flow Rate: ${formattedFlowRate ?: "N/A"}")
-                        Log.i("Spray Telemetry", "   Consumed: ${formattedConsumed ?: "N/A"}")
+                        Log.i("Spray Telemetry", "   Consumed: ${formattedConsumed ?: "N/A"} (raw: ${consumedLiters}L)")
                         Log.i("Spray Telemetry", "   Capacity: $flowCapacityLiters L")
                         Log.i("Spray Telemetry", "   Remaining: ${flowRemainingPercent?.toString() ?: "N/A"}%")
 
