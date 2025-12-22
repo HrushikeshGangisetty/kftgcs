@@ -23,6 +23,12 @@ class BluetoothMavConnection(
     companion object {
         // The standard UUID for the Serial Port Profile (SPP)
         private val SPP_UUID: UUID = UUID.fromString("00001101-0000-1000-8000-00805F9B34FB")
+
+        // Increased buffer size for Bluetooth reliability
+        private const val BUFFER_SIZE = 2048
+
+        // Reconnection backoff delay
+        const val RECONNECT_DELAY_MS = 2000L
     }
 
     private var socket: BluetoothSocket? = null

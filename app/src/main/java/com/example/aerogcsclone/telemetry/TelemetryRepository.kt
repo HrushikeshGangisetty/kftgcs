@@ -95,7 +95,11 @@ class MavlinkTelemetryRepository(
 
     // Track last heartbeat time from FCU (thread-safe using AtomicLong)
     private val lastFcuHeartbeatTime = AtomicLong(0L)
-    private val HEARTBEAT_TIMEOUT_MS = 5000L // Increased to 5 seconds for Bluetooth/real hardware reliability
+    private val HEARTBEAT_TIMEOUT_MS = 8000L // Increased to 8 seconds for Bluetooth reliability
+
+    // Rate limiting for state updates to reduce Bluetooth buffer pressure
+    private var lastStateUpdateTime = 0L
+    private val MIN_UPDATE_INTERVAL_MS = 100L // 10Hz max update rate
 
     // For total distance tracking
     private val positionHistory = mutableListOf<Pair<Double, Double>>()
@@ -138,6 +142,18 @@ class MavlinkTelemetryRepository(
     private val _paramValue = MutableSharedFlow<ParamValue>(replay = 0, extraBufferCapacity = 10)
     val paramValue: SharedFlow<ParamValue> = _paramValue.asSharedFlow()
 
+    /**
+     * Throttled state update for high-frequency messages (GPS, VFR_HUD, etc.)
+     * Limits update rate to prevent Bluetooth buffer overflow
+     */
+    private fun throttledStateUpdate(update: TelemetryState.() -> TelemetryState) {
+        val now = System.currentTimeMillis()
+        if (now - lastStateUpdateTime >= MIN_UPDATE_INTERVAL_MS) {
+            _state.update(update)
+            lastStateUpdateTime = now
+        }
+    }
+
     fun start() {
         val scope = AppScope
 
@@ -163,20 +179,20 @@ class MavlinkTelemetryRepository(
                     is StreamState.Active -> {
                         // Don't set connected=true here anymore
                         // Connection will be marked as true only when FCU heartbeat is received
-                        Log.i("MavlinkRepo", "Stream Active - waiting for FCU heartbeat")
+                        Log.d("MavlinkRepo", "Stream Active - waiting for FCU heartbeat")
                         // Reset intentional disconnect flag when connection becomes active
                         intentionalDisconnect = false
                     }
                     is StreamState.Inactive -> {
-                        Log.i("MavlinkRepo", "Stream Inactive")
+                        Log.d("MavlinkRepo", "Stream Inactive")
                         _state.update { it.copy(connected = false, fcuDetected = false) }
                         lastFcuHeartbeatTime.set(0L)
                         // Only reconnect if disconnection was NOT intentional
                         if (!intentionalDisconnect) {
-                            Log.i("MavlinkRepo", "Accidental disconnect detected, reconnecting...")
+                            Log.d("MavlinkRepo", "Accidental disconnect detected, reconnecting...")
                             reconnect(this)
                         } else {
-                            Log.i("MavlinkRepo", "Intentional disconnect - not reconnecting")
+                            Log.d("MavlinkRepo", "Intentional disconnect - not reconnecting")
                         }
                     }
                 }
@@ -338,12 +354,12 @@ class MavlinkTelemetryRepository(
                                 }
                             }
 
-                            setMessageRate(1u, 1f)   // SYS_STATUS
-                            setMessageRate(24u, 1f)  // GPS_RAW_INT
-                            setMessageRate(33u, 5f)  // GLOBAL_POSITION_INT
-                            setMessageRate(74u, 5f)  // VFR_HUD
-                            setMessageRate(147u, 1f) // BATTERY_STATUS
-                            setMessageRate(65u, 2f)  // RC_CHANNELS (2Hz for spray monitoring)
+                            setMessageRate(1u, 0.5f)   // SYS_STATUS - reduced from 1Hz for Bluetooth
+                            setMessageRate(24u, 0.5f)  // GPS_RAW_INT - reduced from 1Hz for Bluetooth
+                            setMessageRate(33u, 2f)    // GLOBAL_POSITION_INT - reduced from 5Hz for Bluetooth
+                            setMessageRate(74u, 2f)    // VFR_HUD - reduced from 5Hz for Bluetooth
+                            setMessageRate(147u, 0.5f) // BATTERY_STATUS - reduced from 1Hz for Bluetooth
+                            setMessageRate(65u, 1f)    // RC_CHANNELS - reduced from 2Hz for Bluetooth
 
                             // Request RADIO_STATUS for RC battery monitoring
                             Log.i("RCBattery", "📡 Requesting RADIO_STATUS messages (ID: 109) at 1Hz for RC battery telemetry")
@@ -370,14 +386,14 @@ class MavlinkTelemetryRepository(
                 .filterIsInstance<CommandAck>()
                 .collect { ack ->
                     try {
-                        Log.i(
+                        Log.d(
                             "MavlinkRepo",
                             "COMMAND_ACK received: command=${ack.command} result=${ack.result} progress=${ack.progress}"
                         )
                         // Emit to the shared flow for ViewModels to consume
                         _commandAck.emit(ack)
                     } catch (t: Throwable) {
-                        Log.i("MavlinkRepo", "COMMAND_ACK received (unable to stringify fields)")
+                        Log.d("MavlinkRepo", "COMMAND_ACK received (unable to stringify fields)")
                     }
                 }
         }
@@ -390,14 +406,14 @@ class MavlinkTelemetryRepository(
                 .filterIsInstance<CommandLong>()
                 .collect { cmd ->
                     try {
-                        Log.i(
+                        Log.d(
                             "MavlinkRepo",
                             "COMMAND_LONG received: command=${cmd.command.value} param1=${cmd.param1}"
                         )
                         // Emit to the shared flow for ViewModels to consume
                         _commandLong.emit(cmd)
                     } catch (t: Throwable) {
-                        Log.i("MavlinkRepo", "COMMAND_LONG received (unable to stringify fields)")
+                        Log.d("MavlinkRepo", "COMMAND_LONG received (unable to stringify fields)")
                     }
                 }
         }
@@ -409,8 +425,9 @@ class MavlinkTelemetryRepository(
                 .map { it.message }
                 .filterIsInstance<VfrHud>()
                 .collect { hud ->
-                    _state.update {
-                        it.copy(
+                    // Use throttled update for high-frequency VFR_HUD messages
+                    throttledStateUpdate {
+                        copy(
                             altitudeMsl = hud.alt,
                             airspeed = hud.airspeed.takeIf { v -> v > 0f },
                             groundspeed = hud.groundspeed.takeIf { v -> v > 0f },
@@ -449,8 +466,9 @@ class MavlinkTelemetryRepository(
 
                     // Update state with position data only
                     // NOTE: Flight tracking removed - now handled by UnifiedFlightTracker
-                    _state.update {
-                        it.copy(
+                    // Use throttled update for high-frequency GLOBAL_POSITION_INT messages
+                    throttledStateUpdate {
+                        copy(
                             altitudeMsl = altAMSLm,
                             altitudeRelative = relAltM,
                             latitude = lat,
@@ -471,15 +489,15 @@ class MavlinkTelemetryRepository(
                 .filterIsInstance<BatteryStatus>()
                 .collect { b ->
                     // Log ALL battery status messages first for debugging
-                    Log.i("Spray Telemetry", "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-                    Log.i("Spray Telemetry", "📦 BATTERY_STATUS message received:")
-                    Log.i("Spray Telemetry", "   Battery ID: ${b.id.toInt()}")
-                    Log.i("Spray Telemetry", "   current_battery: ${b.currentBattery} cA (${b.currentBattery / 100f} A)")
-                    Log.i("Spray Telemetry", "   current_consumed: ${b.currentConsumed} mAh")
-                    Log.i("Spray Telemetry", "   battery_remaining: ${b.batteryRemaining}%")
-                    Log.i("Spray Telemetry", "   voltages[0]: ${b.voltages.firstOrNull()} mV")
-                    Log.i("Spray Telemetry", "   temperature: ${b.temperature} °C")
-                    Log.i("Spray Telemetry", "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+                    Log.d("Spray Telemetry", "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+                    Log.d("Spray Telemetry", "📦 BATTERY_STATUS message received:")
+                    Log.d("Spray Telemetry", "   Battery ID: ${b.id.toInt()}")
+                    Log.d("Spray Telemetry", "   current_battery: ${b.currentBattery} cA (${b.currentBattery / 100f} A)")
+                    Log.d("Spray Telemetry", "   current_consumed: ${b.currentConsumed} mAh")
+                    Log.d("Spray Telemetry", "   battery_remaining: ${b.batteryRemaining}%")
+                    Log.d("Spray Telemetry", "   voltages[0]: ${b.voltages.firstOrNull()} mV")
+                    Log.d("Spray Telemetry", "   temperature: ${b.temperature} °C")
+                    Log.d("Spray Telemetry", "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 
                     // Main battery (id=0)
                     if (b.id.toInt() == 0) {
@@ -489,7 +507,7 @@ class MavlinkTelemetryRepository(
                     }
                     // Flow sensor (BATT2 - id=1)
                     else if (b.id.toInt() == 1) {
-                        Log.i("Spray Telemetry", "🚿 Processing FLOW SENSOR (BATT2 - id=1)")
+                        Log.d("Spray Telemetry", "🚿 Processing FLOW SENSOR (BATT2 - id=1)")
                         Log.d("Spray Telemetry", "Flow sensor (BATT2) - Raw data: " +
                                 "current_battery=${b.currentBattery} cA, " +
                                 "current_consumed=${b.currentConsumed} mAh, " +
@@ -589,11 +607,11 @@ class MavlinkTelemetryRepository(
                             else -> "%.2f L".format(consumedLiters)
                         }
 
-                        Log.i("Spray Telemetry", "📊 BATT2 Summary:")
-                        Log.i("Spray Telemetry", "   Flow Rate: ${formattedFlowRate ?: "N/A"}")
-                        Log.i("Spray Telemetry", "   Consumed: ${formattedConsumed ?: "N/A"} (raw: ${consumedLiters}L)")
-                        Log.i("Spray Telemetry", "   Capacity: $flowCapacityLiters L")
-                        Log.i("Spray Telemetry", "   Remaining: ${flowRemainingPercent?.toString() ?: "N/A"}%")
+                        Log.d("Spray Telemetry", "📊 BATT2 Summary:")
+                        Log.d("Spray Telemetry", "   Flow Rate: ${formattedFlowRate ?: "N/A"}")
+                        Log.d("Spray Telemetry", "   Consumed: ${formattedConsumed ?: "N/A"} (raw: ${consumedLiters}L)")
+                        Log.d("Spray Telemetry", "   Capacity: $flowCapacityLiters L")
+                        Log.d("Spray Telemetry", "   Remaining: ${flowRemainingPercent?.toString() ?: "N/A"}%")
 
                         _state.update { state ->
                             state.copy(
@@ -607,11 +625,11 @@ class MavlinkTelemetryRepository(
                                 )
                             )
                         }
-                        Log.i("Spray Telemetry", "✅ State updated with BATT2 data")
+                        Log.d("Spray Telemetry", "✅ State updated with BATT2 data")
                     }
                     // Level sensor (BATT3 - id=2)
                     else if (b.id.toInt() == 2) {
-                        Log.i("Spray Telemetry", "💧 Processing LEVEL SENSOR (BATT3 - id=2)")
+                        Log.d("Spray Telemetry", "💧 Processing LEVEL SENSOR (BATT3 - id=2)")
                         Log.d("Spray Telemetry", "Level sensor (BATT3) - Raw data: " +
                                 "voltages=${b.voltages.firstOrNull()} mV, " +
                                 "battery_remaining=${b.batteryRemaining}%")
@@ -696,13 +714,13 @@ class MavlinkTelemetryRepository(
                 .filterIsInstance<Heartbeat>()
                 .collect { hb ->
                     // CRITICAL: Log the RAW customMode value from the FCU heartbeat
-                    Log.i("MavlinkRepo", "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-                    Log.i("MavlinkRepo", "HEARTBEAT from FCU - RAW DATA:")
-                    Log.i("MavlinkRepo", "  customMode = ${hb.customMode} (raw UInt value)")
-                    Log.i("MavlinkRepo", "  baseMode = ${hb.baseMode.value}")
-                    Log.i("MavlinkRepo", "  type = ${hb.type.entry?.name ?: hb.type.value}")
-                    Log.i("MavlinkRepo", "  autopilot = ${hb.autopilot.entry?.name ?: hb.autopilot.value}")
-                    Log.i("MavlinkRepo", "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+                    Log.d("MavlinkRepo", "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+                    Log.d("MavlinkRepo", "HEARTBEAT from FCU - RAW DATA:")
+                    Log.d("MavlinkRepo", "  customMode = ${hb.customMode} (raw UInt value)")
+                    Log.d("MavlinkRepo", "  baseMode = ${hb.baseMode.value}")
+                    Log.d("MavlinkRepo", "  type = ${hb.type.entry?.name ?: hb.type.value}")
+                    Log.d("MavlinkRepo", "  autopilot = ${hb.autopilot.entry?.name ?: hb.autopilot.value}")
+                    Log.d("MavlinkRepo", "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 
                     val armed = (hb.baseMode.value and MavModeFlag.SAFETY_ARMED.value) != 0u
 
@@ -744,12 +762,12 @@ class MavlinkTelemetryRepository(
                     }
 
                     // Log the parsed mode for verification
-                    Log.i("MavlinkRepo", "✅ Parsed mode: $mode (from customMode: ${hb.customMode})")
+                    Log.d("MavlinkRepo", "✅ Parsed mode: $mode (from customMode: ${hb.customMode})")
 
                     // Only update state if mode or armed status actually changed
                     if (mode != state.value.mode || armed != state.value.armed) {
                         _state.update { it.copy(armed = armed, mode = mode) }
-                        Log.i("MavlinkRepo", "🔄 State updated - Mode: $mode, Armed: $armed")
+                        Log.d("MavlinkRepo", "🔄 State updated - Mode: $mode, Armed: $armed")
                     } else {
                         Log.d("MavlinkRepo", "No change - Mode: $mode, Armed: $armed")
                     }
@@ -825,13 +843,13 @@ class MavlinkTelemetryRepository(
                     }
 
                     // Enhanced logging for RC battery verification
-                    Log.i("RCBattery", "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-                    Log.i("RCBattery", "✅ RADIO_STATUS Message Received")
-                    Log.i("RCBattery", "   remnoise field: ${radioStatus.remnoise.toInt()}")
-                    Log.i("RCBattery", "   RC Battery %: ${rcBattPct ?: "N/A"}")
-                    Log.i("RCBattery", "   rssi: ${radioStatus.rssi.toInt()}")
-                    Log.i("RCBattery", "   remrssi: ${radioStatus.remrssi.toInt()}")
-                    Log.i("RCBattery", "   State updated: rcBatteryPercent = ${rcBattPct ?: "N/A"}%")
+                    Log.d("RCBattery", "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+                    Log.d("RCBattery", "✅ RADIO_STATUS Message Received")
+                    Log.d("RCBattery", "   remnoise field: ${radioStatus.remnoise.toInt()}")
+                    Log.d("RCBattery", "   RC Battery %: ${rcBattPct ?: "N/A"}")
+                    Log.d("RCBattery", "   rssi: ${radioStatus.rssi.toInt()}")
+                    Log.d("RCBattery", "   remrssi: ${radioStatus.remrssi.toInt()}")
+                    Log.d("RCBattery", "   State updated: rcBatteryPercent = ${rcBattPct ?: "N/A"}%")
 
                     // ═══ RC BATTERY FAILSAFE ═══
                     // Trigger RTL if RC battery is critically low (0% or below) and drone is armed
@@ -875,11 +893,12 @@ class MavlinkTelemetryRepository(
                     }
                     // Reset failsafe flag when battery recovers and drone is disarmed
                     else if (!state.value.armed && rcBatteryFailsafeTriggered) {
-                        Log.i("RCBattery", "✓ Drone disarmed - resetting RC battery failsafe flag")
+                        Log.d("RCBattery", "✓ Drone disarmed - resetting RC battery failsafe flag")
                         rcBatteryFailsafeTriggered = false
                     }
 
-                    Log.i("RCBattery", "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+                    _state.update { it.copy(rcBatteryPercent = rcBattPct) }
+                    Log.d("RCBattery", "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 
                     _state.update { it.copy(rcBatteryPercent = rcBattPct) }
                 }
