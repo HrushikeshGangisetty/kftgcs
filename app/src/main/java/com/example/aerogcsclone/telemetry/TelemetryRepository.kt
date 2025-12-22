@@ -119,6 +119,9 @@ class MavlinkTelemetryRepository(
     private val _commandLong = MutableSharedFlow<CommandLong>(replay = 0, extraBufferCapacity = 10)
     val commandLong: SharedFlow<CommandLong> = _commandLong.asSharedFlow()
 
+    // RC Battery failsafe tracking
+    private var rcBatteryFailsafeTriggered = false
+
     // MAG_CAL_PROGRESS flow for compass calibration progress
     private val _magCalProgress = MutableSharedFlow<MagCalProgress>(replay = 0, extraBufferCapacity = 10)
     val magCalProgress: SharedFlow<MagCalProgress> = _magCalProgress.asSharedFlow()
@@ -341,7 +344,11 @@ class MavlinkTelemetryRepository(
                             setMessageRate(74u, 5f)  // VFR_HUD
                             setMessageRate(147u, 1f) // BATTERY_STATUS
                             setMessageRate(65u, 2f)  // RC_CHANNELS (2Hz for spray monitoring)
+
+                            // Request RADIO_STATUS for RC battery monitoring
+                            Log.i("RCBattery", "📡 Requesting RADIO_STATUS messages (ID: 109) at 1Hz for RC battery telemetry")
                             setMessageRate(109u, 1f) // RADIO_STATUS (1Hz for RC battery monitoring)
+                            Log.i("RCBattery", "✓ RADIO_STATUS message request sent to FCU")
 
                             // Request spray telemetry capacity parameters
                             delay(500) // Small delay to let message rates stabilize
@@ -817,7 +824,63 @@ class MavlinkTelemetryRepository(
                         radioStatus.remnoise.toInt()  // remnoise field contains RC battery %
                     }
 
-                    Log.d("MavlinkRepo", "RADIO_STATUS: RC Battery = ${rcBattPct ?: "N/A"}%")
+                    // Enhanced logging for RC battery verification
+                    Log.i("RCBattery", "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+                    Log.i("RCBattery", "✅ RADIO_STATUS Message Received")
+                    Log.i("RCBattery", "   remnoise field: ${radioStatus.remnoise.toInt()}")
+                    Log.i("RCBattery", "   RC Battery %: ${rcBattPct ?: "N/A"}")
+                    Log.i("RCBattery", "   rssi: ${radioStatus.rssi.toInt()}")
+                    Log.i("RCBattery", "   remrssi: ${radioStatus.remrssi.toInt()}")
+                    Log.i("RCBattery", "   State updated: rcBatteryPercent = ${rcBattPct ?: "N/A"}%")
+
+                    // ═══ RC BATTERY FAILSAFE ═══
+                    // Trigger RTL if RC battery is critically low (0% or below) and drone is armed
+                    if (rcBattPct != null && rcBattPct <= 0 && state.value.armed && !rcBatteryFailsafeTriggered) {
+                        Log.e("RCBattery", "⚠️⚠️⚠️ RC BATTERY FAILSAFE TRIGGERED ⚠️⚠️⚠️")
+                        Log.e("RCBattery", "   RC Battery: $rcBattPct%")
+                        Log.e("RCBattery", "   Armed: ${state.value.armed}")
+                        Log.e("RCBattery", "   Current Mode: ${state.value.mode}")
+                        Log.e("RCBattery", "   INITIATING EMERGENCY RTL...")
+
+                        // Mark failsafe as triggered to prevent multiple RTL commands
+                        rcBatteryFailsafeTriggered = true
+
+                        // Launch coroutine to trigger RTL
+                        scope.launch {
+                            try {
+                                val rtlSuccess = changeMode(MavMode.RTL)
+                                if (rtlSuccess) {
+                                    Log.e("RCBattery", "✅ EMERGENCY RTL ACTIVATED - RC BATTERY CRITICAL")
+                                    sharedViewModel.addNotification(
+                                        Notification(
+                                            message = "⚠️ RC BATTERY CRITICAL (${rcBattPct}%) - RTL ACTIVATED",
+                                            type = NotificationType.ERROR
+                                        )
+                                    )
+                                    // Announce via TTS
+                                    sharedViewModel.announceRCBatteryFailsafe(rcBattPct)
+                                } else {
+                                    Log.e("RCBattery", "❌ FAILED TO ACTIVATE RTL - RC BATTERY FAILSAFE")
+                                    sharedViewModel.addNotification(
+                                        Notification(
+                                            message = "❌ RC BATTERY FAILSAFE: Failed to activate RTL",
+                                            type = NotificationType.ERROR
+                                        )
+                                    )
+                                }
+                            } catch (e: Exception) {
+                                Log.e("RCBattery", "❌ Exception during RC battery failsafe RTL", e)
+                            }
+                        }
+                    }
+                    // Reset failsafe flag when battery recovers and drone is disarmed
+                    else if (!state.value.armed && rcBatteryFailsafeTriggered) {
+                        Log.i("RCBattery", "✓ Drone disarmed - resetting RC battery failsafe flag")
+                        rcBatteryFailsafeTriggered = false
+                    }
+
+                    Log.i("RCBattery", "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+
                     _state.update { it.copy(rcBatteryPercent = rcBattPct) }
                 }
         }

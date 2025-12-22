@@ -64,6 +64,11 @@ fun TopNavBar(
         }
     }
 
+    // Log RC battery percentage updates for verification
+    LaunchedEffect(telemetryState.rcBatteryPercent) {
+        Log.i("RCBattery", "🎮 TopNavBar: RC Battery display updated to ${telemetryState.rcBatteryPercent ?: "N/A"}%")
+    }
+
     // Set nav bar gradient colors based on connection status
     // Top nav bar color palette — use the provided three-color theme (UI-only)
     val navBarColors = if (telemetryState.connected) {

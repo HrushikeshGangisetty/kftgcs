@@ -126,6 +126,10 @@ class SharedViewModel : ViewModel() {
         ttsManager?.announceDroneDisarmed()
     }
 
+    fun announceRCBatteryFailsafe(batteryPercent: Int) {
+        ttsManager?.speak("Warning! RC battery critical at $batteryPercent percent. Emergency RTL activated.")
+    }
+
     fun speak(text: String) {
         ttsManager?.speak(text)
     }
