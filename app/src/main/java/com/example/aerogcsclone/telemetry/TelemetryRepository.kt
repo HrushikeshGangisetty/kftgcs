@@ -341,6 +341,7 @@ class MavlinkTelemetryRepository(
                             setMessageRate(74u, 5f)  // VFR_HUD
                             setMessageRate(147u, 1f) // BATTERY_STATUS
                             setMessageRate(65u, 2f)  // RC_CHANNELS (2Hz for spray monitoring)
+                            setMessageRate(109u, 1f) // RADIO_STATUS (1Hz for RC battery monitoring)
 
                             // Request spray telemetry capacity parameters
                             delay(500) // Small delay to let message rates stabilize
@@ -802,12 +803,32 @@ class MavlinkTelemetryRepository(
                 }
         }
 
+        // RADIO_STATUS for RC battery percentage
+        scope.launch {
+            mavFrame
+                .filter { state.value.fcuDetected && it.systemId == fcuSystemId }
+                .map { it.message }
+                .filterIsInstance<RadioStatus>()
+                .collect { radioStatus ->
+                    // RC battery percentage (0-100, 255 = unknown/not available)
+                    val rcBattPct = if (radioStatus.remnoise.toInt() == 255) {
+                        null  // RC battery not available
+                    } else {
+                        radioStatus.remnoise.toInt()  // remnoise field contains RC battery %
+                    }
+
+                    Log.d("MavlinkRepo", "RADIO_STATUS: RC Battery = ${rcBattPct ?: "N/A"}%")
+                    _state.update { it.copy(rcBatteryPercent = rcBattPct) }
+                }
+        }
+
         // STATUSTEXT for arming failures and other messages
         scope.launch {
             mavFrame
                 .filter { state.value.fcuDetected && it.systemId == fcuSystemId }
                 .map { it.message }
                 .filterIsInstance<Statustext>()
+
                 .collect { status ->
                     val message = status.text.toString()
                     val type = when (status.severity.value) {

@@ -235,7 +235,7 @@ fun TopNavBar(
                 DividerBlock()
                 InfoBlock(Icons.Default.BatteryFull, "${telemetryState.batteryPercent ?: "N/A"}%")
                 DividerBlock()
-                InfoBlock(Icons.Default.Gamepad, "100%")
+                InfoBlock(Icons.Default.Gamepad, "${telemetryState.rcBatteryPercent ?: "N/A"}%")
                 DividerBlock()
                 InfoBlockGroup(
                     Icons.Default.Bolt,
