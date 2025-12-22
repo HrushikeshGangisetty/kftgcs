@@ -58,6 +58,8 @@ data class TelemetryState(
     val voltage: Float? = null,
     val batteryPercent: Int? = null,
     val currentA : Float? = null,
+    //RC Battery
+    val rcBatteryPercent: Int? = null,
     //Sat count and HDOP
     val sats : Int? = null,
     val hdop : Float? = null,
