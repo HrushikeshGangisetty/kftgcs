@@ -30,6 +30,7 @@ import com.example.aerogcsclone.navigation.Screen
 import com.example.aerogcsclone.telemetry.SharedViewModel
 import android.util.Log
 import com.example.aerogcsclone.utils.AppStrings
+import kotlinx.coroutines.flow.distinctUntilChanged
 
 @Composable
 fun TopNavBar(
@@ -240,7 +241,7 @@ fun TopNavBar(
                 DividerBlock()
                 InfoBlock(Icons.Default.BatteryFull, "${telemetryState.batteryPercent ?: "N/A"}%")
                 DividerBlock()
-                InfoBlock(Icons.Default.Gamepad, "${telemetryState.rcBatteryPercent ?: "N/A"}%")
+                InfoBlock(Icons.Default.Gamepad, telemetryState.rcBatteryPercent?.let { "$it%" } ?: "--%")
                 DividerBlock()
                 InfoBlockGroup(
                     Icons.Default.Bolt,

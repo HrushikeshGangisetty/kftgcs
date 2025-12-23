@@ -32,6 +32,7 @@ import com.example.aerogcsclone.telemetry.SharedViewModel
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.text.style.TextOverflow
 import com.example.aerogcsclone.utils.AppStrings
+import kotlinx.coroutines.flow.debounce
 
 @Composable
 fun MainPage(
@@ -545,11 +546,13 @@ fun StatusPanel(
                 horizontalArrangement = Arrangement.SpaceBetween,
                 modifier = Modifier.fillMaxWidth()
             ) {
+                // Format altitude with proper null handling
+                val formattedAltitude = telemetryState.altitudeRelative?.let { "%.1f m".format(it) } ?: "--"
                 Text(
-                    "${AppStrings.alt}: ${telemetryState.altitudeRelative ?: "N/A"}",
+                    "${AppStrings.alt}: $formattedAltitude",
                     color = Color.White,
                     fontSize = 11.sp,
-                    modifier = Modifier.weight(0.95f),
+                    modifier = Modifier.weight(1f),
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis
                 )
@@ -557,7 +560,7 @@ fun StatusPanel(
                     "${AppStrings.speedLabel}: ${telemetryState.formattedGroundspeed ?: "N/A"}",
                     color = Color.White,
                     fontSize = 11.sp,
-                    modifier = Modifier.weight(0.95f),
+                    modifier = Modifier.weight(1f),
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis
                 )
@@ -565,7 +568,7 @@ fun StatusPanel(
                     "${AppStrings.area}: ${areaFormatted}",
                     color = Color.White,
                     fontSize = 11.sp,
-                    modifier = Modifier.weight(1.05f),
+                    modifier = Modifier.weight(1f),
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis
                 )
@@ -573,7 +576,7 @@ fun StatusPanel(
                     "${AppStrings.flow}: ${telemetryState.sprayTelemetry.formattedFlowRate ?: "N/A"}",
                     color = Color.White,
                     fontSize = 11.sp,
-                    modifier = Modifier.weight(0.7f),
+                    modifier = Modifier.weight(1f),
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis
                 )
@@ -596,7 +599,7 @@ fun StatusPanel(
                     color = if (telemetryState.missionPaused) Color.Yellow else Color.White,
                     fontSize = 11.sp,
                     fontWeight = if (telemetryState.missionPaused) FontWeight.Bold else FontWeight.Normal,
-                    modifier = Modifier.weight(0.95f),
+                    modifier = Modifier.weight(1f),
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis
                 )
@@ -610,7 +613,7 @@ fun StatusPanel(
                     "${AppStrings.time}: $timeStr",
                     color = Color.White,
                     fontSize = 11.sp,
-                    modifier = Modifier.weight(0.95f),
+                    modifier = Modifier.weight(1f),
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis
                 )
@@ -623,7 +626,7 @@ fun StatusPanel(
                     "${AppStrings.distance}: $distStr",
                     color = Color.White,
                     fontSize = 11.sp,
-                    modifier = Modifier.weight(1.05f),
+                    modifier = Modifier.weight(1f),
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis
                 )
@@ -631,7 +634,7 @@ fun StatusPanel(
                     "${AppStrings.consumed}: ${telemetryState.sprayTelemetry.formattedConsumed ?: "N/A"}",
                     color = Color.White,
                     fontSize = 11.sp,
-                    modifier = Modifier.weight(0.7f),
+                    modifier = Modifier.weight(1f),
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis
                 )
