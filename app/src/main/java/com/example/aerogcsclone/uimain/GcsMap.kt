@@ -297,13 +297,33 @@ fun GcsMap(
 
         // Drone marker using quadcopter image; centered via anchor Offset(0.5f, 0.5f)
         if (lat != null && lon != null) {
-            Marker(
-                state = MarkerState(position = LatLng(lat, lon)),
-                title = "Drone",
-                icon = droneIcon ?: BitmapDescriptorFactory.defaultMarker(BitmapDescriptorFactory.HUE_AZURE),
-                anchor = Offset(0.5f, 0.5f),
-                rotation = heading ?: 0f
-            )
+            // Create a unique key that changes when heading changes significantly (every 1 degree)
+            // This forces the marker to recreate and apply new rotation
+            val headingKey = remember(heading) {
+                (heading ?: 0f).toInt()
+            }
+
+            key(headingKey) {
+                val droneMarkerState = rememberMarkerState(
+                    key = "drone_marker_$headingKey",
+                    position = LatLng(lat, lon)
+                )
+
+                // Update marker position when lat/lon changes
+                LaunchedEffect(lat, lon) {
+                    droneMarkerState.position = LatLng(lat, lon)
+                }
+
+                // The rotation is passed directly to the Marker
+                Marker(
+                    state = droneMarkerState,
+                    title = "Drone",
+                    icon = droneIcon ?: BitmapDescriptorFactory.defaultMarker(BitmapDescriptorFactory.HUE_AZURE),
+                    anchor = Offset(0.5f, 0.5f),
+                    rotation = heading ?: 0f,
+                    flat = true  // Make the marker flat on the map so rotation works correctly
+                )
+            }
         }
 
         // Regular waypoint markers and planned route (blue)
