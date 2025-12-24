@@ -205,34 +205,36 @@ fun GcsMap(
                 // Add draggable markers for geofence adjustment when enabled
                 if (geofenceAdjustmentEnabled) {
                     geofencePolygon.forEachIndexed { index, point ->
-                        val markerState = rememberMarkerState(position = point)
+                        key(index) { // Use key to ensure proper recomposition per marker
+                            val markerState = rememberMarkerState(position = point)
 
-                        // Listen to marker position changes for drag events
-                        LaunchedEffect(markerState.position, point) {
-                            if (markerState.position != point) {
-                                onGeofencePointDrag(index, markerState.position)
+                            // Listen to marker position changes for drag events
+                            LaunchedEffect(markerState.position) {
+                                if (markerState.position != point) {
+                                    onGeofencePointDrag(index, markerState.position)
+                                }
                             }
-                        }
 
-                        // Determine the marker icon based on selection state
-                        val markerIcon = if (selectedGeofencePointIndex == index) {
-                            mediumYellowMarker // Selected geofence point - Yellow
-                        } else {
-                            mediumOrangeMarker // Default - Orange/Red for geofence
-                        }
-
-                        Marker(
-                            state = markerState,
-                            title = "GF${index + 1}",
-                            icon = markerIcon,
-                            anchor = Offset(0.5f, 0.5f),
-                            draggable = true,  // Enable dragging
-                            onClick = {
-                                // Marker clicked, can be dragged now
-                                onGeofencePointClick(index) // Handle geofence point click
-                                true
+                            // Determine the marker icon based on selection state
+                            val markerIcon = if (selectedGeofencePointIndex == index) {
+                                mediumYellowMarker // Selected geofence point - Yellow
+                            } else {
+                                mediumOrangeMarker // Default - Orange/Red for geofence
                             }
-                        )
+
+                            Marker(
+                                state = markerState,
+                                title = "GF${index + 1}",
+                                icon = markerIcon,
+                                anchor = Offset(0.5f, 0.5f),
+                                draggable = true,  // Enable dragging
+                                onClick = {
+                                    // Marker clicked, can be dragged now
+                                    onGeofencePointClick(index) // Handle geofence point click
+                                    true
+                                }
+                            )
+                        }
                     }
                 }
             }
@@ -252,34 +254,36 @@ fun GcsMap(
         // Regular waypoint markers and planned route (blue)
         if (points.isNotEmpty() && surveyPolygon.isEmpty()) {
             points.forEachIndexed { index, point ->
-                val markerState = rememberMarkerState(position = point)
+                key(index) { // Use key to ensure proper recomposition per marker
+                    val markerState = rememberMarkerState(position = point)
 
-                // Listen to marker position changes for drag events
-                LaunchedEffect(markerState.position, point) {
-                    if (markerState.position != point) {
-                        onWaypointDrag(index, markerState.position)
+                    // Listen to marker position changes for drag events
+                    LaunchedEffect(markerState.position) {
+                        if (markerState.position != point) {
+                            onWaypointDrag(index, markerState.position)
+                        }
                     }
-                }
 
-                // Determine the marker icon based on selection state
-                val markerIcon = if (selectedWaypointIndex == index) {
-                    mediumYellowMarker // Selected waypoint - Yellow
-                } else {
-                    mediumBlueMarker // Default - Blue
-                }
-
-                Marker(
-                    state = markerState,
-                    title = "WP ${index + 1}",
-                    icon = markerIcon,
-                    anchor = Offset(0.5f, 0.5f),
-                    draggable = true,  // Enable dragging
-                    onClick = {
-                        // Marker clicked, can be dragged now
-                        onWaypointClick(index) // Handle waypoint click
-                        true
+                    // Determine the marker icon based on selection state
+                    val markerIcon = if (selectedWaypointIndex == index) {
+                        mediumYellowMarker // Selected waypoint - Yellow
+                    } else {
+                        mediumBlueMarker // Default - Blue
                     }
-                )
+
+                    Marker(
+                        state = markerState,
+                        title = "WP ${index + 1}",
+                        icon = markerIcon,
+                        anchor = Offset(0.5f, 0.5f),
+                        draggable = true,  // Enable dragging
+                        onClick = {
+                            // Marker clicked, can be dragged now
+                            onWaypointClick(index) // Handle waypoint click
+                            true
+                        }
+                    )
+                }
             }
             if (points.size > 1) {
                 key(points) {
@@ -291,34 +295,36 @@ fun GcsMap(
         // Survey polygon outline (purple) - Now draggable!
         if (surveyPolygon.isNotEmpty()) {
             surveyPolygon.forEachIndexed { index, point ->
-                val markerState = rememberMarkerState(position = point)
+                key(index) { // Use key to ensure proper recomposition per marker
+                    val markerState = rememberMarkerState(position = point)
 
-                // Listen to marker position changes for drag events
-                LaunchedEffect(markerState.position, point) {
-                    if (markerState.position != point) {
-                        onPolygonPointDrag(index, markerState.position)
+                    // Listen to marker position changes for drag events
+                    LaunchedEffect(markerState.position) {
+                        if (markerState.position != point) {
+                            onPolygonPointDrag(index, markerState.position)
+                        }
                     }
-                }
 
-                // Determine the marker icon based on selection state
-                val markerIcon = if (selectedPolygonPointIndex == index) {
-                    mediumYellowMarker // Selected polygon point - Yellow
-                } else {
-                    mediumVioletMarker // Default - Purple
-                }
-
-                Marker(
-                    state = markerState,
-                    title = "P${index + 1}",
-                    icon = markerIcon,
-                    anchor = Offset(0.5f, 0.5f),
-                    draggable = true,  // Enable dragging
-                    onClick = {
-                        // Marker clicked, can be dragged now
-                        onPolygonPointClick(index) // Handle polygon point click
-                        true
+                    // Determine the marker icon based on selection state
+                    val markerIcon = if (selectedPolygonPointIndex == index) {
+                        mediumYellowMarker // Selected polygon point - Yellow
+                    } else {
+                        mediumVioletMarker // Default - Purple
                     }
-                )
+
+                    Marker(
+                        state = markerState,
+                        title = "P${index + 1}",
+                        icon = markerIcon,
+                        anchor = Offset(0.5f, 0.5f),
+                        draggable = true,  // Enable dragging
+                        onClick = {
+                            // Marker clicked, can be dragged now
+                            onPolygonPointClick(index) // Handle polygon point click
+                            true
+                        }
+                    )
+                }
             }
 
             if (surveyPolygon.size > 2) {

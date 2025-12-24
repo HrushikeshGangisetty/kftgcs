@@ -38,6 +38,37 @@ object GeofenceUtils {
     }
 
     /**
+     * Generates a square geofence around a list of waypoints
+     * @param waypoints List of waypoints to create square around
+     * @param bufferDistanceMeters Buffer distance in meters (default 5m)
+     * @return List of 4 LatLng points forming a square that includes all waypoints
+     */
+    fun generateSquareGeofence(waypoints: List<LatLng>, bufferDistanceMeters: Double = 5.0): List<LatLng> {
+        if (waypoints.isEmpty()) return emptyList()
+
+        // Find bounding box
+        val minLat = waypoints.minOf { it.latitude }
+        val maxLat = waypoints.maxOf { it.latitude }
+        val minLon = waypoints.minOf { it.longitude }
+        val maxLon = waypoints.maxOf { it.longitude }
+
+        val earthRadius = 6371000.0
+        val avgLat = (minLat + maxLat) / 2
+
+        // Convert buffer distance to degrees
+        val latBuffer = (bufferDistanceMeters / earthRadius) * 180 / PI
+        val lonBuffer = (bufferDistanceMeters / (earthRadius * cos(avgLat * PI / 180))) * 180 / PI
+
+        // Create square with buffer
+        return listOf(
+            LatLng(minLat - latBuffer, minLon - lonBuffer), // Bottom-left
+            LatLng(maxLat + latBuffer, minLon - lonBuffer), // Top-left
+            LatLng(maxLat + latBuffer, maxLon + lonBuffer), // Top-right
+            LatLng(minLat - latBuffer, maxLon + lonBuffer)  // Bottom-right
+        )
+    }
+
+    /**
      * Creates a circular buffer around a single point
      */
     private fun createCircularBuffer(center: LatLng, radiusMeters: Double, numPoints: Int = 32): List<LatLng> {

@@ -608,6 +608,15 @@ class SharedViewModel : ViewModel() {
     // Store home position for geofence calculation
     private val _homePosition = MutableStateFlow<LatLng?>(null)
 
+    // Geofence shape: true for square, false for polygon (default square for MainPage)
+    private val _useSquareGeofence = MutableStateFlow(true)
+    val useSquareGeofence: StateFlow<Boolean> = _useSquareGeofence.asStateFlow()
+
+    fun setGeofenceShape(useSquare: Boolean) {
+        _useSquareGeofence.value = useSquare
+        updateGeofencePolygon()
+    }
+
     // Spray control state
     private val _sprayEnabled = MutableStateFlow(false)
     val sprayEnabled: StateFlow<Boolean> = _sprayEnabled.asStateFlow()
@@ -739,15 +748,19 @@ class SharedViewModel : ViewModel() {
         if (allWaypoints.isNotEmpty()) {
             // Use default 5m buffer distance
             val bufferDistance = _fenceRadius.value.toDouble().coerceAtLeast(5.0)
-            Log.i("Geofence", "Generating polygon buffer with ${allWaypoints.size} points, buffer distance: ${bufferDistance}m")
-            
-            val polygonBuffer = GeofenceUtils.generatePolygonBuffer(allWaypoints, bufferDistance)
-            
-            if (polygonBuffer.size >= 3) {
-                _geofencePolygon.value = polygonBuffer
-                Log.i("Geofence", "✓ Geofence polygon generated successfully with ${polygonBuffer.size} vertices")
+            Log.i("Geofence", "Generating ${if (_useSquareGeofence.value) "square" else "polygon"} geofence with ${allWaypoints.size} points, buffer distance: ${bufferDistance}m")
+
+            val geofenceShape = if (_useSquareGeofence.value) {
+                GeofenceUtils.generateSquareGeofence(allWaypoints, bufferDistance)
             } else {
-                Log.w("Geofence", "Failed to generate valid polygon buffer")
+                GeofenceUtils.generatePolygonBuffer(allWaypoints, bufferDistance)
+            }
+
+            if (geofenceShape.size >= 3) {
+                _geofencePolygon.value = geofenceShape
+                Log.i("Geofence", "✓ Geofence ${if (_useSquareGeofence.value) "square" else "polygon"} generated successfully with ${geofenceShape.size} vertices")
+            } else {
+                Log.w("Geofence", "Failed to generate valid geofence")
                 _geofencePolygon.value = emptyList()
             }
         } else {

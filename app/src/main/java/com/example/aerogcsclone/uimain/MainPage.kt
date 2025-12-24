@@ -63,6 +63,9 @@ fun MainPage(
     val geofenceEnabled by telemetryViewModel.geofenceEnabled.collectAsState()
     val geofencePolygon by telemetryViewModel.geofencePolygon.collectAsState()
 
+    // Selected geofence point tracking for adjustment
+    var selectedGeofencePointIndex by remember { mutableStateOf<Int?>(null) }
+
     // Map camera state controlled from parent so refresh can move it
     val cameraPositionState = rememberCameraPositionState()
 
@@ -143,7 +146,22 @@ fun MainPage(
                 autoCenter = false,
                 heading = telemetryState.heading,
                 geofencePolygon = geofencePolygon,
-                geofenceEnabled = geofenceEnabled
+                geofenceEnabled = geofenceEnabled,
+                // Geofence adjustment parameters
+                onGeofencePointDrag = { index, newPosition ->
+                    // Update the geofence polygon when user drags a vertex
+                    if (index in geofencePolygon.indices) {
+                        val updatedPolygon = geofencePolygon.toMutableList().apply {
+                            this[index] = newPosition
+                        }
+                        telemetryViewModel.updateGeofencePolygonManually(updatedPolygon)
+                    }
+                },
+                selectedGeofencePointIndex = selectedGeofencePointIndex,
+                onGeofencePointClick = { index ->
+                    selectedGeofencePointIndex = index
+                },
+                geofenceAdjustmentEnabled = geofenceEnabled
             )
 
             StatusPanel(
