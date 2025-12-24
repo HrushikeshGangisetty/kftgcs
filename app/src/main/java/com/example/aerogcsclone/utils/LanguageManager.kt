@@ -214,8 +214,11 @@ object AppStrings {
     // Authentication Screens
     val loginWithPavaman get() = getString("Login with pavaman", "పవమాన్‌తో లాగిన్ చేయండి")
     val loginCredentials get() = getString("Login with pavaman credentials", "పవమాన్ ఆధారాలతో లాగిన్ చేయండి")
+    val firstName get() = getString("First Name", "మొదటి పేరు")
+    val lastName get() = getString("Last Name", "చివరి పేరు")
     val email get() = getString("Email", "ఇమెయిల్")
     val password get() = getString("Password", "పాస్‌వర్డ్")
+    val confirmPassword get() = getString("Confirm Password", "పాస్‌వర్డ్ నిర్ధారించండి")
     val login get() = getString("Login", "లాగిన్")
     val signInWithGoogle get() = getString("Sign in with Google", "గూగుల్‌తో సైన్ ఇన్ చేయండి")
     val signupWithPavaman get() = getString("Signup with Pavaman", "పవమాన్‌తో సైన్అప్ చేయండి")
