@@ -70,9 +70,9 @@ fun TopNavBar(
     }
 
     // Set nav bar color based on connection status - solid colors
-    // Green when connected, Red when disconnected
+    // Dark green when connected, Red when disconnected
     val navBarColor = if (telemetryState.connected) {
-        Color(0xFF4CAF50) // Green color for connected state
+        Color(0xFF2E7D32) // Dark green color for connected state (Material Green 800)
     } else {
         Color(0xFFE53935) // Red color for disconnected state
     }
