@@ -208,6 +208,10 @@ object GridMissionConverter {
             lastLineIndex = currentLineIndex
 
             // Add the actual waypoint
+            // When holdNosePosition is true, set param4 to NaN to prevent yaw changes at each waypoint
+            // This locks the yaw to the initial heading set by CONDITION_YAW after takeoff
+            val waypointYaw = if (holdNosePosition) Float.NaN else 0f
+
             missionItems.add(
                 MissionItemInt(
                     targetSystem = fcuSystemId,
@@ -220,7 +224,7 @@ object GridMissionConverter {
                     param1 = 0f, // Hold time (0 = no hold)
                     param2 = 3f, // Acceptance radius in meters (2-5m recommended)
                     param3 = 0f, // Pass radius (0 = pass through waypoint)
-                    param4 = 0f, // Yaw angle (0 = no change, or calculate from next waypoint)
+                    param4 = waypointYaw, // NaN = don't change yaw (lock nose), 0 = face next waypoint
                     x = (waypoint.position.latitude * 1E7).toInt(),
                     y = (waypoint.position.longitude * 1E7).toInt(),
                     z = waypoint.altitude
@@ -281,10 +285,14 @@ object GridMissionConverter {
 
     /**
      * Convert single waypoint to mission item
+     * @param waypoint Grid waypoint to convert
+     * @param sequence Mission sequence number
+     * @param holdNosePosition If true, sets param4 to NaN to prevent yaw changes
      */
     private fun waypointToMissionItem(
         waypoint: GridWaypoint,
-        sequence: Int
+        sequence: Int,
+        holdNosePosition: Boolean = false
     ): MissionItemInt {
         return MissionItemInt(
             targetSystem = 0u,
@@ -297,7 +305,7 @@ object GridMissionConverter {
             param1 = 0f, // Hold time (0 = no hold)
             param2 = 3f, // Acceptance radius in meters (2-5m recommended)
             param3 = 0f, // Pass radius (0 = pass through waypoint)
-            param4 = 0f, // Yaw angle (0 = no change)
+            param4 = if (holdNosePosition) Float.NaN else 0f, // NaN = don't change yaw
             x = (waypoint.position.latitude * 1E7).toInt(),
             y = (waypoint.position.longitude * 1E7).toInt(),
             z = waypoint.altitude
