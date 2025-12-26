@@ -157,6 +157,10 @@ fun GcsMap(
     gridLines: List<List<LatLng>> = emptyList(),
     gridWaypoints: List<LatLng> = emptyList(),
     heading: Float? = null,
+    // Split Plan parameters - for visual feedback
+    splitPlanMode: Boolean = false,
+    splitGridLines: List<List<LatLng>> = emptyList(),
+    splitGridWaypoints: List<LatLng> = emptyList(),
     // Geofence parameters - now using polygon instead of circle
     geofencePolygon: List<LatLng> = emptyList(),
     geofenceEnabled: Boolean = false,
@@ -476,50 +480,115 @@ fun GcsMap(
             }
         }
 
-        // Grid lines (green)
+        // Grid lines (green for original, or gray when in split mode)
         gridLines.forEach { line ->
             if (line.size >= 2) {
                 Polyline(
                     points = line,
                     width = 2f,
-                    color = Color.Green
+                    color = if (splitPlanMode) Color.Gray.copy(alpha = 0.5f) else Color.Green
                 )
             }
         }
 
-        // Grid waypoints (first: S/green with text, last: E/red with text, others: orange)
-        if (gridWaypoints.isNotEmpty()) {
-            gridWaypoints.forEachIndexed { index, waypoint ->
-                val isFirst = index == 0
-                val isLast = index == gridWaypoints.lastIndex
+        // Split Plan: Highlight selected grid lines in yellow
+        if (splitPlanMode && splitGridLines.isNotEmpty()) {
+            splitGridLines.forEach { line ->
+                if (line.size >= 2) {
+                    Polyline(
+                        points = line,
+                        width = 4f,  // Thicker line for selected portion
+                        color = Color.Yellow
+                    )
+                }
+            }
+        }
 
-                when {
-                    isFirst -> {
-                        // Start marker - Green with "S" text
-                        Marker(
-                            state = MarkerState(position = waypoint),
-                            title = "Start",
-                            icon = startMarker,
-                            anchor = Offset(0.5f, 0.5f)
-                        )
+        // Grid waypoints (first: S/green with text, last: E/red with text, others: orange)
+        // In split plan mode, show original waypoints as gray/dimmed, and split waypoints highlighted
+        if (gridWaypoints.isNotEmpty()) {
+            if (splitPlanMode && splitGridWaypoints.isNotEmpty()) {
+                // In split mode: show original waypoints as dimmed (no start/end markers)
+                gridWaypoints.forEachIndexed { index, waypoint ->
+                    // Show all original waypoints as small gray markers
+                    Marker(
+                        state = MarkerState(position = waypoint),
+                        title = "G${index + 1}",
+                        icon = mediumOrangeMarker,
+                        anchor = Offset(0.5f, 0.5f),
+                        alpha = 0.3f // Dimmed
+                    )
+                }
+
+                // Now show split waypoints with proper start/end markers
+                splitGridWaypoints.forEachIndexed { index, waypoint ->
+                    val isFirst = index == 0
+                    val isLast = index == splitGridWaypoints.lastIndex
+
+                    when {
+                        isFirst -> {
+                            // Start marker - Green with "S" text for split start
+                            Marker(
+                                state = MarkerState(position = waypoint),
+                                title = "Split Start",
+                                icon = startMarker,
+                                anchor = Offset(0.5f, 0.5f)
+                            )
+                        }
+                        isLast -> {
+                            // End marker - Red with "E" text for split end
+                            Marker(
+                                state = MarkerState(position = waypoint),
+                                title = "Split End",
+                                icon = endMarker,
+                                anchor = Offset(0.5f, 0.5f)
+                            )
+                        }
+                        else -> {
+                            // Intermediate waypoints - Yellow (highlighted)
+                            Marker(
+                                state = MarkerState(position = waypoint),
+                                title = "S${index + 1}",
+                                icon = mediumYellowMarker,
+                                anchor = Offset(0.5f, 0.5f)
+                            )
+                        }
                     }
-                    isLast -> {
-                        // End marker - Red with "E" text
-                        Marker(
-                            state = MarkerState(position = waypoint),
-                            title = "End",
-                            icon = endMarker,
-                            anchor = Offset(0.5f, 0.5f)
-                        )
-                    }
-                    else -> {
-                        // Intermediate waypoints - Orange
-                        Marker(
-                            state = MarkerState(position = waypoint),
-                            title = "G${index + 1}",
-                            icon = mediumOrangeMarker,
-                            anchor = Offset(0.5f, 0.5f)
-                        )
+                }
+            } else {
+                // Normal mode: show regular waypoints
+                gridWaypoints.forEachIndexed { index, waypoint ->
+                    val isFirst = index == 0
+                    val isLast = index == gridWaypoints.lastIndex
+
+                    when {
+                        isFirst -> {
+                            // Start marker - Green with "S" text
+                            Marker(
+                                state = MarkerState(position = waypoint),
+                                title = "Start",
+                                icon = startMarker,
+                                anchor = Offset(0.5f, 0.5f)
+                            )
+                        }
+                        isLast -> {
+                            // End marker - Red with "E" text
+                            Marker(
+                                state = MarkerState(position = waypoint),
+                                title = "End",
+                                icon = endMarker,
+                                anchor = Offset(0.5f, 0.5f)
+                            )
+                        }
+                        else -> {
+                            // Intermediate waypoints - Orange
+                            Marker(
+                                state = MarkerState(position = waypoint),
+                                title = "G${index + 1}",
+                                icon = mediumOrangeMarker,
+                                anchor = Offset(0.5f, 0.5f)
+                            )
+                        }
                     }
                 }
             }

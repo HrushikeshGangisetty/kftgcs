@@ -67,6 +67,10 @@ class GridGenerator {
         val gridLines = mutableListOf<Pair<LatLng, LatLng>>()
         val waypoints = mutableListOf<GridWaypoint>()
 
+        // CRITICAL: Use a separate counter for actual grid lines that intersect polygon
+        // This ensures lineIndex matches the gridLines array index
+        var actualLineIndex = 0
+
         // Generate grid lines
         for (i in 0 until numLines) {
             val offset = (i - numLines / 2.0) * params.lineSpacing
@@ -99,19 +103,21 @@ class GridGenerator {
                 gridLines.add(Pair(start, end))
 
                 // Alternate direction for boustrophedon pattern (back and forth)
-                val (waypointStart, waypointEnd) = if (i % 2 == 0) {
+                // Use actualLineIndex for alternation to maintain proper back-and-forth pattern
+                val (waypointStart, waypointEnd) = if (actualLineIndex % 2 == 0) {
                     Pair(start, end)
                 } else {
                     Pair(end, start)
                 }
 
                 // Add waypoints for this line
+                // CRITICAL: Use actualLineIndex (not i) to ensure lineIndex matches gridLines index
                 waypoints.add(GridWaypoint(
                     position = waypointStart,
                     altitude = params.altitude,
                     speed = if (params.includeSpeedCommands) params.speed else null,
                     isLineStart = true,
-                    lineIndex = i
+                    lineIndex = actualLineIndex
                 ))
 
                 waypoints.add(GridWaypoint(
@@ -119,8 +125,11 @@ class GridGenerator {
                     altitude = params.altitude,
                     speed = if (params.includeSpeedCommands) params.speed else null,
                     isLineEnd = true,
-                    lineIndex = i
+                    lineIndex = actualLineIndex
                 ))
+
+                // Increment actual line counter after adding a valid line
+                actualLineIndex++
             }
         }
 

@@ -372,6 +372,20 @@ object AppStrings {
     val waypointReordered get() = getString("Waypoint reordered", "వేపాయింట్ క్రమం మార్చబడింది")
     val resumeFailed get() = getString("Resume failed", "పునఃప్రారంభం విఫలమైంది")
     val unknownError get() = getString("Unknown error", "తెలియని లోపం")
+
+    // Split Plan Feature
+    val splitPlanTitle get() = getString("Split Plan", "ప్లాన్ విభజించు")
+    val splitPlanDescription get() = getString("Select the portion of the grid to fly", "ఎగరడానికి గ్రిడ్ భాగాన్ని ఎంచుకోండి")
+    val splitStart get() = getString("Start", "ప్రారంభం")
+    val splitEnd get() = getString("End", "ముగింపు")
+    val gridLinesSelected get() = getString("Grid Lines Selected", "ఎంచుకున్న గ్రిడ్ లైన్లు")
+    val applySplit get() = getString("Apply Split", "విభజన వర్తింపజేయండి")
+    val cancelSplit get() = getString("Cancel", "రద్దు చేయండి")
+    val splitApplied get() = getString("Split plan applied successfully", "విభజన ప్లాన్ విజయవంతంగా వర్తింపజేయబడింది")
+    val noGridToSplit get() = getString("No grid mission to split. Please create a grid survey first.", "విభజించడానికి గ్రిడ్ మిషన్ లేదు. దయచేసి ముందుగా గ్రిడ్ సర్వే సృష్టించండి.")
+    val splitPlanBtn get() = getString("Split Plan", "ప్లాన్ విభజించు")
+    val originalPlan get() = getString("Original Plan", "అసలు ప్లాన్")
+    val splitPortion get() = getString("Split Portion", "విభజన భాగం")
 }
 
 // Composable for reactive language updates

@@ -85,13 +85,10 @@ fun MainPage(
 
     val notifications by telemetryViewModel.notifications.collectAsState()
     val isNotificationPanelVisible by telemetryViewModel.isNotificationPanelVisible.collectAsState()
-    val splitPlanActive by telemetryViewModel.splitPlanActive.collectAsState()
 
     // Collect spray status popup
     val sprayStatusPopup by telemetryViewModel.sprayStatusPopup.collectAsState()
 
-    // Split plan confirmation dialog
-    var showSplitPlanDialog by remember { mutableStateOf(false) }
 
     // Resume Mission dialog states
     var showResumeWarningDialog by remember { mutableStateOf(false) }
@@ -248,11 +245,6 @@ fun MainPage(
                         Toast.makeText(context, "No GPS location available", Toast.LENGTH_SHORT).show()
                     }
                 },
-                onSplitPlan = {
-                    // Show split plan confirmation dialog
-                    showSplitPlanDialog = true
-                },
-                splitPlanActive = splitPlanActive,
                 currentMode = telemetryState.mode
             )
 
@@ -276,134 +268,25 @@ fun MainPage(
             // TopNavBar removed - it's already handled in AppNavGraph.kt
         }
 
-        // Mission Complete Popup (must be inside the composable)
-        var lastMissionTime by remember { mutableStateOf<Long?>(null) }
-        var lastMissionDistance by remember { mutableStateOf<Float?>(null) }
-        var lastLitresConsumed by remember { mutableStateOf<Float?>(null) }
-        var missionJustCompleted by remember { mutableStateOf(false) }
-        // Track the last handled completion time to prevent duplicate popups
+        // Mission Complete - NO POPUP, notification is sufficient
+        // Track mission completion for logging purposes only
         var lastHandledCompletionTime by remember { mutableStateOf(0L) }
 
-        // FIXED: Only use missionCompleted as key, and track handled state internally
-        // The issue was that having missionCompletedHandled as a key caused re-triggers
         LaunchedEffect(telemetryState.missionCompleted, telemetryState.lastMissionElapsedSec) {
-            // Only show popup if:
-            // 1. missionCompleted is true
-            // 2. We haven't already handled this specific completion
-            // 3. Dialog isn't already showing
             val currentCompletionTime = telemetryState.lastMissionElapsedSec ?: 0L
             val isNewCompletion = currentCompletionTime != lastHandledCompletionTime && currentCompletionTime > 0L
 
-            if (telemetryState.missionCompleted && !missionJustCompleted && isNewCompletion) {
-                // Capture final values
-                lastMissionTime = telemetryState.lastMissionElapsedSec
-                lastMissionDistance = telemetryState.totalDistanceMeters
-                lastLitresConsumed = telemetryState.sprayTelemetry.consumedLiters
+            if (telemetryState.missionCompleted && isNewCompletion) {
+                val missionTime = telemetryState.lastMissionElapsedSec
+                val missionDistance = telemetryState.totalDistanceMeters
+                val litresConsumed = telemetryState.sprayTelemetry.consumedLiters
 
-                Log.i("MainPage", "✅ Mission completed - Time: ${lastMissionTime}s, Distance: ${lastMissionDistance}m, Litres: ${lastLitresConsumed}L")
-
-                // Only show popup if mission actually ran for meaningful duration
-                // Validate that at least one of the following is true:
-                // 1. Mission ran for at least 5 seconds
-                // 2. Distance covered is at least 5 meters
-                val missionTimeValid = (lastMissionTime ?: 0L) >= 5
-                val distanceValid = (lastMissionDistance ?: 0f) >= 5f
-
-                if (missionTimeValid || distanceValid) {
-                    Log.i("MainPage", "✅ Mission data valid - showing completion dialog")
-                    missionJustCompleted = true
-                    lastHandledCompletionTime = currentCompletionTime
-                } else {
-                    Log.w("MainPage", "⚠️ Mission completed but no meaningful data captured - skipping dialog")
-                    lastHandledCompletionTime = currentCompletionTime
-                }
+                Log.i("MainPage", "✅ Mission completed - Time: ${missionTime}s, Distance: ${missionDistance}m, Litres: ${litresConsumed}L")
+                lastHandledCompletionTime = currentCompletionTime
+                // No popup - notification already shown by UnifiedFlightTracker
             }
         }
 
-        if (missionJustCompleted) {
-            AlertDialog(
-                onDismissRequest = {
-                    missionJustCompleted = false
-                    // Reset values after dismissing
-                    lastMissionTime = null
-                    lastMissionDistance = null
-                    lastLitresConsumed = null
-                },
-                confirmButton = {
-                    Button(
-                        onClick = {
-                            missionJustCompleted = false
-                            // Reset values after dismissing
-                            lastMissionTime = null
-                            lastMissionDistance = null
-                            lastLitresConsumed = null
-                        },
-                        colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary)
-                    ) {
-                        Text(AppStrings.ok, color = MaterialTheme.colorScheme.onPrimary)
-                    }
-                },
-                title = {
-                    Text(AppStrings.missionCompleted, style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
-                },
-                text = {
-                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                        val timeStr = lastMissionTime?.let { sec ->
-                            val h = sec / 3600
-                            val m = (sec % 3600) / 60
-                            val s = sec % 60
-                            if (h > 0) "%02d:%02d:%02d".format(h, m, s) else "%02d:%02d".format(m, s)
-                        } ?: "N/A"
-                        val distStr = lastMissionDistance?.let { dist ->
-                            if (dist < 1000f) "%.1f m".format(dist)
-                            else "%.2f km".format(dist / 1000f)
-                        } ?: "N/A"
-                        val litresStr = lastLitresConsumed?.let { litres ->
-                            "%.2f L".format(litres)
-                        } ?: "N/A"
-
-                        Text("${AppStrings.totalTimeTaken}: $timeStr", style = MaterialTheme.typography.bodyLarge)
-                        Spacer(modifier = Modifier.height(8.dp))
-                        Text("${AppStrings.totalDistanceCovered}: $distStr", style = MaterialTheme.typography.bodyLarge)
-                        Spacer(modifier = Modifier.height(8.dp))
-                        Text("${AppStrings.liquidConsumed}: $litresStr", style = MaterialTheme.typography.bodyLarge)
-                    }
-                }
-            )
-        }
-
-        // Split Plan Confirmation Dialog
-        if (showSplitPlanDialog) {
-            AlertDialog(
-                onDismissRequest = { showSplitPlanDialog = false },
-                confirmButton = {
-                    Button(
-                        onClick = {
-                            // Confirm split plan
-                            telemetryViewModel.confirmSplitPlan()
-                            showSplitPlanDialog = false
-                        },
-                        colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary)
-                    ) {
-                        Text(AppStrings.yes, color = MaterialTheme.colorScheme.onPrimary)
-                    }
-                },
-                dismissButton = {
-                    Button(
-                        onClick = { showSplitPlanDialog = false },
-                        colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.secondary)
-                    ) {
-                        Text(AppStrings.no, color = MaterialTheme.colorScheme.onSecondary)
-                    }
-                },
-                title = {
-                    Text(AppStrings.confirmSplitPlan, style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
-                },
-                text = {
-                    Text(AppStrings.splitPlanMessage, style = MaterialTheme.typography.bodyLarge)
-                }
-            )
-        }
 
         // Resume Mission Warning Dialog (Step 1)
         if (showResumeWarningDialog) {
@@ -698,8 +581,6 @@ fun FloatingButtons(
     onToggleMapType: () -> Unit,
     onStartMission: () -> Unit,
     onRefresh: () -> Unit,
-    onSplitPlan: () -> Unit,
-    splitPlanActive: Boolean,
     currentMode: String?
 ) {
     Column(
@@ -733,31 +614,6 @@ fun FloatingButtons(
             }
         }
 
-        // Split Plan Button
-        FloatingActionButton(
-            onClick = { onSplitPlan() },
-            containerColor = if (splitPlanActive) Color(0xFFFF9800).copy(alpha = 0.7f) else Color.Black.copy(alpha = 0.7f),
-            modifier = Modifier.size(width = 70.dp, height = 56.dp)
-        ) {
-            Column(
-                horizontalAlignment = Alignment.CenterHorizontally,
-                verticalArrangement = Arrangement.Center
-            ) {
-                Icon(
-                    Icons.Default.CallSplit,
-                    contentDescription = AppStrings.split,
-                    tint = Color.White,
-                    modifier = Modifier.size(20.dp)
-                )
-                Spacer(modifier = Modifier.height(2.dp))
-                Text(
-                    text = if (splitPlanActive) AppStrings.resumeBtn else AppStrings.split,
-                    color = Color.White,
-                    fontSize = 9.sp,
-                    fontWeight = FontWeight.Medium
-                )
-            }
-        }
 
         // Recenter Button
         FloatingActionButton(

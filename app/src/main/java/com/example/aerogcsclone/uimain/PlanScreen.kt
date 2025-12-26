@@ -99,6 +99,17 @@ fun PlanScreen(
     // Selected polygon point tracking for deletion and dragging
     var selectedPolygonPointIndex by remember { mutableStateOf<Int?>(null) }
 
+    // ===== SPLIT PLAN STATE =====
+    // Split Plan mode controls
+    var isSplitPlanMode by remember { mutableStateOf(false) }
+    // Slider range: 0f to 1f representing 0% to 100%
+    var splitStartPercent by remember { mutableStateOf(0f) }
+    var splitEndPercent by remember { mutableStateOf(1f) }
+    // Original grid result backup (to preserve original mission)
+    var originalGridResult by remember { mutableStateOf<GridSurveyResult?>(null) }
+    // Split grid result for upload (generated from slider selection)
+    var splitGridResult by remember { mutableStateOf<GridSurveyResult?>(null) }
+
     // Selected geofence point tracking for adjustment
     var selectedGeofencePointIndex by remember { mutableStateOf<Int?>(null) }
 
@@ -167,6 +178,101 @@ fun PlanScreen(
                 }
             }
         }
+    }
+
+    /**
+     * Generate a split grid result based on start and end percentages.
+     * Maps percentage (0-100%) to grid line indices.
+     * The split operates strictly along grid lines, not by waypoint count or distance.
+     *
+     * CRITICAL: Re-indexes waypoints so lineIndex starts from 0 for proper mission upload.
+     * Also updates isLineStart/isLineEnd flags for the new subset.
+     */
+    fun generateSplitGridResult(
+        sourceGrid: GridSurveyResult,
+        startPercent: Float,
+        endPercent: Float
+    ): GridSurveyResult {
+        if (sourceGrid.gridLines.isEmpty() || sourceGrid.waypoints.isEmpty()) {
+            android.util.Log.w("SplitPlan", "Empty source grid - returning as-is")
+            return sourceGrid
+        }
+
+        val totalLines = sourceGrid.numLines
+        if (totalLines == 0) {
+            android.util.Log.w("SplitPlan", "Zero total lines - returning source grid")
+            return sourceGrid
+        }
+
+        // Map percentage to grid line index
+        // startPercent=0% means start from first grid line (index 0)
+        // endPercent=100% means include all grid lines up to the last one
+        val startLineIndex = (startPercent * (totalLines - 1)).toInt().coerceIn(0, totalLines - 1)
+        val endLineIndex = (endPercent * (totalLines - 1)).toInt().coerceIn(0, totalLines - 1)
+
+        android.util.Log.d("SplitPlan", "Split calculation: totalLines=$totalLines, startPercent=$startPercent, endPercent=$endPercent")
+        android.util.Log.d("SplitPlan", "Line indices: startLineIndex=$startLineIndex, endLineIndex=$endLineIndex")
+
+        // Ensure valid range
+        if (startLineIndex > endLineIndex) {
+            android.util.Log.w("SplitPlan", "Invalid range: startLineIndex > endLineIndex")
+            return GridSurveyResult(
+                waypoints = emptyList(),
+                gridLines = emptyList(),
+                totalDistance = 0.0,
+                estimatedTime = 0.0,
+                numLines = 0,
+                polygonArea = sourceGrid.polygonArea
+            )
+        }
+
+        // Filter grid lines within the selected range
+        val selectedGridLines = sourceGrid.gridLines.filterIndexed { index, _ ->
+            index in startLineIndex..endLineIndex
+        }
+
+        // Filter waypoints that belong to the selected grid lines
+        // Each grid line has 2 waypoints (start and end)
+        val filteredWaypoints = sourceGrid.waypoints.filter { wp ->
+            wp.lineIndex in startLineIndex..endLineIndex
+        }
+
+        android.util.Log.d("SplitPlan", "Filtered: ${selectedGridLines.size} lines, ${filteredWaypoints.size} waypoints")
+
+        // CRITICAL: Re-index waypoints so lineIndex starts from 0
+        // This ensures proper mission upload with correct line start/end detection
+        val reindexedWaypoints = filteredWaypoints.map { wp ->
+            val newLineIndex = wp.lineIndex - startLineIndex
+            wp.copy(lineIndex = newLineIndex)
+        }
+
+        // Log first few reindexed waypoints for debugging
+        reindexedWaypoints.take(6).forEachIndexed { idx, wp ->
+            android.util.Log.d("SplitPlan", "WP[$idx]: lineIndex=${wp.lineIndex}, isStart=${wp.isLineStart}, isEnd=${wp.isLineEnd}")
+        }
+
+        // Recalculate total distance for selected waypoints
+        var totalDistance = 0.0
+        for (i in 0 until reindexedWaypoints.size - 1) {
+            totalDistance += GridUtils.haversineDistance(
+                reindexedWaypoints[i].position,
+                reindexedWaypoints[i + 1].position
+            )
+        }
+
+        // Calculate estimated time based on speed
+        val estimatedTime = if (surveySpeed > 0) totalDistance / surveySpeed else 0.0
+
+        android.util.Log.i("SplitPlan", "✓ Generated split: ${reindexedWaypoints.size} waypoints, ${selectedGridLines.size} lines, ${String.format("%.1f", totalDistance)}m")
+
+        return GridSurveyResult(
+            waypoints = reindexedWaypoints,
+            gridLines = selectedGridLines,
+            totalDistance = totalDistance,
+            estimatedTime = estimatedTime,
+            numLines = selectedGridLines.size,
+            polygonArea = sourceGrid.polygonArea
+        )
     }
 
     // Handle mission template UI state changes
@@ -250,6 +356,13 @@ fun PlanScreen(
         }
     }
 
+    // Update split grid when sliders change (Split Plan mode)
+    LaunchedEffect(isSplitPlanMode, splitStartPercent, splitEndPercent, originalGridResult) {
+        if (isSplitPlanMode && originalGridResult != null) {
+            splitGridResult = generateSplitGridResult(originalGridResult!!, splitStartPercent, splitEndPercent)
+        }
+    }
+
     Scaffold(
         floatingActionButton = {
             // Bottom right - Delete waypoint button only (hidden when plan is saved)
@@ -327,6 +440,14 @@ fun PlanScreen(
                 gridLines = gridResult?.gridLines?.map { pair -> listOf(pair.first, pair.second) } ?: emptyList(),
                 gridWaypoints = gridResult?.waypoints?.map { it.position } ?: emptyList(),
                 heading = telemetryState.heading,
+                // Split Plan visual feedback parameters
+                splitPlanMode = isSplitPlanMode,
+                splitGridLines = if (isSplitPlanMode && splitGridResult != null) {
+                    splitGridResult!!.gridLines.map { pair -> listOf(pair.first, pair.second) }
+                } else emptyList(),
+                splitGridWaypoints = if (isSplitPlanMode && splitGridResult != null) {
+                    splitGridResult!!.waypoints.map { it.position }
+                } else emptyList(),
                 geofencePolygon = if (hasStartedPlanning) localGeofencePolygon else geofencePolygon,
                 geofenceEnabled = geofenceEnabled,
                 // Handle waypoint dragging (disabled when plan is saved)
@@ -548,6 +669,36 @@ fun PlanScreen(
                             Text(AppStrings.editPlan)
                         }
 
+                        // Split Plan button - only shown for grid survey missions after plan is saved
+                        if (isGridSurveyMode && gridResult != null && gridResult!!.gridLines.isNotEmpty()) {
+                            ElevatedButton(
+                                onClick = {
+                                    // Enter Split Plan mode
+                                    originalGridResult = gridResult
+                                    splitStartPercent = 0f
+                                    splitEndPercent = 1f
+                                    splitGridResult = gridResult
+                                    isSplitPlanMode = true
+                                },
+                                colors = ButtonDefaults.elevatedButtonColors(
+                                    containerColor = Color(0xFFFF9800), // Orange background
+                                    contentColor = Color.White
+                                ),
+                                elevation = ButtonDefaults.elevatedButtonElevation(
+                                    defaultElevation = 6.dp
+                                ),
+                                modifier = Modifier.widthIn(min = 120.dp)
+                            ) {
+                                Icon(
+                                    Icons.Default.CallSplit,
+                                    contentDescription = null,
+                                    modifier = Modifier.size(18.dp)
+                                )
+                                Spacer(modifier = Modifier.width(8.dp))
+                                Text(AppStrings.splitPlanBtn)
+                            }
+                        }
+
                         // Upload Mission button - only shown after plan is saved
                         ElevatedButton(
                             onClick = {
@@ -555,13 +706,20 @@ fun PlanScreen(
                                 val homeLon = telemetryState.longitude ?: 0.0
 
                                 if (isGridSurveyMode && gridResult != null) {
+                                    // Use split grid result if in split plan mode, otherwise use original
+                                    val gridToUpload = if (isSplitPlanMode && splitGridResult != null && splitGridResult!!.waypoints.isNotEmpty()) {
+                                        splitGridResult!!
+                                    } else {
+                                        gridResult!!
+                                    }
+
                                     // Grid survey mission upload
                                     val homePosition = LatLng(homeLat, homeLon)
                                     val currentHeading = telemetryState.heading ?: 0f
                                     val fcuSystemId = telemetryViewModel.getFcuSystemId()
                                     val fcuComponentId = telemetryViewModel.getFcuComponentId()
                                     val builtMission = GridMissionConverter.convertToMissionItems(
-                                        gridResult = gridResult!!,
+                                        gridResult = gridToUpload,
                                         homePosition = homePosition,
                                         holdNosePosition = holdNosePosition,
                                         initialYaw = currentHeading,
@@ -586,13 +744,20 @@ fun PlanScreen(
                                             }
 
                                             // Publish planning points and grid/survey data to SharedViewModel only after successful upload
-                                            val publishedPoints = gridResult?.waypoints?.map { it.position } ?: emptyList()
+                                            // Use the grid that was actually uploaded (split or original)
+                                            val publishedPoints = gridToUpload.waypoints.map { it.position }
                                             telemetryViewModel.setPlanningWaypoints(publishedPoints)
                                             telemetryViewModel.setSurveyPolygon(surveyPolygon)
-                                            gridResult?.let { result ->
-                                                telemetryViewModel.setGridWaypoints(result.waypoints.map { it.position })
-                                                telemetryViewModel.setGridLines(result.gridLines)
+                                            telemetryViewModel.setGridWaypoints(gridToUpload.waypoints.map { it.position })
+                                            telemetryViewModel.setGridLines(gridToUpload.gridLines)
+
+                                            // Reset split plan mode after successful upload
+                                            if (isSplitPlanMode) {
+                                                isSplitPlanMode = false
+                                                splitGridResult = null
+                                                originalGridResult = null
                                             }
+
                                             coroutineScope.launch { telemetryViewModel.readMissionFromFcu() }
                                             navController.navigate(Screen.Main.route) {
                                                 popUpTo(Screen.Plan.route) { inclusive = true }
@@ -1286,6 +1451,183 @@ fun PlanScreen(
                         .fillMaxWidth(0.35f)
                         .fillMaxHeight(0.70f)
                 )
+            }
+
+            // ===== SPLIT PLAN UI PANEL =====
+            // Compact dual-ended range slider for selecting grid line range
+            if (isSplitPlanMode && hasStartedPlanning && isGridSurveyMode && originalGridResult != null) {
+                Surface(
+                    modifier = Modifier
+                        .align(Alignment.BottomCenter)
+                        .padding(bottom = 12.dp, start = 80.dp, end = 80.dp)
+                        .fillMaxWidth(0.6f)
+                        .wrapContentHeight(),
+                    shape = RoundedCornerShape(12.dp),
+                    color = Color.Black.copy(alpha = 0.92f),
+                    shadowElevation = 6.dp
+                ) {
+                    Column(
+                        modifier = Modifier
+                            .padding(horizontal = 16.dp, vertical = 12.dp)
+                            .fillMaxWidth(),
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        // Calculate grid line indices based on percentages
+                        val totalLines = originalGridResult!!.numLines
+                        val startLineIndex = (splitStartPercent * (totalLines - 1)).toInt().coerceIn(0, totalLines - 1)
+                        val endLineIndex = (splitEndPercent * (totalLines - 1)).toInt().coerceIn(0, totalLines - 1)
+                        val selectedLines = if (endLineIndex >= startLineIndex) endLineIndex - startLineIndex + 1 else 0
+
+                        // Header row with title, stats and close button
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Icon(
+                                    Icons.Default.CallSplit,
+                                    contentDescription = null,
+                                    tint = Color(0xFFFF9800),
+                                    modifier = Modifier.size(20.dp)
+                                )
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Text(
+                                    AppStrings.splitPlanTitle,
+                                    style = MaterialTheme.typography.titleSmall,
+                                    color = Color.White,
+                                    fontWeight = FontWeight.Bold
+                                )
+                            }
+                            // Selected lines count in center
+                            Text(
+                                "$selectedLines / $totalLines lines",
+                                color = Color(0xFFFF9800),
+                                style = MaterialTheme.typography.bodyMedium,
+                                fontWeight = FontWeight.Bold
+                            )
+                            IconButton(
+                                onClick = {
+                                    isSplitPlanMode = false
+                                    splitGridResult = null
+                                    originalGridResult = null
+                                    splitStartPercent = 0f
+                                    splitEndPercent = 1f
+                                },
+                                modifier = Modifier.size(24.dp)
+                            ) {
+                                Icon(
+                                    Icons.Default.Close,
+                                    contentDescription = "Close",
+                                    tint = Color.White,
+                                    modifier = Modifier.size(18.dp)
+                                )
+                            }
+                        }
+
+                        // Compact sliders row
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            // Start value
+                            Text(
+                                "${startLineIndex + 1}",
+                                color = Color(0xFF4CAF50),
+                                fontWeight = FontWeight.Bold,
+                                style = MaterialTheme.typography.bodyMedium
+                            )
+
+                            // Combined slider area
+                            Column(modifier = Modifier.weight(1f)) {
+                                // Start Slider
+                                Slider(
+                                    value = splitStartPercent,
+                                    onValueChange = { newValue ->
+                                        splitStartPercent = newValue.coerceAtMost(splitEndPercent - 0.01f).coerceAtLeast(0f)
+                                    },
+                                    valueRange = 0f..1f,
+                                    modifier = Modifier.fillMaxWidth().height(24.dp),
+                                    colors = SliderDefaults.colors(
+                                        thumbColor = Color(0xFF4CAF50),
+                                        activeTrackColor = Color(0xFF4CAF50),
+                                        inactiveTrackColor = Color.Gray.copy(alpha = 0.3f)
+                                    )
+                                )
+                                // End Slider
+                                Slider(
+                                    value = splitEndPercent,
+                                    onValueChange = { newValue ->
+                                        splitEndPercent = newValue.coerceAtLeast(splitStartPercent + 0.01f).coerceAtMost(1f)
+                                    },
+                                    valueRange = 0f..1f,
+                                    modifier = Modifier.fillMaxWidth().height(24.dp),
+                                    colors = SliderDefaults.colors(
+                                        thumbColor = Color(0xFFF44336),
+                                        activeTrackColor = Color(0xFFF44336),
+                                        inactiveTrackColor = Color.Gray.copy(alpha = 0.3f)
+                                    )
+                                )
+                            }
+
+                            // End value
+                            Text(
+                                "${endLineIndex + 1}",
+                                color = Color(0xFFF44336),
+                                fontWeight = FontWeight.Bold,
+                                style = MaterialTheme.typography.bodyMedium
+                            )
+                        }
+
+                        // Compact stats and action row
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            // Stats
+                            splitGridResult?.let { split ->
+                                Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                                    Text(
+                                        "${split.waypoints.size} pts",
+                                        color = Color.Gray,
+                                        style = MaterialTheme.typography.bodySmall
+                                    )
+                                    Text(
+                                        "${String.format(Locale.US, "%.1f", split.totalDistance / 1000)}km",
+                                        color = Color.Gray,
+                                        style = MaterialTheme.typography.bodySmall
+                                    )
+                                    Text(
+                                        "${String.format(Locale.US, "%.0f", split.estimatedTime / 60)}min",
+                                        color = Color.Gray,
+                                        style = MaterialTheme.typography.bodySmall
+                                    )
+                                }
+                            }
+
+                            // Apply button
+                            Button(
+                                onClick = {
+                                    Toast.makeText(context, AppStrings.splitApplied, Toast.LENGTH_SHORT).show()
+                                },
+                                modifier = Modifier.height(32.dp),
+                                contentPadding = PaddingValues(horizontal = 16.dp, vertical = 0.dp),
+                                colors = ButtonDefaults.buttonColors(
+                                    containerColor = Color(0xFFFF9800)
+                                ),
+                                enabled = splitGridResult != null && splitGridResult!!.waypoints.isNotEmpty()
+                            ) {
+                                Text(
+                                    AppStrings.applySplit,
+                                    style = MaterialTheme.typography.bodySmall,
+                                    fontWeight = FontWeight.Bold
+                                )
+                            }
+                        }
+                    }
+                }
             }
 
             // Dialogs
