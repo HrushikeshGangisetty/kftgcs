@@ -37,6 +37,7 @@ import kotlinx.coroutines.launch
 import com.google.android.gms.maps.CameraUpdateFactory
 import com.example.aerogcsclone.grid.*
 import com.example.aerogcsclone.telemetry.SharedViewModel
+import com.example.aerogcsclone.utils.ObstaclePathPlanner
 import java.util.Locale
 import com.example.aerogcsclone.utils.AppStrings
 
@@ -112,6 +113,16 @@ fun PlanScreen(
 
     // Selected geofence point tracking for adjustment
     var selectedGeofencePointIndex by remember { mutableStateOf<Int?>(null) }
+
+    // ===== OBSTACLE AVOIDANCE STATE =====
+    // List of obstacle zones (each obstacle is a list of 4+ points forming a polygon)
+    var obstacles by remember { mutableStateOf<List<List<LatLng>>>(emptyList()) }
+    // Flag to indicate if we're in "add obstacle" mode
+    var isAddingObstacle by remember { mutableStateOf(false) }
+    // Current obstacle points being added (before confirming)
+    var currentObstaclePoints by remember { mutableStateOf<List<LatLng>>(emptyList()) }
+    // Selected obstacle index for editing/deletion
+    var selectedObstacleIndex by remember { mutableStateOf<Int?>(null) }
 
     // Waypoint list panel state
     var showWaypointList by remember { mutableStateOf(false) }
@@ -336,6 +347,18 @@ fun PlanScreen(
         if (isPlanSaved) {
             // Plan is saved - no editing allowed until "Edit Plan" is clicked
             Toast.makeText(context, AppStrings.planSavedEditRequired, Toast.LENGTH_SHORT).show()
+        } else if (isAddingObstacle) {
+            // Obstacle adding mode: clicking on map adds obstacle points
+            currentObstaclePoints = currentObstaclePoints + latLng
+            if (currentObstaclePoints.size >= 4) {
+                // Auto-complete the obstacle when 4 points are added
+                obstacles = obstacles + listOf(currentObstaclePoints)
+                currentObstaclePoints = emptyList()
+                isAddingObstacle = false
+                Toast.makeText(context, "Obstacle zone added! Tap to add another or continue planning.", Toast.LENGTH_SHORT).show()
+            } else {
+                Toast.makeText(context, "Point ${currentObstaclePoints.size}/4 added. Add ${4 - currentObstaclePoints.size} more.", Toast.LENGTH_SHORT).show()
+            }
         } else if (isGridSurveyMode) {
             // Grid mode: clicking on map adds polygon points
             surveyPolygon = surveyPolygon + latLng
@@ -527,7 +550,30 @@ fun PlanScreen(
                 // Enable geofence adjustment when geofence is enabled
                 geofenceAdjustmentEnabled = geofenceEnabled,
                 // Show area and dimensions for grid survey mode
-                showGridInfo = isGridSurveyMode && surveyPolygon.size >= 3
+                showGridInfo = isGridSurveyMode && surveyPolygon.size >= 3,
+                // Obstacle avoidance parameters
+                obstacles = obstacles,
+                isAddingObstacle = isAddingObstacle,
+                currentObstaclePoints = currentObstaclePoints,
+                selectedObstacleIndex = selectedObstacleIndex,
+                onObstacleClick = { obstacleIndex ->
+                    selectedObstacleIndex = if (selectedObstacleIndex == obstacleIndex) null else obstacleIndex
+                    selectedWaypointIndex = null
+                    selectedPolygonPointIndex = null
+                    selectedGeofencePointIndex = null
+                },
+                onObstaclePointDrag = { obstacleIndex, pointIndex, newPosition ->
+                    if (!isPlanSaved && obstacleIndex in obstacles.indices) {
+                        val updatedObstacle = obstacles[obstacleIndex].toMutableList().apply {
+                            if (pointIndex in indices) {
+                                this[pointIndex] = newPosition
+                            }
+                        }
+                        obstacles = obstacles.toMutableList().apply {
+                            this[obstacleIndex] = updatedObstacle
+                        }
+                    }
+                }
             )
 
             // Geofence adjustment helper text
@@ -548,6 +594,94 @@ fun PlanScreen(
                         color = MaterialTheme.colorScheme.onPrimaryContainer,
                         textAlign = TextAlign.Center
                     )
+                }
+            }
+
+            // Obstacle adding mode helper text
+            if (isAddingObstacle) {
+                Card(
+                    modifier = Modifier
+                        .align(Alignment.TopCenter)
+                        .padding(top = if (geofenceEnabled) 60.dp else 16.dp),
+                    colors = CardDefaults.cardColors(
+                        containerColor = Color.Red.copy(alpha = 0.9f)
+                    ),
+                    elevation = CardDefaults.cardElevation(defaultElevation = 4.dp)
+                ) {
+                    Row(
+                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Icon(
+                            Icons.Default.Block,
+                            contentDescription = null,
+                            tint = Color.White,
+                            modifier = Modifier.size(18.dp)
+                        )
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text(
+                            text = "🚧 Adding Obstacle: Tap ${4 - currentObstaclePoints.size} more point(s) on map",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = Color.White,
+                            textAlign = TextAlign.Center
+                        )
+                    }
+                }
+            }
+
+            // Obstacle info card (when obstacles exist)
+            if (obstacles.isNotEmpty() && !isAddingObstacle) {
+                Card(
+                    modifier = Modifier
+                        .align(Alignment.BottomStart)
+                        .padding(start = 16.dp, bottom = 80.dp),
+                    colors = CardDefaults.cardColors(
+                        containerColor = Color.Red.copy(alpha = 0.85f)
+                    ),
+                    elevation = CardDefaults.cardElevation(defaultElevation = 4.dp)
+                ) {
+                    Column(
+                        modifier = Modifier.padding(12.dp)
+                    ) {
+                        Text(
+                            text = "🚧 ${obstacles.size} Obstacle Zone(s)",
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = Color.White,
+                            fontWeight = FontWeight.Bold
+                        )
+                        Text(
+                            text = "Drone will auto-route around",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = Color.White.copy(alpha = 0.8f)
+                        )
+                        if (selectedObstacleIndex != null && !isPlanSaved) {
+                            Spacer(modifier = Modifier.height(8.dp))
+                            OutlinedButton(
+                                onClick = {
+                                    // Delete selected obstacle
+                                    selectedObstacleIndex?.let { idx ->
+                                        obstacles = obstacles.toMutableList().apply {
+                                            removeAt(idx)
+                                        }
+                                        selectedObstacleIndex = null
+                                        Toast.makeText(context, "Obstacle deleted", Toast.LENGTH_SHORT).show()
+                                    }
+                                },
+                                colors = ButtonDefaults.outlinedButtonColors(
+                                    contentColor = Color.White
+                                ),
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
+                                Icon(
+                                    Icons.Default.Delete,
+                                    contentDescription = null,
+                                    modifier = Modifier.size(16.dp)
+                                )
+                                Spacer(modifier = Modifier.width(4.dp))
+                                Text("Delete Selected", style = MaterialTheme.typography.bodySmall)
+                            }
+                        }
+                    }
                 }
             }
 
@@ -713,13 +847,75 @@ fun PlanScreen(
                                         gridResult!!
                                     }
 
+                                    // ===== OBSTACLE AVOIDANCE PROCESSING =====
+                                    // Process waypoints to route around obstacles before upload
+                                    val originalWaypoints = gridToUpload.waypoints.map { it.position }
+                                    android.util.Log.d("ObstacleUpload", "Grid upload - Obstacles count: ${obstacles.size}, Original waypoints: ${originalWaypoints.size}")
+                                    obstacles.forEachIndexed { idx, pts ->
+                                        android.util.Log.d("ObstacleUpload", "Obstacle $idx has ${pts.size} points")
+                                    }
+
+                                    val processedWaypoints = if (obstacles.isNotEmpty()) {
+                                        val obstacleZones = obstacles.mapIndexed { index, points ->
+                                            ObstaclePathPlanner.ObstacleZone(
+                                                id = "obstacle_$index",
+                                                points = points,
+                                                name = "Obstacle ${index + 1}"
+                                            )
+                                        }
+                                        val avoidedPath = ObstaclePathPlanner.processWaypointsAroundObstacles(
+                                            originalWaypoints,
+                                            obstacleZones
+                                        )
+                                        android.util.Log.d("ObstacleUpload", "After processing: ${avoidedPath.size} waypoints (was ${originalWaypoints.size})")
+                                        if (avoidedPath.size > originalWaypoints.size) {
+                                            Toast.makeText(
+                                                context,
+                                                "Path modified to avoid ${obstacles.size} obstacle(s) - added ${avoidedPath.size - originalWaypoints.size} waypoints",
+                                                Toast.LENGTH_LONG
+                                            ).show()
+                                        } else {
+                                            android.util.Log.w("ObstacleUpload", "No avoidance waypoints added - path may not cross obstacles")
+                                        }
+                                        avoidedPath
+                                    } else {
+                                        android.util.Log.d("ObstacleUpload", "No obstacles defined")
+                                        originalWaypoints
+                                    }
+
+                                    // Create modified grid result with processed waypoints
+                                    val processedGridResult = if (processedWaypoints.size > originalWaypoints.size) {
+                                        // Rebuild grid waypoints with avoidance points
+                                        val altitude = gridToUpload.waypoints.firstOrNull()?.altitude ?: surveyAltitude
+                                        val speed = gridToUpload.waypoints.firstOrNull()?.speed
+                                        GridSurveyResult(
+                                            waypoints = processedWaypoints.mapIndexed { idx, pos ->
+                                                GridWaypoint(
+                                                    position = pos,
+                                                    altitude = altitude,
+                                                    speed = speed,
+                                                    lineIndex = idx / 2,
+                                                    isLineStart = idx % 2 == 0,
+                                                    isLineEnd = idx % 2 == 1
+                                                )
+                                            },
+                                            gridLines = gridToUpload.gridLines,
+                                            totalDistance = gridToUpload.totalDistance,
+                                            estimatedTime = gridToUpload.estimatedTime,
+                                            numLines = gridToUpload.numLines,
+                                            polygonArea = gridToUpload.polygonArea
+                                        )
+                                    } else {
+                                        gridToUpload
+                                    }
+
                                     // Grid survey mission upload
                                     val homePosition = LatLng(homeLat, homeLon)
                                     val currentHeading = telemetryState.heading ?: 0f
                                     val fcuSystemId = telemetryViewModel.getFcuSystemId()
                                     val fcuComponentId = telemetryViewModel.getFcuComponentId()
                                     val builtMission = GridMissionConverter.convertToMissionItems(
-                                        gridResult = gridToUpload,
+                                        gridResult = processedGridResult,
                                         homePosition = homePosition,
                                         holdNosePosition = holdNosePosition,
                                         initialYaw = currentHeading,
@@ -744,12 +940,12 @@ fun PlanScreen(
                                             }
 
                                             // Publish planning points and grid/survey data to SharedViewModel only after successful upload
-                                            // Use the grid that was actually uploaded (split or original)
-                                            val publishedPoints = gridToUpload.waypoints.map { it.position }
+                                            // Use the PROCESSED grid (with obstacle avoidance) that was actually uploaded
+                                            val publishedPoints = processedGridResult.waypoints.map { it.position }
                                             telemetryViewModel.setPlanningWaypoints(publishedPoints)
                                             telemetryViewModel.setSurveyPolygon(surveyPolygon)
-                                            telemetryViewModel.setGridWaypoints(gridToUpload.waypoints.map { it.position })
-                                            telemetryViewModel.setGridLines(gridToUpload.gridLines)
+                                            telemetryViewModel.setGridWaypoints(processedGridResult.waypoints.map { it.position })
+                                            telemetryViewModel.setGridLines(processedGridResult.gridLines)
 
                                             // Reset split plan mode after successful upload
                                             if (isSplitPlanMode) {
@@ -773,6 +969,36 @@ fun PlanScreen(
                                      val homeAlt = telemetryState.altitudeMsl ?: 10f
                                      val fcuSystemId = telemetryViewModel.getFcuSystemId()
                                      val fcuComponentId = telemetryViewModel.getFcuComponentId()
+
+                                    // ===== OBSTACLE AVOIDANCE FOR WAYPOINT MODE =====
+                                    android.util.Log.d("ObstacleUpload", "Waypoint upload - Obstacles count: ${obstacles.size}, Original waypoints: ${points.size}")
+                                    val waypointsToUpload = if (obstacles.isNotEmpty()) {
+                                        val obstacleZones = obstacles.mapIndexed { index, obstaclePoints ->
+                                            ObstaclePathPlanner.ObstacleZone(
+                                                id = "obstacle_$index",
+                                                points = obstaclePoints,
+                                                name = "Obstacle ${index + 1}"
+                                            )
+                                        }
+                                        val avoidedPath = ObstaclePathPlanner.processWaypointsAroundObstacles(
+                                            points.toList(),
+                                            obstacleZones
+                                        )
+                                        android.util.Log.d("ObstacleUpload", "After processing: ${avoidedPath.size} waypoints (was ${points.size})")
+                                        if (avoidedPath.size > points.size) {
+                                            Toast.makeText(
+                                                context,
+                                                "Path modified to avoid ${obstacles.size} obstacle(s) - added ${avoidedPath.size - points.size} waypoints",
+                                                Toast.LENGTH_LONG
+                                            ).show()
+                                        } else {
+                                            android.util.Log.w("ObstacleUpload", "No avoidance waypoints added for waypoint mode")
+                                        }
+                                        avoidedPath
+                                    } else {
+                                        android.util.Log.d("ObstacleUpload", "No obstacles defined for waypoint mode")
+                                        points.toList()
+                                    }
 
                                     // CRITICAL FIX: Correct MAVLink mission structure for ArduPilot
                                     // seq: 0 = HOME position (NAV_WAYPOINT with current=1)
@@ -813,10 +1039,10 @@ fun PlanScreen(
                                         )
                                     )
 
-                                    // Sequence 2+: User-defined waypoints
-                                    points.forEachIndexed { idx, latLng ->
+                                    // Sequence 2+: User-defined waypoints (with obstacle avoidance)
+                                    waypointsToUpload.forEachIndexed { idx, latLng ->
                                         val seq = idx + 2  // Start from seq=2 (0=home, 1=takeoff)
-                                        val isLast = idx == points.lastIndex
+                                        val isLast = idx == waypointsToUpload.lastIndex
                                         builtMission.add(
                                             MissionItemInt(
                                                 targetSystem = fcuSystemId, targetComponent = fcuComponentId, seq = seq.toUShort(),
@@ -836,7 +1062,7 @@ fun PlanScreen(
                                          if (success) {
                                              Toast.makeText(context, AppStrings.missionUploadedSuccess, Toast.LENGTH_SHORT).show()
                                              // Publish planning points to SharedViewModel only after successful upload
-                                             telemetryViewModel.setPlanningWaypoints(points.toList())
+                                             telemetryViewModel.setPlanningWaypoints(waypointsToUpload)
                                              coroutineScope.launch { telemetryViewModel.readMissionFromFcu() }
                                              navController.navigate(Screen.Main.route) {
                                                  popUpTo(Screen.Plan.route) { inclusive = true }
@@ -974,6 +1200,36 @@ fun PlanScreen(
                         modifier = Modifier.size(56.dp)
                     ) {
                         Icon(Icons.Default.Map, contentDescription = "Toggle Map Type")
+                    }
+
+                    // Obstacle Avoidance button
+                    FloatingActionButton(
+                        onClick = {
+                            if (isPlanSaved) {
+                                Toast.makeText(context, AppStrings.planSavedEditRequired, Toast.LENGTH_SHORT).show()
+                            } else {
+                                if (isAddingObstacle) {
+                                    // Cancel obstacle adding mode
+                                    isAddingObstacle = false
+                                    currentObstaclePoints = emptyList()
+                                    Toast.makeText(context, "Obstacle adding cancelled", Toast.LENGTH_SHORT).show()
+                                } else {
+                                    // Enter obstacle adding mode
+                                    isAddingObstacle = true
+                                    currentObstaclePoints = emptyList()
+                                    selectedObstacleIndex = null
+                                    Toast.makeText(context, "Tap 4 points on map to define obstacle boundary", Toast.LENGTH_LONG).show()
+                                }
+                            }
+                        },
+                        containerColor = if (isAddingObstacle) Color.Red else MaterialTheme.colorScheme.surface,
+                        modifier = Modifier.size(56.dp)
+                    ) {
+                        Icon(
+                            Icons.Default.Block,
+                            contentDescription = "Add Obstacle",
+                            tint = if (isAddingObstacle) Color.White else MaterialTheme.colorScheme.onSurface
+                        )
                     }
                 }
             }

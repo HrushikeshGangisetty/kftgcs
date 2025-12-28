@@ -182,7 +182,17 @@ fun GcsMap(
     // Geofence adjustment mode
     geofenceAdjustmentEnabled: Boolean = false,
     // Show grid info (area at center, dimensions on edges)
-    showGridInfo: Boolean = false
+    showGridInfo: Boolean = false,
+    // Obstacle zones - list of polygons representing no-fly zones
+    obstacles: List<List<LatLng>> = emptyList(),
+    // Obstacle editing mode
+    isAddingObstacle: Boolean = false,
+    currentObstaclePoints: List<LatLng> = emptyList(),
+    // Obstacle selection for editing
+    selectedObstacleIndex: Int? = null,
+    onObstacleClick: (obstacleIndex: Int) -> Unit = {},
+    // Obstacle point drag callback
+    onObstaclePointDrag: (obstacleIndex: Int, pointIndex: Int, newPosition: LatLng) -> Unit = { _, _, _ -> }
 ) {
     val context = LocalContext.current
     val cameraState = cameraPositionState ?: rememberCameraPositionState()
@@ -205,10 +215,12 @@ fun GcsMap(
     val mediumVioletMarker = remember { createMediumMarker(BitmapDescriptorFactory.HUE_VIOLET) }
     val mediumOrangeMarker = remember { createMediumMarker(BitmapDescriptorFactory.HUE_ORANGE) }
     val mediumYellowMarker = remember { createMediumMarker(BitmapDescriptorFactory.HUE_YELLOW) } // For selected waypoint
+    val mediumRedMarker = remember { createMediumMarker(BitmapDescriptorFactory.HUE_RED) } // For obstacles
 
     // Markers with text labels for grid waypoints
     val startMarker = remember { createMarkerWithText("S", android.graphics.Color.GREEN) }
     val endMarker = remember { createMarkerWithText("E", android.graphics.Color.RED) }
+    val obstacleXMarker = remember { createMarkerWithText("X", android.graphics.Color.RED) } // For obstacle centroid
 
     val lat = telemetryState.latitude
     val lon = telemetryState.longitude
@@ -296,6 +308,113 @@ fun GcsMap(
                         }
                     }
                 }
+            }
+        }
+
+        // ===== OBSTACLE ZONES RENDERING =====
+        // Render saved obstacle zones as red semi-transparent polygons
+        obstacles.forEachIndexed { obstacleIndex, obstaclePoints ->
+            if (obstaclePoints.size >= 3) {
+                // Fill the obstacle area with semi-transparent red
+                Polygon(
+                    points = obstaclePoints,
+                    fillColor = Color.Red.copy(alpha = 0.35f),
+                    strokeColor = Color.Red,
+                    strokeWidth = 3f
+                )
+
+                // Draw obstacle boundary outline
+                val closedObstacle = obstaclePoints + obstaclePoints.first()
+                Polyline(
+                    points = closedObstacle,
+                    width = 3f,
+                    color = Color.Red
+                )
+
+                // Add clickable/draggable markers at obstacle vertices when selected
+                if (selectedObstacleIndex == obstacleIndex) {
+                    obstaclePoints.forEachIndexed { pointIndex, point ->
+                        key("obstacle_${obstacleIndex}_${pointIndex}") {
+                            val markerState = rememberMarkerState(
+                                key = "obs_${obstacleIndex}_${point.latitude}_${point.longitude}",
+                                position = point
+                            )
+
+                            LaunchedEffect(markerState.position) {
+                                if (markerState.position != point) {
+                                    onObstaclePointDrag(obstacleIndex, pointIndex, markerState.position)
+                                }
+                            }
+
+                            Marker(
+                                state = markerState,
+                                title = "Obs${obstacleIndex + 1}-P${pointIndex + 1}",
+                                icon = mediumRedMarker,
+                                anchor = Offset(0.5f, 0.5f),
+                                draggable = true,
+                                onClick = {
+                                    onObstacleClick(obstacleIndex)
+                                    true
+                                }
+                            )
+                        }
+                    }
+                } else {
+                    // Just show a single click marker at centroid when not selected
+                    val centroidLat = obstaclePoints.map { it.latitude }.average()
+                    val centroidLon = obstaclePoints.map { it.longitude }.average()
+                    val centroid = LatLng(centroidLat, centroidLon)
+
+                    Marker(
+                        state = MarkerState(position = centroid),
+                        title = "Obstacle ${obstacleIndex + 1}",
+                        icon = obstacleXMarker,
+                        anchor = Offset(0.5f, 0.5f),
+                        onClick = {
+                            onObstacleClick(obstacleIndex)
+                            true
+                        }
+                    )
+                }
+            }
+        }
+
+        // Render obstacle being currently drawn (in progress)
+        if (isAddingObstacle && currentObstaclePoints.isNotEmpty()) {
+            // Draw the points added so far
+            currentObstaclePoints.forEachIndexed { index, point ->
+                Marker(
+                    state = MarkerState(position = point),
+                    title = "New Obs P${index + 1}",
+                    icon = mediumRedMarker,
+                    anchor = Offset(0.5f, 0.5f)
+                )
+            }
+
+            // Draw lines connecting the points
+            if (currentObstaclePoints.size >= 2) {
+                Polyline(
+                    points = currentObstaclePoints,
+                    width = 3f,
+                    color = Color.Red.copy(alpha = 0.7f)
+                )
+            }
+
+            // If we have 3+ points, show the closing line preview (dashed effect via alpha)
+            if (currentObstaclePoints.size >= 3) {
+                Polyline(
+                    points = listOf(currentObstaclePoints.last(), currentObstaclePoints.first()),
+                    width = 2f,
+                    color = Color.Red.copy(alpha = 0.4f)
+                )
+
+                // Show semi-transparent fill preview
+                Polygon(
+                    points = currentObstaclePoints,
+                    fillColor = Color.Red.copy(alpha = 0.2f),
+                    strokeColor = Color.Transparent,
+                    strokeWidth = 0f
+                )
             }
         }
 
