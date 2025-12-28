@@ -29,7 +29,6 @@ import com.example.aerogcsclone.navigation.Screen
 import com.example.aerogcsclone.telemetry.SharedViewModel
 import android.util.Log
 import com.example.aerogcsclone.utils.AppStrings
-import kotlinx.coroutines.flow.distinctUntilChanged
 
 @Composable
 fun TopNavBar(
@@ -320,6 +319,21 @@ fun TopNavBar(
                                 coroutineScope.launch {
                                     telemetryViewModel.cancelConnection()
                                 }
+                            }
+                        )
+                        DropdownMenuItem(
+                            text = { Text(AppStrings.language) },
+                            leadingIcon = {
+                                Icon(
+                                    imageVector = Icons.Default.Language,
+                                    contentDescription = AppStrings.language,
+                                    tint = Color.White,
+                                    modifier = Modifier.size(18.dp)
+                                )
+                            },
+                            onClick = {
+                                kebabMenuExpanded = false
+                                navController.navigate(Screen.LanguageSelection.route)
                             }
                         )
                         DropdownMenuItem(

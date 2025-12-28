@@ -144,7 +144,6 @@ object AppStrings {
     val enterPlotName get() = getString("Enter plot name", "ప్లాట్ పేరు నమోదు చేయండి")
 
     // NEW: Language Selection
-    val language get() = getString("Language", "భాష")
     val changeLanguageLater get() = getString("You can change this later from settings.", "మీరు దీన్ని తర్వాత సెట్టింగ్‌ల నుండి మార్చవచ్చు.")
 
     // NEW: Logs Screen
@@ -335,6 +334,7 @@ object AppStrings {
     val more get() = getString("More", "మరిన్ని")
     val logs get() = getString("Logs", "లాగ్స్")
     val disconnect get() = getString("Disconnect", "డిస్కనెక్ట్ చేయండి")
+    val language get() = getString("Language", "భాష")
     val logout get() = getString("Logout", "లాగౌట్")
 
     // Geofence Settings Popup

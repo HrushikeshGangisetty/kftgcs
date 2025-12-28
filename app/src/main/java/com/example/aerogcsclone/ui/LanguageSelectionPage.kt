@@ -35,6 +35,10 @@ fun LanguageSelectionPage(
 
     val languages = listOf("English", "Telugu")
 
+    // Check if we're coming from the app (user is already logged in)
+    val isFromApp = navController.previousBackStackEntry != null &&
+                    navController.previousBackStackEntry?.destination?.route != Screen.Login.route
+
     Box(
         modifier = Modifier
             .fillMaxSize()
@@ -159,8 +163,14 @@ fun LanguageSelectionPage(
             Button(
                 onClick = {
                     if (selectedLanguage != "Select Language") {
-                        navController.navigate(Screen.Connection.route) {
-                            popUpTo(Screen.LanguageSelection.route) { inclusive = true }
+                        if (isFromApp) {
+                            // If accessed from within the app, just go back
+                            navController.popBackStack()
+                        } else {
+                            // If during initial setup, navigate to Connection page
+                            navController.navigate(Screen.Connection.route) {
+                                popUpTo(Screen.LanguageSelection.route) { inclusive = true }
+                            }
                         }
                     }
                 },
@@ -182,7 +192,7 @@ fun LanguageSelectionPage(
                     )
             ) {
                 Text(
-                    text = "Continue",
+                    text = if (isFromApp) "Apply" else "Continue",
                     fontSize = 18.sp,
                     fontWeight = FontWeight.Bold,
                     color = if (selectedLanguage == "Select Language") Color.White.copy(alpha = 0.6f) else Color.White
