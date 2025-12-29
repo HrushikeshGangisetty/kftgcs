@@ -710,6 +710,253 @@ class SharedViewModel : ViewModel() {
         }
     }
 
+    // ========== ADD RESUME HERE POPUP STATE ==========
+    // Triggered when mode changes from AUTO to LOITER during a mission
+    private val _showAddResumeHerePopup = MutableStateFlow(false)
+    val showAddResumeHerePopup: StateFlow<Boolean> = _showAddResumeHerePopup.asStateFlow()
+
+    // The waypoint number where the mode changed (resume point candidate)
+    private val _resumePointWaypoint = MutableStateFlow<Int?>(null)
+    val resumePointWaypoint: StateFlow<Int?> = _resumePointWaypoint.asStateFlow()
+
+    // Track the previous mode to detect AUTO -> LOITER transition
+    private var previousMode: String? = null
+
+    // Flag to track if we have a stored resume mission ready to execute
+    private val _resumeMissionReady = MutableStateFlow(false)
+    val resumeMissionReady: StateFlow<Boolean> = _resumeMissionReady.asStateFlow()
+
+    /**
+     * Called when mode changes from AUTO to LOITER (detected in TelemetryRepository)
+     * This triggers the "Add Resume Here" popup
+     */
+    fun onModeChangedToLoiterFromAuto(waypointNumber: Int) {
+        Log.i("SharedVM", "=== MODE CHANGED: AUTO → LOITER ===")
+        Log.i("SharedVM", "Waypoint at mode change: $waypointNumber")
+
+        _resumePointWaypoint.value = waypointNumber
+        _showAddResumeHerePopup.value = true
+
+        // Also set the paused state
+        _telemetryState.update {
+            it.copy(
+                missionPaused = true,
+                pausedAtWaypoint = waypointNumber
+            )
+        }
+
+        addNotification(
+            Notification(
+                message = "Mode changed to Loiter at waypoint $waypointNumber",
+                type = NotificationType.INFO
+            )
+        )
+    }
+
+    /**
+     * Called when user confirms "Add Resume Here" in the popup
+     * This stores the resume point and prepares the mission for resume
+     */
+    fun confirmAddResumeHere(onProgress: (String) -> Unit = {}, onResult: (Boolean, String?) -> Unit = { _, _ -> }) {
+        viewModelScope.launch {
+            val resumeWaypoint = _resumePointWaypoint.value ?: run {
+                Log.e("SharedVM", "No resume waypoint stored!")
+                onResult(false, "No resume waypoint stored")
+                return@launch
+            }
+
+            Log.i("SharedVM", "═══════════════════════════════════════")
+            Log.i("SharedVM", "=== CONFIRM ADD RESUME HERE ===")
+            Log.i("SharedVM", "Resume waypoint: $resumeWaypoint")
+            Log.i("SharedVM", "═══════════════════════════════════════")
+
+            _showAddResumeHerePopup.value = false
+
+            try {
+                // Step 1: Check connection
+                onProgress("Checking connection...")
+                if (!_telemetryState.value.connected) {
+                    Log.e("SharedVM", "Not connected to FC")
+                    onResult(false, "Not connected to flight controller")
+                    return@launch
+                }
+
+                onProgress("Retrieving mission from FC...")
+
+                // Step 2: Get current mission from FC
+                val allWaypoints = repo?.getAllWaypoints()
+                if (allWaypoints == null || allWaypoints.isEmpty()) {
+                    Log.e("SharedVM", "Failed to retrieve mission from FC")
+                    onResult(false, "Failed to retrieve mission from flight controller")
+                    return@launch
+                }
+
+                Log.i("SharedVM", "Retrieved ${allWaypoints.size} waypoints from FC")
+
+                // Log original mission
+                Log.i("SharedVM", "--- Original Mission ---")
+                allWaypoints.forEach { wp ->
+                    val cmdName = wp.command.entry?.name ?: "CMD_${wp.command.value}"
+                    Log.i("SharedVM", "  seq=${wp.seq}: $cmdName frame=${wp.frame.value} current=${wp.current}")
+                }
+
+                onProgress("Filtering waypoints from resume point...")
+
+                // Step 3: Filter waypoints from resume point
+                val filtered = repo?.filterWaypointsForResume(allWaypoints, resumeWaypoint)
+                if (filtered == null || filtered.isEmpty()) {
+                    Log.e("SharedVM", "Filtering resulted in empty mission")
+                    onResult(false, "No waypoints after resume point")
+                    return@launch
+                }
+
+                Log.i("SharedVM", "Filtered to ${filtered.size} waypoints")
+
+                onProgress("Resequencing waypoints...")
+
+                // Step 4: Resequence waypoints
+                val resequenced = repo?.resequenceWaypoints(filtered)
+                if (resequenced == null || resequenced.isEmpty()) {
+                    Log.e("SharedVM", "Resequencing failed")
+                    onResult(false, "Failed to resequence waypoints")
+                    return@launch
+                }
+
+                Log.i("SharedVM", "Resequenced to ${resequenced.size} waypoints")
+
+                // Log final mission structure
+                Log.i("SharedVM", "--- Final Resume Mission ---")
+                resequenced.forEach { wp ->
+                    val cmdName = wp.command.entry?.name ?: "CMD_${wp.command.value}"
+                    Log.i("SharedVM", "  seq=${wp.seq}: $cmdName frame=${wp.frame.value} alt=${wp.z}m target=${wp.targetSystem}:${wp.targetComponent}")
+                }
+
+                // Step 5: Validate sequence numbers (skip TAKEOFF validation for resume)
+                onProgress("Validating mission...")
+                val sequences = resequenced.map { it.seq.toInt() }
+                val expectedSequences = (0 until resequenced.size).toList()
+                if (sequences != expectedSequences) {
+                    Log.e("SharedVM", "❌ Invalid sequence numbers!")
+                    Log.e("SharedVM", "Expected: $expectedSequences, Got: $sequences")
+                    onResult(false, "Invalid mission sequence")
+                    return@launch
+                }
+                Log.i("SharedVM", "✅ Sequence validation passed")
+
+                onProgress("Uploading modified mission to FC...")
+
+                // Step 6: Upload modified mission to FC
+                val uploadSuccess = repo?.uploadMissionWithAck(resequenced) ?: false
+                if (!uploadSuccess) {
+                    Log.e("SharedVM", "❌ Mission upload failed")
+                    onResult(false, "Failed to upload mission to FC")
+                    return@launch
+                }
+
+                Log.i("SharedVM", "✅ Modified mission uploaded to FC")
+
+                delay(500)
+
+                onProgress("Setting start waypoint...")
+
+                // Step 7: Set current waypoint to 1 (first item after HOME in resequenced mission)
+                val setWpResult = repo?.setCurrentWaypoint(1) ?: false
+                if (setWpResult) {
+                    Log.i("SharedVM", "✅ Current waypoint set to 1")
+                } else {
+                    Log.w("SharedVM", "⚠️ Failed to set current waypoint, continuing anyway")
+                }
+
+                // Mark that resume mission is ready
+                _resumeMissionReady.value = true
+                _missionUploaded.value = true
+                lastUploadedCount = resequenced.size
+
+                Log.i("SharedVM", "═══════════════════════════════════════")
+                Log.i("SharedVM", "✅ Resume mission ready - waiting for AUTO mode")
+                Log.i("SharedVM", "═══════════════════════════════════════")
+
+                addNotification(
+                    Notification(
+                        message = "Resume point set at waypoint $resumeWaypoint - Switch to AUTO to resume",
+                        type = NotificationType.SUCCESS
+                    )
+                )
+
+                onResult(true, null)
+
+            } catch (e: Exception) {
+                Log.e("SharedVM", "Failed to prepare resume mission", e)
+                onResult(false, e.message)
+            }
+        }
+    }
+
+    /**
+     * Called when user dismisses the "Add Resume Here" popup without confirming
+     */
+    fun dismissAddResumeHerePopup() {
+        _showAddResumeHerePopup.value = false
+        _resumePointWaypoint.value = null
+        Log.i("SharedVM", "Add Resume Here popup dismissed")
+    }
+
+    /**
+     * Called when mode changes to AUTO and we have a resume mission ready
+     * This starts the mission from the resume point
+     */
+    fun onModeChangedToAuto() {
+        if (_resumeMissionReady.value) {
+            Log.i("SharedVM", "=== MODE CHANGED TO AUTO - STARTING RESUME MISSION ===")
+
+            viewModelScope.launch {
+                // Small delay to ensure FC is ready
+                delay(300)
+
+                // Send mission start command
+                val startSuccess = repo?.startMission() ?: false
+
+                if (startSuccess) {
+                    Log.i("SharedVM", "✅ Resume mission started successfully")
+                    _resumeMissionReady.value = false
+                    _telemetryState.update {
+                        it.copy(
+                            missionPaused = false,
+                            pausedAtWaypoint = null
+                        )
+                    }
+                    addNotification(
+                        Notification(
+                            message = "Mission resumed from stored point",
+                            type = NotificationType.SUCCESS
+                        )
+                    )
+                    ttsManager?.announceMissionResumed()
+                } else {
+                    Log.e("SharedVM", "Failed to start resume mission")
+                    addNotification(
+                        Notification(
+                            message = "Failed to start resume mission",
+                            type = NotificationType.ERROR
+                        )
+                    )
+                }
+            }
+        }
+    }
+
+    /**
+     * Update the previous mode tracking (called from TelemetryRepository)
+     */
+    fun updatePreviousMode(mode: String?) {
+        previousMode = mode
+    }
+
+    /**
+     * Get the previous mode for transition detection
+     */
+    fun getPreviousMode(): String? = previousMode
+
     fun setSurveyPolygon(polygon: List<LatLng>) {
         _surveyPolygon.value = polygon
         updateGeofencePolygon()
@@ -1308,22 +1555,15 @@ class SharedViewModel : ViewModel() {
                 Log.i("DEBUG_PAUSE", "Pausing - lastAutoWp: $lastAutoWp, currentWp: $currentWp, storing: $waypointToStore")
 
                 // Switch to LOITER to hold position
+                // NOTE: The mode change will be detected by TelemetryRepository which will
+                // trigger onModeChangedToLoiterFromAuto() to show the "Add Resume Here" popup
                 val result = repo?.changeMode(MavMode.LOITER) ?: false
 
                 if (result) {
-                    _telemetryState.update { 
-                        it.copy(
-                            missionPaused = true,
-                            pausedAtWaypoint = waypointToStore
-                        ) 
-                    }
-                    Log.i("SharedVM", "Mission paused successfully. pausedAtWaypoint set to: ${_telemetryState.value.pausedAtWaypoint}")
-                    addNotification(
-                        Notification(
-                            message = "Mission paused at waypoint ${waypointToStore ?: "?"} - holding position",
-                            type = NotificationType.INFO
-                        )
-                    )
+                    // Don't set missionPaused here - let the mode change detection handle it
+                    // The popup will be shown by onModeChangedToLoiterFromAuto()
+                    Log.i("SharedVM", "LOITER mode change command sent. Waiting for mode change detection...")
+
                     // Announce via TTS
                     ttsManager?.announceMissionPaused(waypointToStore ?: 0)
                     onResult(true, null)

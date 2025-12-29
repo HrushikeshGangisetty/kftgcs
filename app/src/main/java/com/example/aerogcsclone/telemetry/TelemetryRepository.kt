@@ -824,6 +824,12 @@ class MavlinkTelemetryRepository(
                     // Mission timer logic
                     if (lastMode != mode || lastArmed != armed) {
                         if (mode.equals("Auto", ignoreCase = true) && armed && (lastMode != mode || lastArmed != armed)) {
+                            // === NEW: Check if this is a transition TO AUTO for resume mission ===
+                            if (lastMode != null && !lastMode.equals("Auto", ignoreCase = true)) {
+                                Log.i("TelemetryRepo", "🔄 Mode changed TO AUTO from $lastMode - checking for resume mission")
+                                sharedViewModel.onModeChangedToAuto()
+                            }
+
                             missionTimerJob?.cancel()
                             missionTimerJob = scope.launch {
                                 var elapsed = 0L
@@ -846,22 +852,41 @@ class MavlinkTelemetryRepository(
                             missionTimerJob?.cancel()
                             missionTimerJob = null
 
-                            // Only mark as completed if NOT paused AND not already marked
-                            if (!isPaused && !state.value.missionCompleted) {
+                            // === NEW: Detect AUTO → LOITER transition for "Add Resume Here" popup ===
+                            if (mode.equals("Loiter", ignoreCase = true)) {
+                                // Get the current waypoint as the resume point
+                                val resumeWaypoint = state.value.lastAutoWaypoint.takeIf { it > 0 }
+                                    ?: state.value.currentWaypoint
+                                    ?: 1
+
+                                Log.i("TelemetryRepo", "🔄 AUTO → LOITER detected at waypoint $resumeWaypoint")
+
+                                // Trigger the "Add Resume Here" popup in SharedViewModel
+                                sharedViewModel.onModeChangedToLoiterFromAuto(resumeWaypoint)
+
+                                // Keep the timer state frozen for resume
                                 val lastElapsed = state.value.missionElapsedSec
-                                // Only set missionCompleted if we had a meaningful mission (elapsed time > 0)
-                                if ((lastElapsed ?: 0L) > 0L) {
-                                    _state.update { it.copy(missionElapsedSec = null, missionCompleted = true, lastMissionElapsedSec = lastElapsed) }
-                                    Log.i("TelemetryRepo", "✅ Mission completed - elapsed: ${lastElapsed}s (mode: $lastMode -> $mode)")
-                                } else {
-                                    // No meaningful mission - just reset state without triggering completion
-                                    _state.update { it.copy(missionElapsedSec = null) }
-                                    Log.i("TelemetryRepo", "Mode changed from Auto to $mode but no mission was running")
+                                if (lastElapsed != null && lastElapsed > 0L) {
+                                    _state.update { it.copy(lastMissionElapsedSec = lastElapsed) }
                                 }
-                            } else if (isPaused) {
-                                Log.i("TelemetryRepo", "Mission paused - keeping state frozen, NOT marking as completed")
                             } else {
-                                Log.d("TelemetryRepo", "Mission already marked completed, not re-marking")
+                                // Only mark as completed if NOT paused AND not already marked
+                                if (!isPaused && !state.value.missionCompleted) {
+                                    val lastElapsed = state.value.missionElapsedSec
+                                    // Only set missionCompleted if we had a meaningful mission (elapsed time > 0)
+                                    if ((lastElapsed ?: 0L) > 0L) {
+                                        _state.update { it.copy(missionElapsedSec = null, missionCompleted = true, lastMissionElapsedSec = lastElapsed) }
+                                        Log.i("TelemetryRepo", "✅ Mission completed - elapsed: ${lastElapsed}s (mode: $lastMode -> $mode)")
+                                    } else {
+                                        // No meaningful mission - just reset state without triggering completion
+                                        _state.update { it.copy(missionElapsedSec = null) }
+                                        Log.i("TelemetryRepo", "Mode changed from Auto to $mode but no mission was running")
+                                    }
+                                } else if (isPaused) {
+                                    Log.i("TelemetryRepo", "Mission paused - keeping state frozen, NOT marking as completed")
+                                } else {
+                                    Log.d("TelemetryRepo", "Mission already marked completed, not re-marking")
+                                }
                             }
 
                             // ISSUE FIX #2: Disable spray when mode changes from Auto to any other mode
@@ -1717,22 +1742,32 @@ class MavlinkTelemetryRepository(
 
             // Phase 1: Clear existing mission
             Log.i("MissionUpload", "Phase 1/2: Clearing existing mission...")
-            val clearAckChannel = MutableSharedFlow<MissionAck>(replay = 0, extraBufferCapacity = 5)
-
-            val clearCollectorJob = AppScope.launch {
-                mavFrame
-                    .filter { it.systemId == fcuSystemId && it.componentId == fcuComponentId }
-                    .map { it.message }
-                    .filterIsInstance<MissionAck>()
-                    .collect {
-                        Log.d("MissionUpload", "Clear phase ACK: ${it.type.entry?.name ?: it.type.value}")
-                        clearAckChannel.emit(it)
-                    }
-            }
 
             var clearSuccess = false
             for (attempt in 1..2) {
                 Log.d("MissionUpload", "MISSION_CLEAR_ALL attempt $attempt/2")
+
+                // Use CompletableDeferred to avoid race condition
+                val clearAckDeferred = CompletableDeferred<Boolean>()
+
+                val clearCollectorJob = AppScope.launch {
+                    mavFrame
+                        .filter { it.systemId == fcuSystemId && it.componentId == fcuComponentId }
+                        .map { it.message }
+                        .filterIsInstance<MissionAck>()
+                        .collect { ack ->
+                            Log.d("MissionUpload", "Clear phase ACK received: ${ack.type.entry?.name ?: ack.type.value}")
+                            if (ack.type.value == MavMissionResult.MAV_MISSION_ACCEPTED.value) {
+                                if (!clearAckDeferred.isCompleted) {
+                                    clearAckDeferred.complete(true)
+                                }
+                            }
+                        }
+                }
+
+                // Small delay to ensure collector is running
+                delay(50)
+
                 val clearAll = MissionClearAll(
                     targetSystem = fcuSystemId,
                     targetComponent = fcuComponentId,
@@ -1740,28 +1775,28 @@ class MavlinkTelemetryRepository(
                 )
                 connection.trySendUnsignedV2(gcsSystemId, gcsComponentId, clearAll)
 
-                val ack = withTimeoutOrNull(5000L) {
-                    clearAckChannel.first { it.type.value == MavMissionResult.MAV_MISSION_ACCEPTED.value }
-                }
+                val ackReceived = withTimeoutOrNull(3000L) {
+                    clearAckDeferred.await()
+                } ?: false
 
-                if (ack != null) {
+                clearCollectorJob.cancel()
+
+                if (ackReceived) {
                     clearSuccess = true
                     Log.i("MissionUpload", "✅ Mission cleared on attempt $attempt")
                     break
                 } else if (attempt < 2) {
                     Log.w("MissionUpload", "⚠️ Clear timeout, retrying...")
-                    delay(1000L)
+                    delay(500L)
                 }
             }
-
-            clearCollectorJob.cancel()
 
             if (!clearSuccess) {
                 Log.e("MissionUpload", "❌ Failed to clear mission after 2 attempts")
                 return false
             }
 
-            delay(800L)
+            delay(500L)
             Log.d("MissionUpload", "Clear complete, proceeding to upload...")
 
             // Phase 2: Upload mission items
@@ -2523,17 +2558,19 @@ class MavlinkTelemetryRepository(
     }
 
     /**
-     * Filter waypoints for resume mission following Mission Planner protocol.
-     * * Mission Planner Logic:
-     * - Always keep HOME (waypoint 0)
-     * - Keep TAKEOFF commands even before resume point
-     * - Keep ALL DO commands (80-99 and 176-252) even before resume point
-     * - Skip NAV waypoints before resume point
+     * Filter waypoints for resume mission (mid-flight).
+     *
+     * For MID-FLIGHT RESUME (drone already flying):
+     * - Keep HOME (waypoint 0)
+     * - Skip ALL waypoints BEFORE resume point (including TAKEOFF - drone is already in the air)
      * - Keep ALL waypoints from resume point onward
+     *
+     * Result structure: HOME (seq 0) + Resume waypoints (seq 1+)
+     * NO TAKEOFF included since drone is already flying!
      *
      * @param allWaypoints Complete mission from flight controller
      * @param resumeWaypointSeq The waypoint sequence number to resume from
-     * @return Filtered list of waypoints with HOME + DO commands + resume waypoints
+     * @return Filtered list of waypoints: HOME + resume waypoints (NO TAKEOFF for mid-flight)
      */
     suspend fun filterWaypointsForResume(
         allWaypoints: List<MissionItemInt>,
@@ -2541,16 +2578,20 @@ class MavlinkTelemetryRepository(
     ): List<MissionItemInt> {
         val filtered = mutableListOf<MissionItemInt>()
 
-        // MAVLink command ID constants
-        val MAV_CMD_NAV_TAKEOFF = 22u
-        val MAV_CMD_NAV_LAST = 95u      // Last NAV command (MAV_CMD.LAST in Mission Planner)
-        val MAV_CMD_DO_START = 80u       // First DO command
-        val MAV_CMD_DO_LAST = 252u       // Last DO command
 
-        Log.i("ResumeMission", "═══ Filtering Mission for Resume (Mission Planner Protocol) ═══")
+        Log.i("ResumeMission", "═══ Filtering Mission for Resume (Mid-Flight) ═══")
         Log.i("ResumeMission", "Original mission: ${allWaypoints.size} waypoints")
         Log.i("ResumeMission", "Resume from waypoint: $resumeWaypointSeq")
-        Log.i("ResumeMission", "Logic: HOME + TAKEOFF + DO commands + resume waypoints")
+        Log.i("ResumeMission", "Structure: HOME (seq 0) + Resume waypoints (seq 1+)")
+        Log.i("ResumeMission", "NOTE: NO TAKEOFF - drone is already flying")
+
+        // Log original mission for debugging
+        Log.i("ResumeMission", "--- Original Mission Items ---")
+        allWaypoints.forEach { wp ->
+            val cmdName = wp.command.entry?.name ?: "CMD_${wp.command.value}"
+            Log.i("ResumeMission", "  seq=${wp.seq}: $cmdName frame=${wp.frame.value} alt=${wp.z}")
+        }
+        Log.i("ResumeMission", "------------------------------")
 
         for (waypoint in allWaypoints) {
             val seq = waypoint.seq.toInt()
@@ -2558,49 +2599,29 @@ class MavlinkTelemetryRepository(
 
             // Always keep HOME (waypoint 0)
             if (seq == 0) {
+                // Verify HOME is a NAV_WAYPOINT (cmd 16) - ArduPilot standard
+                val cmdName = waypoint.command.entry?.name ?: "CMD_$cmdId"
+                Log.i("ResumeMission", "✅ Keeping HOME (seq=$seq, cmd=$cmdName, frame=${waypoint.frame.value})")
                 filtered.add(waypoint)
-                Log.d("ResumeMission", "✅ Keeping HOME (seq=$seq)")
                 continue
             }
 
-            // For waypoints before resume point
+            // For waypoints BEFORE resume point - SKIP ALL including TAKEOFF
+            // Drone is already flying, we don't need takeoff or any previous waypoints
             if (seq < resumeWaypointSeq) {
-                // ALWAYS keep TAKEOFF commands (Mission Planner protocol)
-                // Mission Planner: if (wpdata.id != TAKEOFF) skip NAV commands
-                if (cmdId == MAV_CMD_NAV_TAKEOFF) {
-                    filtered.add(waypoint)
-                    Log.i("ResumeMission", "✅ CRITICAL: Keeping TAKEOFF (seq=$seq, cmd=$cmdId) - altitude reference")
-                    continue
-                }
-                
-                // Keep DO commands - Mission Planner preserves commands in two ranges:
-                // Range 1: 80-99 (conditional DO commands like DO_JUMP, DO_CHANGE_SPEED)
-                // Range 2: 176-252 (unconditional DO commands like DO_SET_SERVO, DO_SET_CAM_TRIGG)
-                val isDoCommand = cmdId in MAV_CMD_DO_START..99u || cmdId in 176u..MAV_CMD_DO_LAST
-                if (isDoCommand) {
-                    filtered.add(waypoint)
-                    Log.i("ResumeMission", "✅ Keeping DO command (seq=$seq, cmd=$cmdId)")
-                    continue
-                }
-                
-                // Skip NAV waypoints before resume point (Mission Planner: if wpdata.id < MAV_CMD_LAST continue)
-                if (cmdId in 16u..MAV_CMD_NAV_LAST) {
-                    Log.d("ResumeMission", "⏭️ Skipping NAV waypoint before resume (seq=$seq, cmd=$cmdId)")
-                    continue
-                }
-                
-                // Skip any other commands before resume point
-                Log.d("ResumeMission", "⏭️ Skipping unknown command before resume (seq=$seq, cmd=$cmdId)")
+                val cmdName = waypoint.command.entry?.name ?: "CMD_$cmdId"
+                Log.d("ResumeMission", "⏭️ Skipping pre-resume waypoint (seq=$seq, cmd=$cmdName)")
                 continue
             }
 
             // Keep ALL waypoints from resume point onward
+            val cmdName = waypoint.command.entry?.name ?: "CMD_$cmdId"
+            Log.d("ResumeMission", "✅ Keeping waypoint (seq=$seq, cmd=$cmdName)")
             filtered.add(waypoint)
-            Log.d("ResumeMission", "✅ Keeping waypoint (seq=$seq, cmd=$cmdId)")
         }
 
         Log.i("ResumeMission", "Filtered: ${allWaypoints.size} → ${filtered.size} waypoints")
-        Log.i("ResumeMission", "Result: HOME + TAKEOFF + DO commands + resume waypoints")
+        Log.i("ResumeMission", "Structure: HOME + ${filtered.size - 1} waypoints starting from resume point")
         Log.i("ResumeMission", "═══════════════════════════════════════════════════════")
 
         return filtered
@@ -2609,7 +2630,9 @@ class MavlinkTelemetryRepository(
     /**
      * Re-sequence waypoints to 0, 1, 2, 3...
      * Marks HOME (waypoint 0) as current.
-     * * @param waypoints List of waypoints to re-sequence
+     * Ensures proper target system/component are set for upload.
+     *
+     * @param waypoints List of waypoints to re-sequence
      * @return Re-sequenced list with sequential numbering
      */
     suspend fun resequenceWaypoints(waypoints: List<MissionItemInt>): List<MissionItemInt> {
@@ -2624,11 +2647,17 @@ class MavlinkTelemetryRepository(
             // Set current=1 only for HOME (seq 0), all others current=0
             val newCurrent = if (index == 0) 1u else 0u
             
+            // Create the resequenced waypoint with proper target system/component
             waypoint.copy(
                 seq = index.toUShort(),
-                current = newCurrent.toUByte()
+                current = newCurrent.toUByte(),
+                targetSystem = fcuSystemId,
+                targetComponent = fcuComponentId
             ).also {
-                Log.d("ResumeMission", "Resequenced: old_seq=${waypoint.seq} → new_seq=$index, cmd=${waypoint.command.value}, current=$newCurrent")
+                val cmdName = it.command.entry?.name ?: "CMD_${it.command.value}"
+                val lat = it.x / 1e7
+                val lon = it.y / 1e7
+                Log.i("ResumeMission", "Resequenced: old_seq=${waypoint.seq} → new_seq=$index, cmd=$cmdName, frame=${it.frame.value}, alt=${it.z}m, lat=$lat, lon=$lon, current=$newCurrent")
             }
         }
         
@@ -2641,6 +2670,14 @@ class MavlinkTelemetryRepository(
             Log.i("ResumeMission", "✅ Resequencing successful: ${resequenced.size} waypoints (0..${resequenced.size-1})")
         }
         
+        // Log final mission structure
+        Log.i("ResumeMission", "═══ Final Resume Mission Structure ═══")
+        resequenced.forEachIndexed { idx, wp ->
+            val cmdName = wp.command.entry?.name ?: "CMD_${wp.command.value}"
+            Log.i("ResumeMission", "  [$idx] $cmdName frame=${wp.frame.value} target=${wp.targetSystem}:${wp.targetComponent}")
+        }
+        Log.i("ResumeMission", "═════════════════════════════════════")
+
         return resequenced
     }
 }
