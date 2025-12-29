@@ -2189,19 +2189,22 @@ class SharedViewModel : ViewModel() {
     // Geofence constants - Similar to ArduPilot's FENCE_MARGIN behavior
     companion object {
         // Minimum buffer distance - triggers even when stationary
-        private const val MIN_BUFFER_METERS = 2.0  // Minimum 2m buffer (increased from 1m)
+        // This is the absolute minimum distance from fence before triggering
+        private const val MIN_BUFFER_METERS = 2.0  // Minimum 2m buffer
 
-        // Maximum buffer distance - caps the dynamic buffer
-        // Increased to 20m to handle high-altitude/high-speed scenarios
-        private const val MAX_BUFFER_METERS = 20.0  // Maximum 20m buffer (increased from 10m)
+        // Maximum buffer distance - caps the dynamic buffer at high speeds
+        private const val MAX_BUFFER_METERS = 10.0  // Maximum 10m buffer for high speed scenarios
 
         // Maximum deceleration capability (m/s²) - conservative estimate for multicopters
-        // Using a more conservative value to ensure drone stops well before fence
-        private const val MAX_DECEL_M_S2 = 2.0  // Reduced from 2.5 for safety
+        // Using 3.0 for safe braking estimate (drones can do 3-5, but wind/load affects this)
+        private const val MAX_DECEL_M_S2 = 3.0  // Conservative deceleration
 
-        // Safety factor for stopping distance calculation
-        // Increased to account for GPS latency, control system latency, and altitude effects
-        private const val STOPPING_DISTANCE_SAFETY_FACTOR = 2.0  // Increased from 1.5
+        // System latency in seconds (GPS + telemetry + command execution)
+        // GPS: ~200ms, Telemetry: ~100ms, Command: ~200ms = ~500ms total
+        private const val SYSTEM_LATENCY_SECONDS = 0.5  // 500ms total latency
+
+        // Safety margin multiplier for stopping distance (accounts for uncertainties)
+        private const val STOPPING_DISTANCE_SAFETY_FACTOR = 1.3  // 30% safety margin
 
         // ULTRA High frequency monitoring interval - 10ms = 100 checks per second
         private const val GEOFENCE_MONITOR_INTERVAL_MS = 10L
@@ -2282,36 +2285,44 @@ class SharedViewModel : ViewModel() {
     }
 
     /**
-     * Calculate dynamic buffer distance based on current speed and altitude.
-     * Uses physics-based stopping distance calculation:
-     * stopping_distance = v² / (2 * deceleration) * safety_factor
+     * Calculate dynamic buffer distance based on current speed.
+     * Uses physics-based stopping distance calculation with latency compensation:
      *
-     * This mimics ArduPilot's FENCE_MARGIN behavior where the effective
-     * margin increases with speed to ensure the drone can stop before
-     * reaching the actual fence boundary.
+     * Total buffer = MIN_BUFFER + latency_distance + stopping_distance
      *
-     * Also adds altitude-based buffer: higher altitudes have more GPS error and wind effects.
+     * Where:
+     * - latency_distance = speed × system_latency (distance traveled during latency)
+     * - stopping_distance = v² / (2 × deceleration) × safety_factor
+     *
+     * This ensures the drone triggers brake EARLY ENOUGH to stop before the fence,
+     * accounting for GPS, telemetry, and command execution delays.
+     *
+     * Examples at different speeds:
+     * - 0 m/s:  2m (minimum buffer only)
+     * - 3 m/s:  2 + 1.5 + 1.95 = 5.45m
+     * - 5 m/s:  2 + 2.5 + 5.42 = 9.92m
+     * - 8 m/s:  2 + 4.0 + 13.87 = capped at 10m
      */
     private fun calculateDynamicBuffer(currentSpeedMs: Float, altitudeMeters: Float = 0f): Double {
-        // Base buffer from speed-based stopping distance
-        val speedBuffer = if (currentSpeedMs <= 0) {
-            0.0
-        } else {
-            // Physics: stopping distance = v² / (2a)
-            // where v = velocity, a = deceleration
-            val stoppingDistance = (currentSpeedMs * currentSpeedMs) / (2 * MAX_DECEL_M_S2)
-            // Apply safety factor to account for latencies
-            stoppingDistance * STOPPING_DISTANCE_SAFETY_FACTOR
+        if (currentSpeedMs <= 0) {
+            return MIN_BUFFER_METERS
         }
 
-        // Altitude-based additional buffer: add 0.1m per meter of altitude (capped)
-        // This accounts for increased GPS error and wind effects at higher altitudes
-        val altitudeBuffer = (altitudeMeters * 0.1f).coerceIn(0f, 5f).toDouble()
+        // 1. Distance traveled during system latency (GPS + telemetry + command delay)
+        // At 3 m/s with 500ms latency = 1.5m traveled before braking even starts
+        val latencyDistance = currentSpeedMs * SYSTEM_LATENCY_SECONDS
 
-        // Total buffer = speed buffer + altitude buffer + minimum
-        val totalBuffer = MIN_BUFFER_METERS + speedBuffer + altitudeBuffer
+        // 2. Physics-based stopping distance: v² / (2a)
+        // At 3 m/s with 3.0 m/s² decel = 9/6 = 1.5m
+        val stoppingDistance = (currentSpeedMs * currentSpeedMs) / (2 * MAX_DECEL_M_S2)
 
-        // Ensure buffer is within reasonable bounds
+        // 3. Apply safety factor to stopping distance only (latency is already worst-case)
+        val safeStoppingDistance = stoppingDistance * STOPPING_DISTANCE_SAFETY_FACTOR
+
+        // Total buffer = minimum + latency distance + safe stopping distance
+        val totalBuffer = MIN_BUFFER_METERS + latencyDistance + safeStoppingDistance
+
+        // Cap at maximum buffer
         return minOf(MAX_BUFFER_METERS, totalBuffer)
     }
 
@@ -2458,10 +2469,10 @@ class SharedViewModel : ViewModel() {
     }
 
     /**
-     * EMERGENCY BURST: Send BRAKE to stop, then persistently try RTL until it works.
-     * The key insight: BRAKE stops the drone, but we MUST then switch to RTL.
-     * This function sends BRAKE first, waits for it to take effect, then
-     * KEEPS TRYING RTL until the mode actually changes to RTL.
+     * EMERGENCY BURST: Send BRAKE to stop, then immediately try RTL.
+     * OPTIMIZED: Minimal delay between BRAKE and RTL for fast response.
+     * The BRAKE command just needs to be sent - drone starts decelerating immediately.
+     * We don't need to wait for full stop before sending RTL.
      */
     private fun sendEmergencyBrakeAndRTLBurst() {
         viewModelScope.launch {
@@ -2485,9 +2496,10 @@ class SharedViewModel : ViewModel() {
                     Log.e("Geofence", "BRAKE error: ${e.message}")
                 }
 
-                // STEP 2: Wait for drone to actually stop (give BRAKE time to work)
-                Log.i("Geofence", "⏳ Waiting 1.5 seconds for drone to stop...")
-                delay(1500)
+                // STEP 2: Minimal delay - just enough for command to register (300ms)
+                // Drone starts braking immediately, we don't need to wait for full stop
+                Log.i("Geofence", "⏳ Brief pause before RTL (300ms)...")
+                delay(300)
 
                 // STEP 3: Mark RTL as initiated - this stops continuous BRAKE commands
                 rtlInitiated = true
@@ -2514,9 +2526,9 @@ class SharedViewModel : ViewModel() {
                         Log.e("Geofence", "RTL attempt #$attempts error: ${e.message}")
                     }
 
-                    // Small delay before retry
+                    // Short delay before retry (200ms)
                     if (!rtlSuccess) {
-                        delay(500)
+                        delay(200)
                     }
                 }
 
