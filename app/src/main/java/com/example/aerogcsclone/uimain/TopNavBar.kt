@@ -484,6 +484,8 @@ fun TopNavBar(
                         Divider(color = Color.White.copy(alpha = 0.3f))
 
                         // Spray Rate Slider - Always visible
+                        // PWM mapping: OFF=1000, 10%=1100, 50%=1500, 100%=2000
+                        // Uses DO_SET_SERVO (SERVO7) by default for direct servo control
                         Column(modifier = Modifier.padding(vertical = 4.dp)) {
                             Row(verticalAlignment = Alignment.CenterVertically) {
                                 Text(AppStrings.sprayRate, color = Color.White, modifier = Modifier.weight(1f))
@@ -491,9 +493,13 @@ fun TopNavBar(
                             }
                             Slider(
                                 value = sprayRate,
-                                onValueChange = { telemetryViewModel.setSprayRate(it) },
+                                onValueChange = { newRate ->
+                                    // Snap to nearest 10%
+                                    val snappedRate = (Math.round(newRate / 10f) * 10f).coerceIn(10f, 100f)
+                                    telemetryViewModel.setSprayRate(snappedRate)
+                                },
                                 valueRange = 10f..100f, // 10% to 100% (minimum 10%)
-                                steps = 89, // 90 steps for 10-100 range
+                                steps = 8, // 9 positions: 10%, 20%, 30%, 40%, 50%, 60%, 70%, 80%, 90%, 100%
                                 modifier = Modifier.fillMaxWidth(),
                                 colors = SliderDefaults.colors(
                                     thumbColor = if (sprayEnabled) Color.Green else Color.Gray,
@@ -504,6 +510,13 @@ fun TopNavBar(
                             Text(
                                 AppStrings.adjustSprayIntensity,
                                 color = Color.Gray,
+                                style = MaterialTheme.typography.bodySmall,
+                                modifier = Modifier.padding(top = 2.dp)
+                            )
+                            // PWM info text
+                            Text(
+                                "PWM: ${(1000 + (sprayRate.toInt() / 100f * 1000f)).toInt()}",
+                                color = Color.Gray.copy(alpha = 0.7f),
                                 style = MaterialTheme.typography.bodySmall,
                                 modifier = Modifier.padding(top = 2.dp)
                             )

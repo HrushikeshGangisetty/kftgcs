@@ -55,6 +55,7 @@ fun PlanScreen(
     val fenceRadius by telemetryViewModel.fenceRadius.collectAsState()
     val geofenceEnabled by telemetryViewModel.geofenceEnabled.collectAsState()
     val geofencePolygon by telemetryViewModel.geofencePolygon.collectAsState()
+    val sprayRate by telemetryViewModel.sprayRate.collectAsState()
     val context = LocalContext.current
     val uploadProgress by telemetryViewModel.missionUploadProgress.collectAsState()
 
@@ -1582,6 +1583,68 @@ fun PlanScreen(
                                 color = Color.Gray,
                                 style = MaterialTheme.typography.bodySmall,
                                 modifier = Modifier.padding(top = 4.dp)
+                            )
+                        }
+
+                        // Spray Rate Slider (PWM-based control)
+                        // PWM mapping: OFF=1000, 10%=1100, 50%=1500, 100%=2000
+                        // Uses DO_SET_SERVO (SERVO7) by default
+                        Column(modifier = Modifier.padding(vertical = 4.dp)) {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Text("Spray Rate", color = Color.White, modifier = Modifier.weight(1f))
+                                Text("${sprayRate.toInt()} %", color = Color.White, fontWeight = FontWeight.Bold)
+                            }
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                IconButton(
+                                    onClick = {
+                                        val newRate = (sprayRate - 10f).coerceAtLeast(10f)
+                                        telemetryViewModel.setSprayRate(newRate)
+                                    },
+                                    modifier = Modifier.size(32.dp)
+                                ) {
+                                    Icon(
+                                        Icons.Default.Remove,
+                                        contentDescription = "Decrease",
+                                        tint = if (autoSpray) Color.Green else Color.White,
+                                        modifier = Modifier.size(18.dp)
+                                    )
+                                }
+                                Slider(
+                                    value = sprayRate,
+                                    onValueChange = { newRate ->
+                                        // Snap to nearest 10%
+                                        val snappedRate = (Math.round(newRate / 10f) * 10f).coerceIn(10f, 100f)
+                                        telemetryViewModel.setSprayRate(snappedRate)
+                                    },
+                                    valueRange = 10f..100f,
+                                    steps = 8, // 9 positions: 10%, 20%, 30%... 100%
+                                    modifier = Modifier.weight(1f),
+                                    colors = SliderDefaults.colors(
+                                        thumbColor = if (autoSpray) Color.Green else MaterialTheme.colorScheme.primary,
+                                        activeTrackColor = if (autoSpray) Color.Green else MaterialTheme.colorScheme.primary,
+                                        inactiveTrackColor = Color.Gray
+                                    )
+                                )
+                                IconButton(
+                                    onClick = {
+                                        val newRate = (sprayRate + 10f).coerceAtMost(100f)
+                                        telemetryViewModel.setSprayRate(newRate)
+                                    },
+                                    modifier = Modifier.size(32.dp)
+                                ) {
+                                    Icon(
+                                        Icons.Default.Add,
+                                        contentDescription = "Increase",
+                                        tint = if (autoSpray) Color.Green else Color.White,
+                                        modifier = Modifier.size(18.dp)
+                                    )
+                                }
+                            }
+                            Text(
+                                "PWM: ${(1000 + (sprayRate.toInt() / 100f * 1000f)).toInt()} (10-100%)",
+                                color = Color.Gray,
+                                style = MaterialTheme.typography.bodySmall,
+                                modifier = Modifier.padding(top = 2.dp)
                             )
                         }
 
