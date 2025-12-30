@@ -1,6 +1,9 @@
 package com.example.aerogcsclone.uimain
 
+import android.net.Uri
 import android.widget.Toast
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -26,6 +29,7 @@ import com.example.aerogcsclone.ui.components.MissionChoiceDialog
 import com.example.aerogcsclone.ui.components.TemplateSelectionDialog
 import com.example.aerogcsclone.ui.components.MissionTypeSelectionDialog
 import com.example.aerogcsclone.ui.components.GridSourceSelectionDialog
+import com.example.aerogcsclone.ui.components.KmlPolygonSelectionDialog
 import com.example.aerogcsclone.viewmodel.MissionTemplateViewModel
 import com.google.android.gms.maps.model.LatLng
 import com.divpundir.mavlink.api.MavEnumValue
@@ -40,6 +44,8 @@ import com.google.android.gms.maps.CameraUpdateFactory
 import com.example.aerogcsclone.grid.*
 import com.example.aerogcsclone.telemetry.SharedViewModel
 import com.example.aerogcsclone.utils.ObstaclePathPlanner
+import com.example.aerogcsclone.utils.KmlBoundaryParser
+import com.example.aerogcsclone.utils.KmlPolygon
 import java.util.Locale
 import com.example.aerogcsclone.utils.AppStrings
 
@@ -125,6 +131,14 @@ fun PlanScreen(
     // Selected geofence point tracking for adjustment
     var selectedGeofencePointIndex by remember { mutableStateOf<Int?>(null) }
 
+    // ===== KML IMPORT STATE =====
+    // Parsed KML polygons for user selection
+    var kmlPolygons by remember { mutableStateOf<List<KmlPolygon>>(emptyList()) }
+    // Show polygon selection dialog when multiple polygons found
+    var showKmlPolygonSelectionDialog by remember { mutableStateOf(false) }
+    // KML parser instance
+    val kmlParser = remember { KmlBoundaryParser() }
+
     // ===== OBSTACLE AVOIDANCE STATE =====
     // List of obstacle zones (each obstacle is a list of 4+ points forming a polygon)
     var obstacles by remember { mutableStateOf<List<List<LatLng>>>(emptyList()) }
@@ -142,6 +156,63 @@ fun PlanScreen(
     // Waypoint list panel state
     var showWaypointList by remember { mutableStateOf(false) }
 
+    // ===== KML FILE PICKER =====
+    // File picker launcher for KML import
+    val kmlFileLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenDocument(),
+        onResult = { uri: Uri? ->
+            if (uri != null) {
+                try {
+                    val inputStream = context.contentResolver.openInputStream(uri)
+                    if (inputStream != null) {
+                        val result = kmlParser.parseAllPolygons(inputStream)
+
+                        if (result.errorMessage != null) {
+                            Toast.makeText(context, result.errorMessage, Toast.LENGTH_LONG).show()
+                        } else if (result.polygons.isEmpty()) {
+                            Toast.makeText(context, "No valid polygons found in KML file", Toast.LENGTH_LONG).show()
+                        } else if (result.polygons.size == 1) {
+                            // Single polygon - use it directly
+                            val polygon = result.polygons.first()
+                            surveyPolygon = polygon.points
+                            isGridSurveyMode = true
+                            isPlotDefinitionMode = true
+                            isGridGenerated = false
+                            showGridControls = false
+                            hasStartedPlanning = true
+                            showGridSourceDialog = false
+
+                            // Center map on the polygon
+                            if (polygon.points.isNotEmpty()) {
+                                val center = polygon.points.first()
+                                coroutineScope.launch {
+                                    cameraPositionState.animate(
+                                        CameraUpdateFactory.newLatLngZoom(center, 18f)
+                                    )
+                                }
+                            }
+                            Toast.makeText(
+                                context,
+                                "Loaded '${polygon.name}' with ${polygon.points.size} boundary points",
+                                Toast.LENGTH_SHORT
+                            ).show()
+                        } else {
+                            // Multiple polygons - show selection dialog
+                            kmlPolygons = result.polygons
+                            showKmlPolygonSelectionDialog = true
+                            showGridSourceDialog = false
+                        }
+                    } else {
+                        Toast.makeText(context, "Unable to read KML file", Toast.LENGTH_LONG).show()
+                    }
+                } catch (e: Exception) {
+                    Toast.makeText(context, "Error reading KML: ${e.message}", Toast.LENGTH_LONG).show()
+                    android.util.Log.e("PlanScreen", "KML import error", e)
+                }
+            }
+        }
+    )
+
     // Center map once when screen opens
     var centeredOnce by remember { mutableStateOf(false) }
     LaunchedEffect(telemetryState.latitude, telemetryState.longitude) {
@@ -150,6 +221,14 @@ fun PlanScreen(
         if (!centeredOnce && lat != null && lon != null) {
             cameraPositionState.move(CameraUpdateFactory.newLatLngZoom(LatLng(lat, lon), 16f))
             centeredOnce = true
+        }
+    }
+
+    // Debug: Track surveyPolygon changes
+    LaunchedEffect(surveyPolygon) {
+        android.util.Log.d("PlanScreen", "surveyPolygon changed: ${surveyPolygon.size} points, isGridSurveyMode=$isGridSurveyMode")
+        if (surveyPolygon.isNotEmpty()) {
+            android.util.Log.d("PlanScreen", "First point: ${surveyPolygon.first().latitude}, ${surveyPolygon.first().longitude}")
         }
     }
 
@@ -2212,14 +2291,14 @@ fun PlanScreen(
                         hasStartedPlanning = true
                     },
                     onImportKml = {
-                        // For now, go to normal plan tab (KML import to be implemented later)
-                        showGridSourceDialog = false
-                        isGridSurveyMode = true
-                        isPlotDefinitionMode = true
-                        isGridGenerated = false
-                        showGridControls = false // Don't show grid controls until plot is generated
-                        hasStartedPlanning = true
-                        Toast.makeText(context, "KML import coming soon. Use Map mode for now.", Toast.LENGTH_SHORT).show()
+                        // Launch file picker for KML/KMZ files
+                        kmlFileLauncher.launch(arrayOf(
+                            "application/vnd.google-earth.kml+xml",
+                            "application/vnd.google-earth.kmz",
+                            "application/xml",
+                            "text/xml",
+                            "*/*"  // Fallback for file managers that don't recognize KML MIME type
+                        ))
                     },
                     onUseMap = {
                         // Map mode - user will define plot boundary manually
@@ -2243,6 +2322,47 @@ fun PlanScreen(
                     onBack = {
                         showGridSourceDialog = false
                         showMissionTypeDialog = true
+                    }
+                )
+            }
+
+            // KML Polygon Selection Dialog - shown when multiple polygons found in KML
+            if (showKmlPolygonSelectionDialog && kmlPolygons.isNotEmpty()) {
+                KmlPolygonSelectionDialog(
+                    polygons = kmlPolygons,
+                    onDismiss = {
+                        showKmlPolygonSelectionDialog = false
+                        kmlPolygons = emptyList()
+                        // Go back to grid source selection
+                        showGridSourceDialog = true
+                    },
+                    onSelectPolygon = { selectedPolygon ->
+                        showKmlPolygonSelectionDialog = false
+                        kmlPolygons = emptyList()
+
+                        // Set the selected polygon as the survey boundary
+                        surveyPolygon = selectedPolygon.points
+                        isGridSurveyMode = true
+                        isPlotDefinitionMode = true
+                        isGridGenerated = false
+                        showGridControls = false
+                        hasStartedPlanning = true
+
+                        // Center map on the polygon
+                        if (selectedPolygon.points.isNotEmpty()) {
+                            val center = selectedPolygon.points.first()
+                            coroutineScope.launch {
+                                cameraPositionState.animate(
+                                    CameraUpdateFactory.newLatLngZoom(center, 18f)
+                                )
+                            }
+                        }
+
+                        Toast.makeText(
+                            context,
+                            "Loaded '${selectedPolygon.name}' with ${selectedPolygon.points.size} boundary points",
+                            Toast.LENGTH_SHORT
+                        ).show()
                     }
                 )
             }

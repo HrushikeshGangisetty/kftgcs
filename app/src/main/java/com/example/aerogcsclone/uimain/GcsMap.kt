@@ -762,6 +762,26 @@ fun GcsMap(
             }
         }
 
+        // Draw connecting lines between grid waypoints (turn lines between survey lines)
+        // These connect the end of one survey line to the start of the next
+        if (gridWaypoints.size >= 2 && !splitPlanMode) {
+            for (i in 0 until gridWaypoints.size - 1) {
+                // Connect consecutive waypoints
+                val start = gridWaypoints[i]
+                val end = gridWaypoints[i + 1]
+                // Check if this is a turn line (not part of a survey line)
+                // Survey lines are between even-odd pairs (0-1, 2-3, 4-5, etc.)
+                // Turn lines are between odd-even pairs (1-2, 3-4, 5-6, etc.)
+                if (i % 2 == 1) { // Turn line (connecting line between survey lines)
+                    Polyline(
+                        points = listOf(start, end),
+                        width = 3f,
+                        color = Color.Green.copy(alpha = 0.7f)
+                    )
+                }
+            }
+        }
+
         // Split Plan: Highlight selected grid lines in yellow
         if (splitPlanMode && splitGridLines.isNotEmpty()) {
             splitGridLines.forEach { line ->
@@ -771,6 +791,22 @@ fun GcsMap(
                         width = 4f,  // Thicker line for selected portion
                         color = Color.Yellow
                     )
+                }
+            }
+
+            // Draw connecting lines for split plan waypoints
+            if (splitGridWaypoints.size >= 2) {
+                for (i in 0 until splitGridWaypoints.size - 1) {
+                    val start = splitGridWaypoints[i]
+                    val end = splitGridWaypoints[i + 1]
+                    // Turn lines are between odd-even pairs (1-2, 3-4, 5-6, etc.)
+                    if (i % 2 == 1) {
+                        Polyline(
+                            points = listOf(start, end),
+                            width = 3f,
+                            color = Color.Yellow.copy(alpha = 0.7f)
+                        )
+                    }
                 }
             }
         }
