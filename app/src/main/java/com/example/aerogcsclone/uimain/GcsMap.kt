@@ -162,6 +162,60 @@ private fun createSmallLabelMarker(text: String, backgroundColor: Int = android.
     return BitmapDescriptorFactory.fromBitmap(bitmap)
 }
 
+// Helper function to create small green "R" marker for resume point
+private fun createSmallResumeMarker(): BitmapDescriptor {
+    val size = 60 // Small round marker
+    val bitmap = Bitmap.createBitmap(size, size, Bitmap.Config.ARGB_8888)
+    val canvas = Canvas(bitmap)
+
+    // Draw green circle background
+    val circlePaint = android.graphics.Paint().apply {
+        isAntiAlias = true
+        color = android.graphics.Color.rgb(76, 175, 80) // Material Green 500
+        style = android.graphics.Paint.Style.FILL
+    }
+    canvas.drawCircle(size / 2f, size / 2f, size / 2f - 3, circlePaint)
+
+    // Draw white border for visibility
+    val borderPaint = android.graphics.Paint().apply {
+        isAntiAlias = true
+        color = android.graphics.Color.WHITE
+        style = android.graphics.Paint.Style.STROKE
+        strokeWidth = 3f
+    }
+    canvas.drawCircle(size / 2f, size / 2f, size / 2f - 3, borderPaint)
+
+    // Draw dark outline for contrast
+    val outlinePaint = android.graphics.Paint().apply {
+        isAntiAlias = true
+        color = android.graphics.Color.DKGRAY
+        style = android.graphics.Paint.Style.STROKE
+        strokeWidth = 1f
+    }
+    canvas.drawCircle(size / 2f, size / 2f, size / 2f - 1, outlinePaint)
+
+    // Draw the "R" text
+    val textPaint = android.graphics.Paint().apply {
+        isAntiAlias = true
+        color = android.graphics.Color.WHITE
+        textSize = 36f
+        typeface = android.graphics.Typeface.create(android.graphics.Typeface.DEFAULT, android.graphics.Typeface.BOLD)
+        textAlign = android.graphics.Paint.Align.CENTER
+    }
+
+    // Add text shadow for better readability
+    textPaint.setShadowLayer(1f, 1f, 1f, android.graphics.Color.BLACK)
+
+    // Center the text vertically
+    val textBounds = android.graphics.Rect()
+    textPaint.getTextBounds("R", 0, 1, textBounds)
+    val textY = size / 2f + textBounds.height() / 2f - textBounds.bottom
+
+    canvas.drawText("R", size / 2f, textY, textPaint)
+
+    return BitmapDescriptorFactory.fromBitmap(bitmap)
+}
+
 // Helper function to create drone icon with directional arrow indicating nose heading
 private fun createDroneIconWithArrow(context: android.content.Context): BitmapDescriptor? {
     return runCatching {
@@ -264,7 +318,9 @@ fun GcsMap(
     selectedObstacleIndex: Int? = null,
     onObstacleClick: (obstacleIndex: Int) -> Unit = {},
     // Obstacle point drag callback
-    onObstaclePointDrag: (obstacleIndex: Int, pointIndex: Int, newPosition: LatLng) -> Unit = { _, _, _ -> }
+    onObstaclePointDrag: (obstacleIndex: Int, pointIndex: Int, newPosition: LatLng) -> Unit = { _, _, _ -> },
+    // Resume point location - shows "R" marker where drone paused
+    resumePointLocation: LatLng? = null
 ) {
     val context = LocalContext.current
     val cameraState = cameraPositionState ?: rememberCameraPositionState()
@@ -287,6 +343,7 @@ fun GcsMap(
     val startMarker = remember { createMarkerWithText("S", android.graphics.Color.GREEN) }
     val endMarker = remember { createMarkerWithText("E", android.graphics.Color.RED) }
     val obstacleXMarker = remember { createMarkerWithText("X", android.graphics.Color.RED) } // For obstacle centroid
+    val resumeMarker = remember { createSmallResumeMarker() } // Small green "R" for resume point
 
     val lat = telemetryState.latitude
     val lon = telemetryState.longitude
@@ -809,6 +866,18 @@ fun GcsMap(
         // Red polyline showing the drone's traveled path
         if (visitedPositions.size > 1) {
             Polyline(points = visitedPositions.toList(), width = 6f, color = Color.Red)
+        }
+
+        // ===== RESUME POINT MARKER =====
+        // Show green "R" marker at the location where drone paused (LOITER mode)
+        if (resumePointLocation != null) {
+            Marker(
+                state = MarkerState(position = resumePointLocation),
+                title = "Resume Point",
+                snippet = "Drone paused here",
+                icon = resumeMarker,
+                anchor = Offset(0.5f, 0.5f)
+            )
         }
 
         // Optional grid overlay for regular waypoints

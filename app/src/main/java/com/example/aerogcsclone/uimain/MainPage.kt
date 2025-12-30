@@ -89,13 +89,12 @@ fun MainPage(
     // Collect spray status popup
     val sprayStatusPopup by telemetryViewModel.sprayStatusPopup.collectAsState()
 
-    // Collect "Add Resume Here" popup state (triggered when mode changes from AUTO to LOITER)
-    val showAddResumeHerePopup by telemetryViewModel.showAddResumeHerePopup.collectAsState()
-    val resumePointWaypoint by telemetryViewModel.resumePointWaypoint.collectAsState()
+    // Collect resume point location for displaying "R" marker on map
+    val resumePointLocation by telemetryViewModel.resumePointLocation.collectAsState()
 
-    // Progress dialog state for Add Resume Here
-    var showAddResumeProgressDialog by remember { mutableStateOf(false) }
-    var addResumeProgressMessage by remember { mutableStateOf("Preparing resume mission...") }
+    // Collect "Set Resume Point Here" popup state
+    val showSetResumePointPopup by telemetryViewModel.showAddResumeHerePopup.collectAsState()
+    val resumePointWaypoint by telemetryViewModel.resumePointWaypoint.collectAsState()
 
     // Resume Mission dialog states
     var showResumeWarningDialog by remember { mutableStateOf(false) }
@@ -166,7 +165,9 @@ fun MainPage(
                     selectedGeofencePointIndex = index
                     Toast.makeText(context, "Geofence point ${index + 1} selected - drag to adjust", Toast.LENGTH_SHORT).show()
                 },
-                geofenceAdjustmentEnabled = geofenceEnabled
+                geofenceAdjustmentEnabled = geofenceEnabled,
+                // Resume point marker - shows "R" where drone paused
+                resumePointLocation = resumePointLocation
             )
 
             StatusPanel(
@@ -433,40 +434,24 @@ fun MainPage(
             )
         }
 
-        // === ADD RESUME HERE POPUP ===
+        // === SET RESUME POINT POPUP ===
         // This dialog appears when mode changes from AUTO to LOITER during a mission
-        if (showAddResumeHerePopup) {
+        if (showSetResumePointPopup) {
             AlertDialog(
                 onDismissRequest = {
-                    telemetryViewModel.dismissAddResumeHerePopup()
+                    telemetryViewModel.cancelSetResumePoint()
                 },
                 confirmButton = {
                     Button(
                         onClick = {
-                            showAddResumeProgressDialog = true
-                            telemetryViewModel.confirmAddResumeHere(
-                                onProgress = { progress ->
-                                    addResumeProgressMessage = progress
-                                },
-                                onResult = { success, error ->
-                                    showAddResumeProgressDialog = false
-                                    if (success) {
-                                        Toast.makeText(
-                                            context,
-                                            "Resume point set - Switch to AUTO to resume mission",
-                                            Toast.LENGTH_LONG
-                                        ).show()
-                                    } else {
-                                        Toast.makeText(
-                                            context,
-                                            "Failed: ${error ?: "Unknown error"}",
-                                            Toast.LENGTH_LONG
-                                        ).show()
-                                    }
-                                }
-                            )
+                            telemetryViewModel.confirmSetResumePoint()
+                            Toast.makeText(
+                                context,
+                                "Resume point set at waypoint ${resumePointWaypoint ?: "?"}",
+                                Toast.LENGTH_SHORT
+                            ).show()
                         },
-                        colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFFF9800))
+                        colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF4CAF50)) // Green
                     ) {
                         Text("OK", color = Color.White)
                     }
@@ -474,7 +459,7 @@ fun MainPage(
                 dismissButton = {
                     Button(
                         onClick = {
-                            telemetryViewModel.dismissAddResumeHerePopup()
+                            telemetryViewModel.cancelSetResumePoint()
                         },
                         colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.secondary)
                     ) {
@@ -486,12 +471,12 @@ fun MainPage(
                         Icon(
                             Icons.Default.LocationOn,
                             contentDescription = "Resume Point",
-                            tint = Color(0xFFFF9800),
+                            tint = Color(0xFF4CAF50), // Green
                             modifier = Modifier.size(24.dp)
                         )
                         Spacer(modifier = Modifier.width(8.dp))
                         Text(
-                            "Add Resume Here",
+                            "Set Resume Point",
                             style = MaterialTheme.typography.titleLarge,
                             fontWeight = FontWeight.Bold
                         )
@@ -500,58 +485,21 @@ fun MainPage(
                 text = {
                     Column {
                         Text(
-                            "Mode changed from AUTO to LOITER",
+                            "Do you want to set resume point here?",
                             style = MaterialTheme.typography.bodyLarge,
                             fontWeight = FontWeight.Bold
                         )
                         Spacer(modifier = Modifier.height(8.dp))
                         Text(
-                            "Current waypoint: ${resumePointWaypoint ?: "Unknown"}",
+                            "Waypoint: ${resumePointWaypoint ?: "Unknown"}",
                             style = MaterialTheme.typography.bodyMedium,
                             color = MaterialTheme.colorScheme.primary
                         )
-                        Spacer(modifier = Modifier.height(12.dp))
-                        Text(
-                            "Click OK to set this as the resume point. The modified mission will be uploaded to the flight controller.",
-                            style = MaterialTheme.typography.bodyMedium
-                        )
                         Spacer(modifier = Modifier.height(8.dp))
                         Text(
-                            "After confirmation, switch to AUTO mode to resume the mission from this point.",
+                            "Click OK to mark this location as resume point.",
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                    }
-                }
-            )
-        }
-
-        // Add Resume Here Progress Dialog
-        if (showAddResumeProgressDialog) {
-            AlertDialog(
-                onDismissRequest = { /* Cannot dismiss during operation */ },
-                confirmButton = { },
-                title = {
-                    Text(
-                        "Preparing Resume Mission",
-                        style = MaterialTheme.typography.titleLarge,
-                        fontWeight = FontWeight.Bold
-                    )
-                },
-                text = {
-                    Column(
-                        horizontalAlignment = Alignment.CenterHorizontally,
-                        modifier = Modifier.fillMaxWidth()
-                    ) {
-                        CircularProgressIndicator(
-                            modifier = Modifier.size(48.dp),
-                            color = MaterialTheme.colorScheme.primary
-                        )
-                        Spacer(modifier = Modifier.height(16.dp))
-                        Text(
-                            addResumeProgressMessage,
-                            style = MaterialTheme.typography.bodyLarge,
-                            textAlign = TextAlign.Center
                         )
                     }
                 }
