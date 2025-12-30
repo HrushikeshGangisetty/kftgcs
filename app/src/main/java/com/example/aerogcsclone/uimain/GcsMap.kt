@@ -338,12 +338,15 @@ fun GcsMap(
                 // Add draggable markers for geofence adjustment when enabled
                 if (geofenceAdjustmentEnabled) {
                     geofencePolygon.forEachIndexed { index, point ->
-                        key("geofence_$index") { // Unique key per geofence point
-                            // Use point coordinates as key to update marker only when polygon actually changes
+                        key("geofence_${index}_${point.latitude}_${point.longitude}") { // Include coordinates in key for proper recomposition
                             val markerState = rememberMarkerState(
-                                key = "gf_${point.latitude}_${point.longitude}",
                                 position = point
                             )
+
+                            // Force update marker position when point changes
+                            LaunchedEffect(point) {
+                                markerState.position = point
+                            }
 
                             // Listen to marker position changes for drag events
                             LaunchedEffect(markerState.position) {
@@ -374,6 +377,30 @@ fun GcsMap(
                         }
                     }
                 }
+            }
+        }
+
+        // ===== OUTER FENCE RENDERING =====
+        // Render outer fence 2m away from the normal geofence with yellow background
+        if (geofenceEnabled && geofencePolygon.isNotEmpty() && geofencePolygon.size >= 3) {
+            val outerFencePolygon = calculateOuterFence(geofencePolygon, 2.0) // 2 meters offset
+
+            if (outerFencePolygon.isNotEmpty()) {
+                // Fill the outer fence area with semi-transparent yellow
+                Polygon(
+                    points = outerFencePolygon,
+                    fillColor = Color.Yellow.copy(alpha = 0.2f),
+                    strokeColor = Color.Yellow,
+                    strokeWidth = 3f
+                )
+
+                // Draw the outer fence boundary outline
+                val closedOuterFence = outerFencePolygon + outerFencePolygon.first()
+                Polyline(
+                    points = closedOuterFence,
+                    width = 3f,
+                    color = Color.Yellow
+                )
             }
         }
 
@@ -807,3 +834,74 @@ fun GcsMap(
         }
     }
 }
+
+/**
+ * Calculate an outer fence polygon that is offset by a specified distance (in meters)
+ * from the inner geofence polygon. The outer fence will be placed OUTSIDE the geofence.
+ */
+private fun calculateOuterFence(innerPolygon: List<LatLng>, offsetMeters: Double): List<LatLng> {
+    if (innerPolygon.size < 3) return emptyList()
+
+    val outerPoints = mutableListOf<LatLng>()
+    val n = innerPolygon.size
+
+    // Determine if polygon is clockwise or counter-clockwise
+    // Using the shoelace formula to calculate signed area
+    var signedArea = 0.0
+    for (i in 0 until n) {
+        val j = (i + 1) % n
+        signedArea += innerPolygon[i].longitude * innerPolygon[j].latitude
+        signedArea -= innerPolygon[j].longitude * innerPolygon[i].latitude
+    }
+    // If signedArea > 0, polygon is counter-clockwise; if < 0, clockwise
+    val isClockwise = signedArea < 0
+
+    // For each point in the polygon, calculate the offset point
+    for (i in innerPolygon.indices) {
+        val prev = innerPolygon[(i - 1 + n) % n]
+        val curr = innerPolygon[i]
+        val next = innerPolygon[(i + 1) % n]
+
+        // Calculate the heading from prev to curr
+        val heading1 = SphericalUtil.computeHeading(prev, curr)
+        // Calculate the heading from curr to next
+        val heading2 = SphericalUtil.computeHeading(curr, next)
+
+        // Calculate perpendicular headings
+        // For OUTWARD offset: use -90 for clockwise, +90 for counter-clockwise
+        val perpOffset = if (isClockwise) -90.0 else 90.0
+        val perpHeading1 = heading1 + perpOffset
+        val perpHeading2 = heading2 + perpOffset
+
+        // Calculate the average perpendicular heading for smooth corners
+        // Handle angle wrapping properly
+        val avgPerpHeading = averageAngles(perpHeading1, perpHeading2)
+
+        // Calculate the offset point using the average perpendicular heading
+        val offsetPoint = SphericalUtil.computeOffset(curr, offsetMeters, avgPerpHeading)
+        outerPoints.add(offsetPoint)
+    }
+
+    return outerPoints
+}
+
+/**
+ * Calculate the average of two angles, handling the wrap-around at 360 degrees
+ */
+private fun averageAngles(angle1: Double, angle2: Double): Double {
+    // Normalize angles to 0-360 range
+    val a1 = ((angle1 % 360) + 360) % 360
+    val a2 = ((angle2 % 360) + 360) % 360
+
+    // Calculate the difference
+    var diff = a2 - a1
+    if (diff > 180) diff -= 360
+    if (diff < -180) diff += 360
+
+    // Average is a1 + half the difference
+    val avg = a1 + diff / 2
+
+    // Normalize result
+    return ((avg % 360) + 360) % 360
+}
+

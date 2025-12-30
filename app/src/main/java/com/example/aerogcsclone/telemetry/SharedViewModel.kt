@@ -645,6 +645,9 @@ class SharedViewModel : ViewModel() {
     private val _fenceRadius = MutableStateFlow(5f)
     val fenceRadius: StateFlow<Float> = _fenceRadius.asStateFlow()
 
+    // Track previous fence radius to calculate delta for scaling
+    private var _previousFenceRadius: Float = 5f
+
     private val _geofenceEnabled = MutableStateFlow(false)
     val geofenceEnabled: StateFlow<Boolean> = _geofenceEnabled.asStateFlow()
 
@@ -653,6 +656,7 @@ class SharedViewModel : ViewModel() {
     
     // Store home position for geofence calculation
     private val _homePosition = MutableStateFlow<LatLng?>(null)
+
 
     // Geofence shape: true for square, false for polygon (default square for MainPage)
     private val _useSquareGeofence = MutableStateFlow(true)
@@ -978,8 +982,29 @@ class SharedViewModel : ViewModel() {
 
     fun setFenceRadius(radius: Float) {
         // Ensure minimum 5m radius
-        _fenceRadius.value = radius.coerceAtLeast(5f)
-        updateGeofencePolygon()
+        val newRadius = radius.coerceAtLeast(5f)
+        val oldRadius = _fenceRadius.value
+
+        // Calculate the delta (change in buffer distance)
+        val deltaMeters = (newRadius - oldRadius).toDouble()
+
+        _fenceRadius.value = newRadius
+
+        // If geofence is enabled and we have an existing polygon, scale it
+        if (_geofenceEnabled.value && _geofencePolygon.value.size >= 3 && deltaMeters != 0.0) {
+            // Scale the existing polygon by the delta
+            val scaledPolygon = GeofenceUtils.scalePolygon(_geofencePolygon.value, deltaMeters)
+            if (scaledPolygon.size >= 3) {
+                _geofencePolygon.value = scaledPolygon
+                Log.i("Geofence", "Geofence polygon scaled by ${deltaMeters}m (new buffer: ${newRadius}m)")
+            }
+        } else {
+            // No existing polygon, generate a new one
+            updateGeofencePolygon()
+        }
+
+        // Update the previous radius tracker
+        _previousFenceRadius = newRadius
     }
 
     fun setGeofenceEnabled(enabled: Boolean) {

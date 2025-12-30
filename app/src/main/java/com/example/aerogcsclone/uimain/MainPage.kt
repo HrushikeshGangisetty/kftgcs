@@ -198,34 +198,6 @@ fun MainPage(
                 }
             }
 
-            // Pause and Resume buttons on the left side
-            PauseResumeButtons(
-                modifier = Modifier
-                    .align(Alignment.CenterStart)
-                    .padding(12.dp),
-                onPauseMission = {
-                    telemetryViewModel.pauseMission()
-                },
-                onResumeMission = {
-                    android.util.Log.i("MainPage", "=== RESUME CALLBACK TRIGGERED ===")
-
-                    // Log the state values for debugging
-                    android.util.Log.i("MainPage", "pausedAtWaypoint: ${telemetryState.pausedAtWaypoint}")
-                    android.util.Log.i("MainPage", "currentWaypoint: ${telemetryState.currentWaypoint}")
-
-                    // Get the last auto waypoint (current or paused waypoint)
-                    val lastAutoWp = telemetryState.pausedAtWaypoint
-                        ?: telemetryState.currentWaypoint
-                        ?: 1
-
-                    android.util.Log.i("MainPage", "Resolved waypoint: $lastAutoWp")
-                    resumeWaypointNumber = lastAutoWp
-
-                    showResumeWarningDialog = true
-                },
-                currentMode = telemetryState.mode,
-                missionPaused = telemetryState.missionPaused
-            )
 
             FloatingButtons(
                 modifier = Modifier
@@ -792,92 +764,6 @@ fun FloatingButtons(
                 Spacer(modifier = Modifier.height(2.dp))
                 Text(
                     text = AppStrings.mapType,
-                    color = Color.White,
-                    fontSize = 9.sp,
-                    fontWeight = FontWeight.Medium
-                )
-            }
-        }
-    }
-}
-
-@Composable
-fun PauseResumeButtons(
-    modifier: Modifier = Modifier,
-    onPauseMission: () -> Unit,
-    onResumeMission: () -> Unit,
-    currentMode: String?,
-    missionPaused: Boolean = false
-) {
-    // Check if mission is running in AUTO mode
-    val isMissionRunning = currentMode?.contains("Auto", ignoreCase = true) == true
-
-    Column(
-        modifier = modifier,
-        verticalArrangement = Arrangement.spacedBy(8.dp),
-        horizontalAlignment = Alignment.CenterHorizontally
-    ) {
-        // Pause Button (only active when mission is running)
-        FloatingActionButton(
-            onClick = {
-                if (isMissionRunning) {
-                    onPauseMission()
-                }
-            },
-            containerColor = Color.Black.copy(alpha = 0.7f),
-            modifier = Modifier.size(width = 70.dp, height = 56.dp)
-        ) {
-            Column(
-                horizontalAlignment = Alignment.CenterHorizontally,
-                verticalArrangement = Arrangement.Center
-            ) {
-                Icon(
-                    Icons.Default.Pause,
-                    contentDescription = AppStrings.pause,
-                    tint = Color.White,
-                    modifier = Modifier.size(20.dp)
-                )
-                Spacer(modifier = Modifier.height(2.dp))
-                Text(
-                    text = AppStrings.pause,
-                    color = Color.White,
-                    fontSize = 9.sp,
-                    fontWeight = FontWeight.Medium
-                )
-            }
-        }
-
-        // Resume Button (orange when mission is paused)
-        FloatingActionButton(
-            onClick = {
-                android.util.Log.i("MainPage", "Resume button clicked! missionPaused=$missionPaused")
-                if (missionPaused) {
-                    onResumeMission()
-                } else {
-                    // For testing: allow resume even when not paused
-                    android.util.Log.w("MainPage", "Resume clicked but mission not paused - allowing anyway for testing")
-                    onResumeMission()
-                }
-            },
-            containerColor = if (missionPaused)
-                Color(0xFFFFA500).copy(alpha = 0.7f) // Orange when paused
-            else
-                Color.Black.copy(alpha = 0.7f), // Black when not paused
-            modifier = Modifier.size(width = 70.dp, height = 56.dp)
-        ) {
-            Column(
-                horizontalAlignment = Alignment.CenterHorizontally,
-                verticalArrangement = Arrangement.Center
-            ) {
-                Icon(
-                    Icons.Default.PlayArrow,
-                    contentDescription = AppStrings.resumeBtn,
-                    tint = Color.White,
-                    modifier = Modifier.size(20.dp)
-                )
-                Spacer(modifier = Modifier.height(2.dp))
-                Text(
-                    text = AppStrings.resumeBtn,
                     color = Color.White,
                     fontSize = 9.sp,
                     fontWeight = FontWeight.Medium

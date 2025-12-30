@@ -387,4 +387,62 @@ object GeofenceUtils {
         // If inside, return the distance to the nearest edge
         return distanceToPolygonEdge(point, polygon)
     }
+
+    /**
+     * Scale an existing polygon outward or inward by a specified delta distance.
+     * Positive deltaMeters expands the polygon, negative contracts it.
+     * This preserves the polygon shape while changing its size.
+     *
+     * @param polygon The existing polygon to scale
+     * @param deltaMeters The distance change in meters (positive = expand, negative = contract)
+     * @return Scaled polygon
+     */
+    fun scalePolygon(polygon: List<LatLng>, deltaMeters: Double): List<LatLng> {
+        if (polygon.size < 3) return polygon
+        if (deltaMeters == 0.0) return polygon
+
+        val earthRadius = 6371000.0
+        val scaledPoints = mutableListOf<LatLng>()
+
+        // Calculate centroid
+        val centroid = calculateCentroid(polygon)
+
+        for (i in polygon.indices) {
+            val current = polygon[i]
+
+            // Calculate direction from centroid to current point (outward direction)
+            val toCentroidLat = current.latitude - centroid.latitude
+            val toCentroidLon = current.longitude - centroid.longitude
+            val distToCentroid = sqrt(toCentroidLat * toCentroidLat + toCentroidLon * toCentroidLon)
+
+            if (distToCentroid < 1e-10) {
+                // Point is at centroid, can't determine direction
+                scaledPoints.add(current)
+                continue
+            }
+
+            // Normalize the outward direction
+            val outwardLat = toCentroidLat / distToCentroid
+            val outwardLon = toCentroidLon / distToCentroid
+
+            // Apply delta distance in the outward direction
+            val avgLat = current.latitude
+            val offsetLat = outwardLat * (deltaMeters / earthRadius) * 180 / PI
+            val offsetLon = outwardLon * (deltaMeters / (earthRadius * cos(avgLat * PI / 180))) * 180 / PI
+
+            scaledPoints.add(LatLng(
+                current.latitude + offsetLat,
+                current.longitude + offsetLon
+            ))
+        }
+
+        return scaledPoints
+    }
+
+    /**
+     * Calculate the centroid of a polygon (public version)
+     */
+    fun getCentroid(points: List<LatLng>): LatLng {
+        return calculateCentroid(points)
+    }
 }
