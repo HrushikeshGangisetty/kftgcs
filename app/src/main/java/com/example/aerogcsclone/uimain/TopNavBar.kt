@@ -50,8 +50,7 @@ fun TopNavBar(
     val geofenceEnabled by telemetryViewModel.geofenceEnabled.collectAsState()
     val fenceRadius by telemetryViewModel.fenceRadius.collectAsState()
 
-    // Collect spray state from viewmodel
-    val sprayEnabled by telemetryViewModel.sprayEnabled.collectAsState()
+    // Collect spray rate from viewmodel (spray enabled status comes from RC7 in telemetryState)
     val sprayRate by telemetryViewModel.sprayRate.collectAsState()
 
     // Remember the mode to prevent flickering due to recomposition
@@ -459,6 +458,10 @@ fun TopNavBar(
 
         // Spray rate slider popup
         if (showSpraySlider) {
+            // Get RC7-based spray enabled status from telemetry
+            val rc7SprayEnabled = telemetryState.sprayTelemetry.sprayEnabled
+            val rc7Value = telemetryState.sprayTelemetry.rc7Value
+
             Popup(
                 onDismissRequest = { showSpraySlider = false },
                 properties = PopupProperties(focusable = true)
@@ -481,11 +484,35 @@ fun TopNavBar(
                             fontSize = 18.sp
                         )
 
-                        Divider(color = Color.White.copy(alpha = 0.3f))
+                        HorizontalDivider(color = Color.White.copy(alpha = 0.3f))
 
-                        // Spray Rate Slider - Always visible
-                        // PWM mapping: OFF=1000, 10%=1100, 50%=1500, 100%=2000
-                        // Uses DO_SET_SERVO (SERVO7) by default for direct servo control
+                        // RC7 Status Display
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(
+                                "RC7 Status:",
+                                color = Color.White,
+                                modifier = Modifier.weight(1f)
+                            )
+                            Text(
+                                if (rc7SprayEnabled) "ENABLED" else "DISABLED",
+                                color = if (rc7SprayEnabled) Color.Green else Color.Red,
+                                fontWeight = FontWeight.Bold
+                            )
+                        }
+                        Text(
+                            "RC7 PWM: ${rc7Value ?: "N/A"}",
+                            color = Color.Gray,
+                            style = MaterialTheme.typography.bodySmall
+                        )
+
+                        HorizontalDivider(color = Color.White.copy(alpha = 0.3f))
+
+                        // Spray Rate Slider
+                        // PWM mapping: 10%=1051, 50%=1501, 100%=1951
+                        // Slider only functional when RC7 is enabled
                         Column(modifier = Modifier.padding(vertical = 4.dp)) {
                             Row(verticalAlignment = Alignment.CenterVertically) {
                                 Text(AppStrings.sprayRate, color = Color.White, modifier = Modifier.weight(1f))
@@ -494,62 +521,48 @@ fun TopNavBar(
                             Slider(
                                 value = sprayRate,
                                 onValueChange = { newRate ->
-                                    // Snap to nearest 10%
-                                    val snappedRate = (Math.round(newRate / 10f) * 10f).coerceIn(10f, 100f)
-                                    telemetryViewModel.setSprayRate(snappedRate)
+                                    if (rc7SprayEnabled) {
+                                        // Snap to nearest 10%
+                                        val snappedRate = (Math.round(newRate / 10f) * 10f).coerceIn(10f, 100f)
+                                        telemetryViewModel.setSprayRate(snappedRate)
+                                    }
                                 },
                                 valueRange = 10f..100f, // 10% to 100% (minimum 10%)
                                 steps = 8, // 9 positions: 10%, 20%, 30%, 40%, 50%, 60%, 70%, 80%, 90%, 100%
                                 modifier = Modifier.fillMaxWidth(),
+                                enabled = rc7SprayEnabled, // Only enable when RC7 is ON
                                 colors = SliderDefaults.colors(
-                                    thumbColor = if (sprayEnabled) Color.Green else Color.Gray,
-                                    activeTrackColor = if (sprayEnabled) Color.Green else Color.Gray,
-                                    inactiveTrackColor = Color.DarkGray
+                                    thumbColor = if (rc7SprayEnabled) Color.Green else Color.Gray,
+                                    activeTrackColor = if (rc7SprayEnabled) Color.Green else Color.Gray,
+                                    inactiveTrackColor = Color.DarkGray,
+                                    disabledThumbColor = Color.Gray,
+                                    disabledActiveTrackColor = Color.Gray,
+                                    disabledInactiveTrackColor = Color.DarkGray
                                 )
                             )
+                            // Status text based on RC7
+                            if (!rc7SprayEnabled) {
+                                Text(
+                                    "Enable RC7 to adjust spray rate",
+                                    color = Color.Red,
+                                    style = MaterialTheme.typography.bodySmall,
+                                    modifier = Modifier.padding(top = 2.dp)
+                                )
+                            } else {
+                                Text(
+                                    AppStrings.adjustSprayIntensity,
+                                    color = Color.Gray,
+                                    style = MaterialTheme.typography.bodySmall,
+                                    modifier = Modifier.padding(top = 2.dp)
+                                )
+                            }
+                            // PWM info text (1051-1951 range)
+                            val pwmValue = (1051 + (sprayRate / 100f * 900f)).toInt()
                             Text(
-                                AppStrings.adjustSprayIntensity,
-                                color = Color.Gray,
-                                style = MaterialTheme.typography.bodySmall,
-                                modifier = Modifier.padding(top = 2.dp)
-                            )
-                            // PWM info text
-                            Text(
-                                "PWM: ${(1000 + (sprayRate.toInt() / 100f * 1000f)).toInt()}",
+                                "PWM: $pwmValue",
                                 color = Color.Gray.copy(alpha = 0.7f),
                                 style = MaterialTheme.typography.bodySmall,
                                 modifier = Modifier.padding(top = 2.dp)
-                            )
-                        }
-
-                        Divider(color = Color.White.copy(alpha = 0.3f))
-
-                        // Spray Enable/Disable Toggle
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Column(modifier = Modifier.weight(1f)) {
-                                Text(
-                                    AppStrings.enableSpray,
-                                    color = Color.White,
-                                    fontWeight = FontWeight.Bold
-                                )
-                                Text(
-                                    if (sprayEnabled) AppStrings.sprayActive else AppStrings.sprayInactive,
-                                    color = if (sprayEnabled) Color.Green else Color.Red,
-                                    style = MaterialTheme.typography.bodySmall
-                                )
-                            }
-                            Switch(
-                                checked = sprayEnabled,
-                                onCheckedChange = { telemetryViewModel.setSprayEnabled(it) },
-                                colors = SwitchDefaults.colors(
-                                    checkedThumbColor = Color.White,
-                                    checkedTrackColor = Color.Green, // Green when ON
-                                    uncheckedThumbColor = Color.White,
-                                    uncheckedTrackColor = Color.Red // Red when OFF
-                                )
                             )
                         }
                     }

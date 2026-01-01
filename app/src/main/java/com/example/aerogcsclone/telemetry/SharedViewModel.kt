@@ -2049,8 +2049,8 @@ class SharedViewModel : ViewModel() {
     // ArduPilot Sprayer library integration:
     // - SERVO9_FUNCTION = 22 (SprayerPump) - ArduPilot's Sprayer library controls the pump
     // - Uses MAV_CMD_DO_SPRAYER (216) to enable/disable spraying
-    // - Uses SPRAY_RATE parameter (0-100%) to control pump duty cycle
-    // - PWM range is controlled by SERVO9_MIN (1050) and SERVO9_MAX (1950) on the FC
+    // - Uses SPRAY_PUMP_RATE parameter (0-100%) to control pump duty cycle
+    // - PWM range is controlled by SERVO9_MIN (1051) and SERVO9_MAX (1951) on the FC
     private val MAV_CMD_DO_SPRAYER = 216u
 
     /**
@@ -2060,17 +2060,17 @@ class SharedViewModel : ViewModel() {
      * Direct DO_SET_SERVO commands won't work because the library overrides them.
      *
      * This implementation uses:
-     * 1. SPRAY_RATE parameter (0-100%) - Controls the maximum pump duty cycle
+     * 1. SPRAY_PUMP_RATE parameter (0-100%) - Controls the maximum pump duty cycle
      * 2. MAV_CMD_DO_SPRAYER (216) - Enables/disables the sprayer
      *
      * The Sprayer library then calculates actual PWM output based on:
-     * - SPRAY_RATE: The maximum pump rate percentage
+     * - SPRAY_PUMP_RATE: The maximum pump rate percentage
      * - Ground speed (when SPRAY_SPEED_MIN > 0)
      * - Target coverage rate
      *
      * Hardware notes (Hobbywing 5L Pump):
-     * - PWM 1050 µs = minimum throttle (0%)
-     * - PWM 1950 µs = maximum throttle (100% = 5 L/min)
+     * - PWM 1051 µs = minimum throttle (0%)
+     * - PWM 1951 µs = maximum throttle (100% = 5 L/min)
      * - Linear interpolation between min and max
      *
      * @param enable true to enable spray at current rate, false to disable
@@ -2078,23 +2078,27 @@ class SharedViewModel : ViewModel() {
     fun controlSpray(enable: Boolean) {
         viewModelScope.launch {
             val rate = _sprayRate.value.coerceIn(10f, 100f)
+            // PWM calculation: 1051 (10%) to 1951 (100%)
+            // PWM = 1051 + (rate/100) * 900
+            val expectedPwm = (1051 + (rate / 100f * 900f)).toInt()
 
             Log.i("SprayControl", "═══════════════════════════════════════")
             Log.i("SprayControl", "🚿 SPRAY COMMAND (Sprayer Library Mode)")
             Log.i("SprayControl", "   State: ${if (enable) "ON" else "OFF"}")
-            Log.i("SprayControl", "   SPRAY_RATE: ${rate.toInt()}%")
-            Log.i("SprayControl", "   Method: MAV_CMD_DO_SPRAYER + SPRAY_RATE param")
+            Log.i("SprayControl", "   SPRAY_PUMP_RATE: ${rate.toInt()}%")
+            Log.i("SprayControl", "   Expected PWM: $expectedPwm µs (range 1051-1951)")
+            Log.i("SprayControl", "   Method: MAV_CMD_DO_SPRAYER + SPRAY_PUMP_RATE param")
             Log.i("SprayControl", "═══════════════════════════════════════")
 
             repo?.let { repository ->
                 try {
-                    // Step 1: Set the SPRAY_RATE parameter to control duty cycle
+                    // Step 1: Set the SPRAY_PUMP_RATE parameter to control duty cycle
                     // This parameter controls the maximum pump output (0-100%)
-                    val paramResult = setParameter("SPRAY_RATE", rate)
+                    val paramResult = setParameter("SPRAY_PUMP_RATE", rate)
                     if (paramResult != null) {
-                        Log.i("SprayControl", "✓ SPRAY_RATE set to ${rate.toInt()}%")
+                        Log.i("SprayControl", "✓ SPRAY_PUMP_RATE set to ${rate.toInt()}%")
                     } else {
-                        Log.w("SprayControl", "⚠ SPRAY_RATE set (no confirmation received)")
+                        Log.w("SprayControl", "⚠ SPRAY_PUMP_RATE set (no confirmation received)")
                     }
 
                     // Step 2: Send DO_SPRAYER command to enable/disable
@@ -2173,11 +2177,13 @@ class SharedViewModel : ViewModel() {
         sprayRateDebounceJob?.cancel()
         sprayRateDebounceJob = viewModelScope.launch {
             delay(SPRAY_RATE_DEBOUNCE_MS)
-            if (_sprayEnabled.value) {
-                Log.i("SprayControl", "🚿 Rate changed to ${newRate.toInt()}% - updating SPRAY_RATE parameter")
+            // Check if RC7 is enabled (spray enabled from RC transmitter)
+            val rc7Enabled = _telemetryState.value.sprayTelemetry.sprayEnabled
+            if (rc7Enabled) {
+                Log.i("SprayControl", "🚿 Rate changed to ${newRate.toInt()}% - updating SPRAY_PUMP_RATE parameter (RC7 enabled)")
                 controlSpray(true) // Re-send with new rate
             } else {
-                Log.d("SprayControl", "Rate set to ${newRate.toInt()}% (spray disabled, SPRAY_RATE will be set when enabled)")
+                Log.d("SprayControl", "Rate set to ${newRate.toInt()}% (RC7 disabled, SPRAY_PUMP_RATE will be set when RC7 enabled)")
             }
         }
     }
