@@ -105,6 +105,9 @@ dependencies {
     // Gson for JSON serialization
     implementation("com.google.code.gson:gson:2.10.1")
 
+    // OkHttp WebSocket for telemetry streaming
+    implementation("com.squareup.okhttp3:okhttp:4.12.0")
+
     // ViewModel and LiveData
     implementation("androidx.lifecycle:lifecycle-viewmodel-compose:2.7.0")
     implementation("androidx.lifecycle:lifecycle-livedata-ktx:2.7.0")

@@ -3,6 +3,8 @@ package com.example.aerogcsclone
 import android.Manifest
 import android.os.Build
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
@@ -21,6 +23,7 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import com.google.android.gms.maps.MapsInitializer
 import com.google.accompanist.systemuicontroller.rememberSystemUiController
 import com.example.aerogcsclone.telemetry.SharedViewModel
+import com.example.aerogcsclone.telemetry.WebSocketManager
 
 // ✅ Dark theme setup
 private val DarkColorScheme = darkColorScheme(
@@ -35,6 +38,7 @@ private val DarkColorScheme = darkColorScheme(
 class MainActivity : ComponentActivity() {
 
     private val hasRequiredPermissions = mutableStateOf(false)
+    private val wsManager = WebSocketManager()
 
     private val requestPermissionsLauncher = registerForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
@@ -59,6 +63,8 @@ class MainActivity : ComponentActivity() {
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
+        android.util.Log.e("MAIN_ACTIVITY", "🔥 MainActivity onCreate CALLED")
+
         // Handle the splash screen transition.
         installSplashScreen()
 
@@ -68,6 +74,19 @@ class MainActivity : ComponentActivity() {
         MapsInitializer.initialize(applicationContext, MapsInitializer.Renderer.LATEST) {
             // You can log or handle the chosen renderer here
         }
+
+        // ✅ Connect to WebSocket server for telemetry streaming
+        android.util.Log.e("MAIN_ACTIVITY", "🔌 About to connect WebSocket...")
+        wsManager.connect()
+        android.util.Log.e("MAIN_ACTIVITY", "✅ WebSocket connect() method called")
+
+        // ✅ Throttled telemetry sender - sends every 300ms instead of on every update
+        Handler(Looper.getMainLooper()).postDelayed(object : Runnable {
+            override fun run() {
+                wsManager.sendTelemetry()
+                Handler(Looper.getMainLooper()).postDelayed(this, 300)
+            }
+        }, 300)
 
         setContent {
             val navController = rememberNavController()
@@ -81,7 +100,7 @@ class MainActivity : ComponentActivity() {
                 sharedViewModel.initializeTextToSpeech(this@MainActivity)
             }
 
-            // Monitor flight status for crash handler
+            // Monitor flight status for crash handler and update WebSocket telemetry
             LaunchedEffect(Unit) {
                 sharedViewModel.telemetryState.collect { telemetryState ->
                     // Update connection status
@@ -93,6 +112,46 @@ class MainActivity : ComponentActivity() {
                     val isInAir = altitude > 0.5f // Consider drone in flight if >0.5m altitude
 
                     GCSApplication.isDroneInFlight = isArmed && isInAir
+
+                    // ✅ Update WebSocket telemetry with real-time MAVSDK data
+                    if (telemetryState.connected) {
+                        android.util.Log.d("WebSocketTelemetry", "📊 Updating telemetry data from MAVSDK (connected=${telemetryState.connected})")
+
+                        // Position
+                        wsManager.lat = telemetryState.latitude ?: 0.0
+                        wsManager.lng = telemetryState.longitude ?: 0.0
+                        wsManager.alt = (telemetryState.altitudeRelative ?: 0f).toDouble()
+                        wsManager.speed = (telemetryState.groundspeed ?: 0f).toDouble()
+
+                        // Attitude
+                        wsManager.roll = (telemetryState.roll ?: 0f).toDouble()
+                        wsManager.pitch = (telemetryState.pitch ?: 0f).toDouble()
+                        wsManager.yaw = (telemetryState.heading ?: 0f).toDouble()
+
+                        // Battery
+                        wsManager.voltage = (telemetryState.voltage ?: 0f).toDouble()
+                        wsManager.current = (telemetryState.currentA ?: 0f).toDouble()
+                        wsManager.batteryRemaining = telemetryState.batteryPercent ?: 0
+
+                        // Debug logging for battery telemetry
+                        android.util.Log.d("WebSocketTelemetry", "Battery Data -> " +
+                            "Voltage: ${telemetryState.voltage}, " +
+                            "Current: ${telemetryState.currentA}, " +
+                            "Remaining: ${telemetryState.batteryPercent}%")
+
+                        // GPS
+                        wsManager.satellites = telemetryState.sats ?: 0
+                        wsManager.hdop = (telemetryState.hdop ?: 0f).toDouble()
+
+                        // Status
+                        wsManager.flightMode = telemetryState.mode ?: "UNKNOWN"
+                        wsManager.isArmed = telemetryState.armed
+                        wsManager.failsafe = false // TODO: Add failsafe detection if available
+
+                        // NOTE: Don't call sendTelemetry() here - throttled sender handles it
+                    } else {
+                        android.util.Log.w("WebSocketTelemetry", "⚠️ Skipping telemetry update - drone not connected")
+                    }
 
                     // Log status changes for debugging
                     if (GCSApplication.isDroneInFlight) {
@@ -125,6 +184,8 @@ class MainActivity : ComponentActivity() {
         super.onDestroy()
         // Cleanup TlogIntegration when activity is destroyed
         TlogIntegration.destroy()
+        // Cleanup WebSocket connection
+        wsManager.disconnect()
     }
 
     private fun askForPermissions() {
