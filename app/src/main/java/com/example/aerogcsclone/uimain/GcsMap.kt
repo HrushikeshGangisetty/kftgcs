@@ -447,9 +447,9 @@ fun GcsMap(
         }
 
         // ===== OUTER FENCE RENDERING =====
-        // Render outer fence 4m away from the normal geofence with yellow background
+        // Render outer fence 2m away from the normal geofence with yellow background
         if (geofenceEnabled && geofencePolygon.isNotEmpty() && geofencePolygon.size >= 3) {
-            val outerFencePolygon = calculateOuterFence(geofencePolygon, 6.0) // 4 meters offset
+            val outerFencePolygon = calculateOuterFence(geofencePolygon, 2.0) // 2 meters offset
 
             if (outerFencePolygon.isNotEmpty()) {
                 // Fill the outer fence area with semi-transparent yellow
@@ -489,6 +489,39 @@ fun GcsMap(
                     width = 3f,
                     color = Color.Red
                 )
+
+                // Always show distance labels on each edge (like boundary area)
+                obstaclePoints.forEachIndexed { pointIndex, point ->
+                    val nextIndex = (pointIndex + 1) % obstaclePoints.size
+                    val nextPoint = obstaclePoints[nextIndex]
+
+                    // Calculate distance between consecutive points
+                    val distance = SphericalUtil.computeDistanceBetween(point, nextPoint)
+                    val distanceText = if (distance >= 1000) {
+                        String.format(Locale.US, "%.1fkm", distance / 1000)
+                    } else {
+                        String.format(Locale.US, "%.1fm", distance)
+                    }
+
+                    // Calculate midpoint for label placement
+                    val midLat = (point.latitude + nextPoint.latitude) / 2
+                    val midLon = (point.longitude + nextPoint.longitude) / 2
+                    val midPoint = LatLng(midLat, midLon)
+
+                    // Create a custom marker with distance text
+                    val distanceMarkerIcon = remember(distanceText, obstacleIndex, pointIndex) {
+                        createObstacleDistanceLabel(distanceText)
+                    }
+
+                    Marker(
+                        state = MarkerState(position = midPoint),
+                        title = "Edge ${pointIndex + 1}: $distanceText",
+                        icon = distanceMarkerIcon,
+                        anchor = Offset(0.5f, 0.5f),
+                        flat = true,
+                        zIndex = 5f
+                    )
+                }
 
                 // Add clickable/draggable markers at obstacle vertices when selected
                 if (selectedObstacleIndex == obstacleIndex) {
@@ -994,5 +1027,102 @@ private fun averageAngles(angle1: Double, angle2: Double): Double {
 
     // Normalize result
     return ((avg % 360) + 360) % 360
+}
+
+/**
+ * Create a bitmap descriptor with distance label for obstacle edges
+ */
+private fun createDistanceLabel(text: String): BitmapDescriptor {
+    val width = 120
+    val height = 40
+    val bitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
+    val canvas = Canvas(bitmap)
+
+    // Draw background with rounded corners
+    val bgPaint = android.graphics.Paint().apply {
+        isAntiAlias = true
+        color = android.graphics.Color.argb(200, 50, 50, 50) // Semi-transparent dark gray
+        style = android.graphics.Paint.Style.FILL
+    }
+    val rect = android.graphics.RectF(0f, 0f, width.toFloat(), height.toFloat())
+    canvas.drawRoundRect(rect, 8f, 8f, bgPaint)
+
+    // Draw border
+    val borderPaint = android.graphics.Paint().apply {
+        isAntiAlias = true
+        color = android.graphics.Color.WHITE
+        style = android.graphics.Paint.Style.STROKE
+        strokeWidth = 2f
+    }
+    canvas.drawRoundRect(rect, 8f, 8f, borderPaint)
+
+    // Draw text
+    val textPaint = android.graphics.Paint().apply {
+        isAntiAlias = true
+        color = android.graphics.Color.WHITE
+        textSize = 28f
+        typeface = android.graphics.Typeface.create(android.graphics.Typeface.DEFAULT, android.graphics.Typeface.BOLD)
+        textAlign = android.graphics.Paint.Align.CENTER
+    }
+
+    // Calculate text position (centered)
+    val textBounds = android.graphics.Rect()
+    textPaint.getTextBounds(text, 0, text.length, textBounds)
+    val x = width / 2f
+    val y = height / 2f + textBounds.height() / 2f
+
+    canvas.drawText(text, x, y, textPaint)
+
+    return BitmapDescriptorFactory.fromBitmap(bitmap)
+}
+
+/**
+ * Create a bitmap descriptor with distance label for obstacle edges (red themed)
+ * Similar to createSmallLabelMarker but with red background for obstacles
+ */
+private fun createObstacleDistanceLabel(text: String): BitmapDescriptor {
+    val paint = android.graphics.Paint().apply {
+        isAntiAlias = true
+        textSize = 24f
+        typeface = android.graphics.Typeface.create(android.graphics.Typeface.DEFAULT, android.graphics.Typeface.BOLD)
+    }
+
+    // Measure text width
+    val textBounds = android.graphics.Rect()
+    paint.getTextBounds(text, 0, text.length, textBounds)
+
+    val paddingH = 12
+    val paddingV = 8
+    val width = textBounds.width() + paddingH * 2
+    val height = textBounds.height() + paddingV * 2
+
+    val bitmap = Bitmap.createBitmap(width.coerceAtLeast(40), height.coerceAtLeast(26), Bitmap.Config.ARGB_8888)
+    val canvas = Canvas(bitmap)
+
+    // Draw rounded rectangle background (dark red/maroon)
+    val bgPaint = android.graphics.Paint().apply {
+        isAntiAlias = true
+        color = android.graphics.Color.argb(230, 180, 40, 40) // Semi-transparent red
+        style = android.graphics.Paint.Style.FILL
+    }
+    val rect = android.graphics.RectF(0f, 0f, bitmap.width.toFloat(), bitmap.height.toFloat())
+    canvas.drawRoundRect(rect, 6f, 6f, bgPaint)
+
+    // Draw border (lighter red)
+    val borderPaint = android.graphics.Paint().apply {
+        isAntiAlias = true
+        color = android.graphics.Color.rgb(255, 120, 120)
+        style = android.graphics.Paint.Style.STROKE
+        strokeWidth = 1.5f
+    }
+    canvas.drawRoundRect(rect, 6f, 6f, borderPaint)
+
+    // Draw text in white
+    paint.color = android.graphics.Color.WHITE
+    paint.textAlign = android.graphics.Paint.Align.CENTER
+    val textY = bitmap.height / 2f + textBounds.height() / 2f - textBounds.bottom
+    canvas.drawText(text, bitmap.width / 2f, textY, paint)
+
+    return BitmapDescriptorFactory.fromBitmap(bitmap)
 }
 
