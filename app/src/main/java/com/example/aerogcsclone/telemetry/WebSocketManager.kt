@@ -108,6 +108,7 @@ class WebSocketManager {
                     }
                     "mission_created" -> {
                         missionId = msg.getString("mission_id")
+                        readyForTelemetry = true
                         Log.d(TAG, "🚀 Mission started: $missionId")
                     }
                     else -> {
