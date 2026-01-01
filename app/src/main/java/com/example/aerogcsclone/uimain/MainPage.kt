@@ -62,6 +62,7 @@ fun MainPage(
     val gridWaypoints by telemetryViewModel.gridWaypoints.collectAsState()
     val geofenceEnabled by telemetryViewModel.geofenceEnabled.collectAsState()
     val geofencePolygon by telemetryViewModel.geofencePolygon.collectAsState()
+    val obstacles by telemetryViewModel.obstacles.collectAsState()
 
     // Selected geofence point tracking for adjustment
     var selectedGeofencePointIndex by remember { mutableStateOf<Int?>(null) }
@@ -166,6 +167,8 @@ fun MainPage(
                     Toast.makeText(context, "Geofence point ${index + 1} selected - drag to adjust", Toast.LENGTH_SHORT).show()
                 },
                 geofenceAdjustmentEnabled = geofenceEnabled,
+                // Obstacle zones for display (no editing on main page)
+                obstacles = obstacles,
                 // Resume point marker - shows "R" where drone paused
                 resumePointLocation = resumePointLocation
             )
