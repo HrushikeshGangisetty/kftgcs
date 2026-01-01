@@ -19,6 +19,7 @@ import com.example.aerogcsclone.authentication.AuthViewModel
 import com.example.aerogcsclone.authentication.LoginPage
 import com.example.aerogcsclone.authentication.SignupPage
 import com.example.aerogcsclone.authentication.WelcomeScreen
+import com.example.aerogcsclone.authentication.OtpVerificationPage
 import com.example.aerogcsclone.calibration.CalibrationScreen
 import com.example.aerogcsclone.calibration.CalibrationViewModel
 import com.example.aerogcsclone.calibration.CompassCalibrationScreen
@@ -90,6 +91,11 @@ fun AppNavGraph(navController: NavHostController) {
     // Create AuthViewModel at the top level
     val authViewModel: AuthViewModel = viewModel()
 
+    // Check authentication status on app start
+    LaunchedEffect(Unit) {
+        authViewModel.checkAuthStatus(context)
+    }
+
     // Initialize TTS when the navigation graph is created
     LaunchedEffect(Unit) {
         sharedViewModel.initializeTextToSpeech(context)
@@ -119,6 +125,15 @@ fun AppNavGraph(navController: NavHostController) {
             SignupPage(
                 navController = navController,
                 authViewModel = authViewModel
+            )
+        }
+
+        composable("otp_verification/{email}") { backStackEntry ->
+            val email = backStackEntry.arguments?.getString("email") ?: ""
+            OtpVerificationPage(
+                navController = navController,
+                authViewModel = authViewModel,
+                email = email
             )
         }
 

@@ -1,22 +1,14 @@
 package com.example.aerogcsclone.authentication
 
 import android.widget.Toast
-import androidx.activity.compose.rememberLauncherForActivityResult
-import androidx.activity.result.IntentSenderRequest
-import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Email
 import androidx.compose.material3.Button
-import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
-import androidx.compose.material3.Icon
-import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Text
@@ -30,24 +22,36 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.navigation.NavController
 import com.example.aerogcsclone.R
 import com.example.aerogcsclone.navigation.Screen
-import com.example.aerogcsclone.utils.AppStrings
 
 @Composable
-fun LoginPage(modifier: Modifier = Modifier, navController: NavController, authViewModel: AuthViewModel) {
-    var email by remember { mutableStateOf("") }
-    var password by remember { mutableStateOf("") }
+fun OtpVerificationPage(
+    modifier: Modifier = Modifier,
+    navController: NavController,
+    authViewModel: AuthViewModel,
+    email: String
+) {
+    var otp by remember { mutableStateOf("") }
     val authState = authViewModel.authState.observeAsState()
     val context = LocalContext.current
 
     LaunchedEffect(authState.value) {
         when (val state = authState.value) {
-            is AuthState.Authenticated -> navController.navigate(Screen.LanguageSelection.route) {
-                popUpTo(Screen.Login.route) { inclusive = true }
+            is AuthState.OtpVerified -> {
+                Toast.makeText(context, state.message, Toast.LENGTH_LONG).show()
+                // Navigate to login after successful verification
+                navController.navigate(Screen.Login.route) {
+                    popUpTo(Screen.Signup.route) { inclusive = true }
+                }
+            }
+            is AuthState.OtpResent -> {
+                Toast.makeText(context, state.message, Toast.LENGTH_SHORT).show()
+                authViewModel.resetAuthState()
             }
             is AuthState.Error -> {
                 Toast.makeText(context, state.message, Toast.LENGTH_SHORT).show()
@@ -57,10 +61,10 @@ fun LoginPage(modifier: Modifier = Modifier, navController: NavController, authV
         }
     }
 
-    Box(modifier = Modifier.fillMaxSize()) {
+    Box(modifier = modifier.fillMaxSize()) {
         Image(
             painter = painterResource(id = R.drawable.logbag),
-            contentDescription = "Login Background",
+            contentDescription = "OTP Background",
             contentScale = ContentScale.Crop,
             modifier = Modifier.fillMaxSize()
         )
@@ -80,32 +84,28 @@ fun LoginPage(modifier: Modifier = Modifier, navController: NavController, authV
                 horizontalAlignment = Alignment.CenterHorizontally,
                 verticalArrangement = Arrangement.Center
             ) {
-                Text(text = AppStrings.loginWithPavaman, fontSize = 32.sp, color = Color.Black)
-                Text(text = AppStrings.loginCredentials, fontSize = 12.sp, color = Color.Black)
-
-                Spacer(modifier = Modifier.height(16.dp))
-
-                OutlinedTextField(
-                    value = email,
-                    onValueChange = { email = it },
-                    label = { Text(text = AppStrings.email) },
-                    colors = OutlinedTextFieldDefaults.colors(
-                        focusedTextColor = Color.Black,
-                        unfocusedTextColor = Color.Black,
-                        cursorColor = Color.Black,
-                        focusedBorderColor = Color.Black,
-                        unfocusedBorderColor = Color.Black,
-                        focusedLabelColor = Color.Black,
-                        unfocusedLabelColor = Color.Black
-                    )
+                Text(
+                    text = "Verify OTP",
+                    fontSize = 32.sp,
+                    color = Color.Black
                 )
 
                 Spacer(modifier = Modifier.height(8.dp))
 
+                Text(
+                    text = "Enter the OTP sent to\n$email",
+                    fontSize = 14.sp,
+                    color = Color.Gray,
+                    textAlign = TextAlign.Center
+                )
+
+                Spacer(modifier = Modifier.height(24.dp))
+
                 OutlinedTextField(
-                    value = password,
-                    onValueChange = { password = it },
-                    label = { Text(text = AppStrings.password) },
+                    value = otp,
+                    onValueChange = { otp = it },
+                    label = { Text(text = "Enter OTP") },
+                    singleLine = true,
                     colors = OutlinedTextFieldDefaults.colors(
                         focusedTextColor = Color.Black,
                         unfocusedTextColor = Color.Black,
@@ -122,17 +122,27 @@ fun LoginPage(modifier: Modifier = Modifier, navController: NavController, authV
                 if (authState.value is AuthState.Loading) {
                     CircularProgressIndicator(color = Color.Black)
                 } else {
-                    Button(onClick = { authViewModel.login(context, email, password) }) {
-                        Text(text = AppStrings.login, color = Color.Black)
+                    Button(
+                        onClick = { authViewModel.verifyOtp(email, otp) },
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Text(text = "Verify OTP", color = Color.Black)
                     }
                 }
 
                 Spacer(modifier = Modifier.height(8.dp))
 
-                TextButton(onClick = { navController.navigate(Screen.Signup.route) }) {
-                    Text(text = "Signup", color = Color.Black)
+                TextButton(onClick = { authViewModel.resendOtp(email) }) {
+                    Text(text = "Resend OTP", color = Color.Black)
+                }
+
+                Spacer(modifier = Modifier.height(8.dp))
+
+                TextButton(onClick = { navController.navigate(Screen.Login.route) }) {
+                    Text(text = "Back to Login", color = Color.Gray)
                 }
             }
         }
     }
 }
+

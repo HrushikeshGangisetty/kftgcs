@@ -45,6 +45,7 @@ fun TopNavBar(
     var showSpraySlider by remember { mutableStateOf(false) } // Added spray slider state
 
     val coroutineScope = rememberCoroutineScope()
+    val context = androidx.compose.ui.platform.LocalContext.current
 
     // Collect geofence state from viewmodel
     val geofenceEnabled by telemetryViewModel.geofenceEnabled.collectAsState()
@@ -348,7 +349,7 @@ fun TopNavBar(
                             },
                             onClick = {
                                 kebabMenuExpanded = false
-                                authViewModel.signout()
+                                authViewModel.signout(context)
                                 navController.navigate(Screen.Login.route) {
                                     popUpTo(0)
                                 }
