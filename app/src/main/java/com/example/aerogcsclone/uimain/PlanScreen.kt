@@ -151,7 +151,7 @@ fun PlanScreen(
     // Selected obstacle point index for deletion
     var selectedObstaclePointIndex by remember { mutableStateOf<Int?>(null) }
     // Obstacle boundary buffer distance (1m to 5m with 0.5m increment)
-    var obstacleBoundary by remember { mutableStateOf(2f) }
+    var obstacleBoundary by remember { mutableStateOf(1f) }
 
     // Waypoint list panel state
     var showWaypointList by remember { mutableStateOf(false) }
@@ -1759,30 +1759,7 @@ fun PlanScreen(
                             )
                         }
 
-                        // Auto Spray (moved above Hold Nose Position)
-                        Column(modifier = Modifier.padding(vertical = 4.dp)) {
-                            Row(verticalAlignment = Alignment.CenterVertically) {
-                                Text("Auto Spray", color = Color.White, modifier = Modifier.weight(1f))
-                                Switch(
-                                    checked = autoSpray,
-                                    onCheckedChange = { autoSpray = it },
-                                    colors = SwitchDefaults.colors(
-                                        checkedThumbColor = Color.White,
-                                        checkedTrackColor = Color.Green, // Green when ON
-                                        uncheckedThumbColor = Color.White,
-                                        uncheckedTrackColor = Color.Red // Red when OFF
-                                    )
-                                )
-                            }
-                            Text(
-                                "Sprayer will turn ON during survey lines",
-                                color = Color.Gray,
-                                style = MaterialTheme.typography.bodySmall,
-                                modifier = Modifier.padding(top = 4.dp)
-                            )
-                        }
-
-                        // Spray Rate Slider (moved above Hold Nose Position)
+                        // Spray Rate Slider (moved above Auto Spray)
                         // PWM mapping: OFF=1000, 10%=1100, 50%=1500, 100%=2000
                         // Uses DO_SET_SERVO (SERVO7) by default
                         Column(modifier = Modifier.padding(vertical = 4.dp)) {
@@ -1841,6 +1818,29 @@ fun PlanScreen(
                                 color = Color.Gray,
                                 style = MaterialTheme.typography.bodySmall,
                                 modifier = Modifier.padding(top = 2.dp)
+                            )
+                        }
+
+                        // Auto Spray
+                        Column(modifier = Modifier.padding(vertical = 4.dp)) {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Text("Auto Spray", color = Color.White, modifier = Modifier.weight(1f))
+                                Switch(
+                                    checked = autoSpray,
+                                    onCheckedChange = { autoSpray = it },
+                                    colors = SwitchDefaults.colors(
+                                        checkedThumbColor = Color.White,
+                                        checkedTrackColor = Color.Green, // Green when ON
+                                        uncheckedThumbColor = Color.White,
+                                        uncheckedTrackColor = Color.Red // Red when OFF
+                                    )
+                                )
+                            }
+                            Text(
+                                "Sprayer will turn ON during survey lines",
+                                color = Color.Gray,
+                                style = MaterialTheme.typography.bodySmall,
+                                modifier = Modifier.padding(top = 4.dp)
                             )
                         }
 
