@@ -132,6 +132,21 @@ fun LoginPage(modifier: Modifier = Modifier, navController: NavController, authV
                 TextButton(onClick = { navController.navigate(Screen.Signup.route) }) {
                     Text(text = "Signup", color = Color.Black)
                 }
+
+                Spacer(modifier = Modifier.height(8.dp))
+
+                OutlinedButton(
+                    onClick = {
+                        navController.navigate(Screen.Connection.route) {
+                            popUpTo(Screen.Login.route) { inclusive = true }
+                        }
+                    },
+                    colors = ButtonDefaults.outlinedButtonColors(
+                        contentColor = Color.Black
+                    )
+                ) {
+                    Text(text = "Direct Login", color = Color.Black)
+                }
             }
         }
     }
