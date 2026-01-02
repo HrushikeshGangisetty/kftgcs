@@ -28,6 +28,7 @@ import androidx.compose.ui.unit.sp
 import androidx.navigation.NavController
 import com.example.aerogcsclone.R
 import com.example.aerogcsclone.navigation.Screen
+import kotlinx.coroutines.delay
 
 @Composable
 fun OtpVerificationPage(
@@ -40,6 +41,21 @@ fun OtpVerificationPage(
     val authState = authViewModel.authState.observeAsState()
     val context = LocalContext.current
 
+    // Timer state - 2 minutes = 120 seconds
+    var timerSeconds by remember { mutableIntStateOf(120) }
+    var isTimerRunning by remember { mutableStateOf(true) }
+
+    // Countdown timer effect
+    LaunchedEffect(isTimerRunning) {
+        if (isTimerRunning) {
+            while (timerSeconds > 0) {
+                delay(1000L)
+                timerSeconds--
+            }
+            isTimerRunning = false
+        }
+    }
+
     LaunchedEffect(authState.value) {
         when (val state = authState.value) {
             is AuthState.OtpVerified -> {
@@ -51,6 +67,9 @@ fun OtpVerificationPage(
             }
             is AuthState.OtpResent -> {
                 Toast.makeText(context, state.message, Toast.LENGTH_SHORT).show()
+                // Reset timer when OTP is resent
+                timerSeconds = 120
+                isTimerRunning = true
                 authViewModel.resetAuthState()
             }
             is AuthState.Error -> {
@@ -117,6 +136,31 @@ fun OtpVerificationPage(
                     )
                 )
 
+                Spacer(modifier = Modifier.height(12.dp))
+
+                // Resend OTP text with timer
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.Center,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        text = "Click Resend OTP if OTP is not received",
+                        fontSize = 12.sp,
+                        color = Color.Gray,
+                        textAlign = TextAlign.Center
+                    )
+                    Spacer(modifier = Modifier.width(8.dp))
+                    if (isTimerRunning && timerSeconds > 0) {
+                        Text(
+                            text = "${timerSeconds}s",
+                            fontSize = 12.sp,
+                            color = Color.Red,
+                            textAlign = TextAlign.Center
+                        )
+                    }
+                }
+
                 Spacer(modifier = Modifier.height(16.dp))
 
                 if (authState.value is AuthState.Loading) {
@@ -132,8 +176,16 @@ fun OtpVerificationPage(
 
                 Spacer(modifier = Modifier.height(8.dp))
 
-                TextButton(onClick = { authViewModel.resendOtp(email) }) {
-                    Text(text = "Resend OTP", color = Color.Black)
+                TextButton(
+                    onClick = {
+                        authViewModel.resendOtp(email)
+                    },
+                    enabled = !isTimerRunning || timerSeconds == 0
+                ) {
+                    Text(
+                        text = if (isTimerRunning && timerSeconds > 0) "Resend OTP (${timerSeconds}s)" else "Resend OTP",
+                        color = if (!isTimerRunning || timerSeconds == 0) Color.Black else Color.Gray
+                    )
                 }
 
                 Spacer(modifier = Modifier.height(8.dp))
@@ -145,4 +197,3 @@ fun OtpVerificationPage(
         }
     }
 }
-

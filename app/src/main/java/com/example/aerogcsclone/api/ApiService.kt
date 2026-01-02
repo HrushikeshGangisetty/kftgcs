@@ -1,5 +1,6 @@
 package com.example.aerogcsclone.api
 
+import android.os.Build
 import android.util.Log
 import com.google.gson.Gson
 import kotlinx.coroutines.Dispatchers
@@ -12,10 +13,54 @@ import java.util.concurrent.TimeUnit
 
 object ApiService {
     private const val TAG = "ApiService"
-    // IMPORTANT: Change this to your actual Django server IP address
-    // For emulator: use "http://10.0.2.2:8000"
-    // For real device: use your computer's IP like "http://192.168.1.100:8000"
-    private const val BASE_URL = "http://10.0.2.2:8000"
+
+    // ===========================================
+    // CONFIGURATION - CHANGE THESE VALUES
+    // ===========================================
+
+    // Option 1: For LOCAL development (Django running on your computer)
+    // - Your computer's local IP address (find using 'ipconfig' in cmd)
+    // - Make sure phone and computer are on SAME WiFi network
+    private const val LOCAL_SERVER_IP = "10.41.213.197"  // <-- CHANGE THIS to your computer's IP
+    private const val LOCAL_SERVER_PORT = "8000"
+
+    // Option 2: For PRODUCTION (deployed Django server)
+    // - Your actual deployed server URL (e.g., on Railway, Heroku, AWS, etc.)
+    private const val PRODUCTION_URL = "https://your-server-domain.com"  // <-- CHANGE THIS when deployed
+
+    // Set this to true when using deployed production server
+    private const val USE_PRODUCTION_SERVER = false
+
+    // ===========================================
+    // AUTO-DETECTION LOGIC (DO NOT CHANGE)
+    // ===========================================
+
+    private val BASE_URL: String
+        get() {
+            return when {
+                // If using production server
+                USE_PRODUCTION_SERVER -> PRODUCTION_URL
+
+                // If running on emulator, use 10.0.2.2
+                isEmulator() -> "http://10.0.2.2:$LOCAL_SERVER_PORT"
+
+                // If running on physical device, use local IP
+                else -> "http://$LOCAL_SERVER_IP:$LOCAL_SERVER_PORT"
+            }
+        }
+
+    private fun isEmulator(): Boolean {
+        return (Build.FINGERPRINT.startsWith("generic")
+                || Build.FINGERPRINT.startsWith("unknown")
+                || Build.MODEL.contains("google_sdk")
+                || Build.MODEL.contains("Emulator")
+                || Build.MODEL.contains("Android SDK built for x86")
+                || Build.MANUFACTURER.contains("Genymotion")
+                || Build.BRAND.startsWith("generic") && Build.DEVICE.startsWith("generic")
+                || "google_sdk" == Build.PRODUCT
+                || Build.PRODUCT.contains("sdk")
+                || Build.PRODUCT.contains("emulator"))
+    }
 
     private val client = OkHttpClient.Builder()
         .connectTimeout(30, TimeUnit.SECONDS)
