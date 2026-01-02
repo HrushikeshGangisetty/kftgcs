@@ -319,6 +319,8 @@ fun GcsMap(
     onObstacleClick: (obstacleIndex: Int) -> Unit = {},
     // Obstacle point drag callback
     onObstaclePointDrag: (obstacleIndex: Int, pointIndex: Int, newPosition: LatLng) -> Unit = { _, _, _ -> },
+    // Enable obstacle editing mode (shows X markers, allows selection)
+    obstacleEditingEnabled: Boolean = false,
     // Resume point location - shows "R" marker where drone paused
     resumePointLocation: LatLng? = null
 ) {
@@ -552,21 +554,24 @@ fun GcsMap(
                         }
                     }
                 } else {
-                    // Just show a single click marker at centroid when not selected
-                    val centroidLat = obstaclePoints.map { it.latitude }.average()
-                    val centroidLon = obstaclePoints.map { it.longitude }.average()
-                    val centroid = LatLng(centroidLat, centroidLon)
+                    // Show X marker only when obstacle editing is enabled
+                    if (obstacleEditingEnabled) {
+                        // Show a single click marker at centroid when not selected
+                        val centroidLat = obstaclePoints.map { it.latitude }.average()
+                        val centroidLon = obstaclePoints.map { it.longitude }.average()
+                        val centroid = LatLng(centroidLat, centroidLon)
 
-                    Marker(
-                        state = MarkerState(position = centroid),
-                        title = "Obstacle ${obstacleIndex + 1}",
-                        icon = obstacleXMarker,
-                        anchor = Offset(0.5f, 0.5f),
-                        onClick = {
-                            onObstacleClick(obstacleIndex)
-                            true
-                        }
-                    )
+                        Marker(
+                            state = MarkerState(position = centroid),
+                            title = "Obstacle ${obstacleIndex + 1}",
+                            icon = obstacleXMarker,
+                            anchor = Offset(0.5f, 0.5f),
+                            onClick = {
+                                onObstacleClick(obstacleIndex)
+                                true
+                            }
+                        )
+                    }
                 }
             }
         }

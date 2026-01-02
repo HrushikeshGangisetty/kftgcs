@@ -653,7 +653,11 @@ class SharedViewModel : ViewModel() {
 
     private val _geofencePolygon = MutableStateFlow<List<LatLng>>(emptyList())
     val geofencePolygon: StateFlow<List<LatLng>> = _geofencePolygon.asStateFlow()
-    
+
+    // Obstacle zones - list of polygons representing no-fly zones
+    private val _obstacles = MutableStateFlow<List<List<LatLng>>>(emptyList())
+    val obstacles: StateFlow<List<List<LatLng>>> = _obstacles.asStateFlow()
+
     // Store home position for geofence calculation
     private val _homePosition = MutableStateFlow<LatLng?>(null)
 
@@ -1126,6 +1130,13 @@ class SharedViewModel : ViewModel() {
         updateGeofencePolygon()
         // Grid waypoints may be derived from survey polygon - ensure survey area is recalculated
         updateSurveyArea()
+    }
+
+    /**
+     * Set obstacle zones for display on the map
+     */
+    fun setObstacles(obstacleList: List<List<LatLng>>) {
+        _obstacles.value = obstacleList
     }
 
     fun setPlanningWaypoints(waypoints: List<LatLng>) {

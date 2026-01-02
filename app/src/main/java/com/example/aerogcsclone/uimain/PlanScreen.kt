@@ -677,7 +677,9 @@ fun PlanScreen(
                             this[obstacleIndex] = updatedObstacle
                         }
                     }
-                }
+                },
+                // Enable obstacle editing in plan screen
+                obstacleEditingEnabled = true
             )
 
             // Geofence adjustment helper text
@@ -1142,6 +1144,8 @@ fun PlanScreen(
                                             telemetryViewModel.setSurveyPolygon(surveyPolygon)
                                             telemetryViewModel.setGridWaypoints(processedGridResult.waypoints.map { it.position })
                                             telemetryViewModel.setGridLines(processedGridResult.gridLines)
+                                            // Save obstacles to SharedViewModel for display on main map
+                                            telemetryViewModel.setObstacles(obstacles)
 
                                             // Reset split plan mode after successful upload
                                             if (isSplitPlanMode) {
