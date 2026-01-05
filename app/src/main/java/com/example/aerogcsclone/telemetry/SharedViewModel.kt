@@ -860,6 +860,10 @@ class SharedViewModel : ViewModel() {
             Log.i("SharedVM", "═══════════════════════════════════════")
             Log.i("SharedVM", "=== AUTO PROCESSING RESUME POINT (BACKGROUND) ===")
             Log.i("SharedVM", "Resume waypoint: $waypointNumber")
+
+            // Get the resume location (where drone was paused)
+            val resumeLocation = _resumePointLocation.value
+            Log.i("SharedVM", "Resume location: ${resumeLocation?.latitude}, ${resumeLocation?.longitude}")
             Log.i("SharedVM", "═══════════════════════════════════════")
 
             try {
@@ -879,9 +883,14 @@ class SharedViewModel : ViewModel() {
 
                 Log.i("SharedVM", "Retrieved ${allWaypoints.size} waypoints from FC")
 
-                // Step 3: Filter waypoints from resume point
+                // Step 3: Filter waypoints from resume point, inserting resume location as first WP
                 Log.i("SharedVM", "Filtering waypoints from resume point (background)...")
-                val filtered = repo?.filterWaypointsForResume(allWaypoints, waypointNumber)
+                val filtered = repo?.filterWaypointsForResume(
+                    allWaypoints,
+                    waypointNumber,
+                    resumeLatitude = resumeLocation?.latitude,
+                    resumeLongitude = resumeLocation?.longitude
+                )
                 if (filtered == null || filtered.isEmpty()) {
                     Log.e("SharedVM", "Filtering resulted in empty mission")
                     return@launch
@@ -955,9 +964,13 @@ class SharedViewModel : ViewModel() {
                 return@launch
             }
 
+            // Get the resume location (where drone was paused)
+            val resumeLocation = _resumePointLocation.value
+
             Log.i("SharedVM", "═══════════════════════════════════════")
             Log.i("SharedVM", "=== CONFIRM ADD RESUME HERE ===")
             Log.i("SharedVM", "Resume waypoint: $resumeWaypoint")
+            Log.i("SharedVM", "Resume location: ${resumeLocation?.latitude}, ${resumeLocation?.longitude}")
             Log.i("SharedVM", "═══════════════════════════════════════")
 
             _showAddResumeHerePopup.value = false
@@ -992,8 +1005,13 @@ class SharedViewModel : ViewModel() {
 
                 onProgress("Filtering waypoints from resume point...")
 
-                // Step 3: Filter waypoints from resume point
-                val filtered = repo?.filterWaypointsForResume(allWaypoints, resumeWaypoint)
+                // Step 3: Filter waypoints from resume point, inserting resume location as first WP
+                val filtered = repo?.filterWaypointsForResume(
+                    allWaypoints,
+                    resumeWaypoint,
+                    resumeLatitude = resumeLocation?.latitude,
+                    resumeLongitude = resumeLocation?.longitude
+                )
                 if (filtered == null || filtered.isEmpty()) {
                     Log.e("SharedVM", "Filtering resulted in empty mission")
                     onResult(false, "No waypoints after resume point")
@@ -1815,9 +1833,13 @@ class SharedViewModel : ViewModel() {
     ) {
         viewModelScope.launch {
             try {
+                // Get the resume location (where drone was paused)
+                val resumeLocation = _resumePointLocation.value
+
                 Log.i("ResumeMission", "═══════════════════════════════════════")
                 Log.i("ResumeMission", "Starting Resume Mission")
                 Log.i("ResumeMission", "Resume at waypoint: $resumeWaypointNumber")
+                Log.i("ResumeMission", "Resume location: ${resumeLocation?.latitude}, ${resumeLocation?.longitude}")
                 Log.i("ResumeMission", "═══════════════════════════════════════")
 
                 // Step 1: Pre-flight Checks
@@ -1846,11 +1868,16 @@ class SharedViewModel : ViewModel() {
                     Log.i("ResumeMission", "  Original: seq=${wp.seq} cmd=${wp.command.value} current=${wp.current}")
                 }
 
-                // Step 3: Filter Waypoints for Resume
+                // Step 3: Filter Waypoints for Resume, inserting resume location as first WP
                 onProgress("Step 3/8: Filtering waypoints...")
                 Log.i("ResumeMission", "Filtering waypoints for resume from waypoint $resumeWaypointNumber...")
-                val filtered = repo?.filterWaypointsForResume(allWaypoints, resumeWaypointNumber)
-                
+                val filtered = repo?.filterWaypointsForResume(
+                    allWaypoints,
+                    resumeWaypointNumber,
+                    resumeLatitude = resumeLocation?.latitude,
+                    resumeLongitude = resumeLocation?.longitude
+                )
+
                 if (filtered == null || filtered.isEmpty()) {
                     Log.e("ResumeMission", "❌ Filtering resulted in empty mission")
                     onResult(false, "Mission filtering failed - no waypoints to resume")
@@ -2424,7 +2451,23 @@ class SharedViewModel : ViewModel() {
         }
         DisconnectionRTLHandler.stopMonitoring()
         repo = null
-        _telemetryState.value = TelemetryState()
+
+        // Preserve mission pause state when disconnecting (e.g., for battery change)
+        // Only reset connection-related fields, NOT mission pause state
+        val currentState = _telemetryState.value
+        val wasPaused = currentState.missionPaused
+        val pausedAtWp = currentState.pausedAtWaypoint
+
+        if (wasPaused) {
+            Log.i("SharedVM", "Preserving mission pause state during disconnect (pausedAtWaypoint=$pausedAtWp)")
+            // Reset to default but keep mission pause state
+            _telemetryState.value = TelemetryState(
+                missionPaused = true,
+                pausedAtWaypoint = pausedAtWp
+            )
+        } else {
+            _telemetryState.value = TelemetryState()
+        }
     }
 
     // --- Split Plan Management ---

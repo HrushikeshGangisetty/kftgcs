@@ -8,6 +8,8 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.*
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Brush
@@ -27,12 +29,26 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.FlightTakeoff
 import androidx.compose.ui.unit.Dp
 import com.example.aerogcsclone.utils.AppStrings
+import android.util.Log
 
 @Composable
 fun SelectFlyingMethodScreen(navController: NavController, sharedViewModel: SharedViewModel) {
+    // Get the telemetry state to check if mission is paused
+    val telemetryState by sharedViewModel.telemetryState.collectAsState()
+    val resumePointLocation by sharedViewModel.resumePointLocation.collectAsState()
+
     // Clear mission data from map when user comes back to select a new flying mode
+    // BUT NOT if mission is paused (user might be changing batteries and will resume)
     LaunchedEffect(Unit) {
-        sharedViewModel.clearMissionFromMap()
+        val missionPaused = telemetryState.missionPaused
+        val hasResumePoint = resumePointLocation != null
+
+        if (missionPaused || hasResumePoint) {
+            Log.i("SelectFlyingMethod", "Mission is paused or has resume point - NOT clearing mission data (missionPaused=$missionPaused, hasResumePoint=$hasResumePoint)")
+        } else {
+            Log.i("SelectFlyingMethod", "Clearing mission data from map")
+            sharedViewModel.clearMissionFromMap()
+        }
     }
 
     Surface(

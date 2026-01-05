@@ -2578,24 +2578,33 @@ class MavlinkTelemetryRepository(
      * - Skip ALL waypoints BEFORE resume point (including TAKEOFF - drone is already in the air)
      * - Keep ALL waypoints from resume point onward
      *
-     * Result structure: HOME (seq 0) + Resume waypoints (seq 1+)
+     * Result structure: HOME (seq 0) + Resume Location WP (seq 1) + Remaining waypoints (seq 2+)
      * NO TAKEOFF included since drone is already flying!
+     *
+     * The resume location waypoint is inserted at the drone's exact GPS position where it was paused.
+     * This ensures the drone resumes from its actual paused position, not from the next waypoint.
      *
      * @param allWaypoints Complete mission from flight controller
      * @param resumeWaypointSeq The waypoint sequence number to resume from
-     * @return Filtered list of waypoints: HOME + resume waypoints (NO TAKEOFF for mid-flight)
+     * @param resumeLatitude The latitude where drone was paused (optional - if null, no resume WP inserted)
+     * @param resumeLongitude The longitude where drone was paused (optional - if null, no resume WP inserted)
+     * @param resumeAltitude The altitude for the resume waypoint (uses target waypoint altitude if not specified)
+     * @return Filtered list of waypoints: HOME + Resume Location WP + remaining waypoints
      */
     suspend fun filterWaypointsForResume(
         allWaypoints: List<MissionItemInt>,
-        resumeWaypointSeq: Int
+        resumeWaypointSeq: Int,
+        resumeLatitude: Double? = null,
+        resumeLongitude: Double? = null,
+        resumeAltitude: Float? = null
     ): List<MissionItemInt> {
         val filtered = mutableListOf<MissionItemInt>()
-
 
         Log.i("ResumeMission", "═══ Filtering Mission for Resume (Mid-Flight) ═══")
         Log.i("ResumeMission", "Original mission: ${allWaypoints.size} waypoints")
         Log.i("ResumeMission", "Resume from waypoint: $resumeWaypointSeq")
-        Log.i("ResumeMission", "Structure: HOME (seq 0) + Resume waypoints (seq 1+)")
+        Log.i("ResumeMission", "Resume location: lat=$resumeLatitude, lon=$resumeLongitude, alt=$resumeAltitude")
+        Log.i("ResumeMission", "Structure: HOME (seq 0) + Resume Location WP (seq 1) + Remaining waypoints")
         Log.i("ResumeMission", "NOTE: NO TAKEOFF - drone is already flying")
 
         // Log original mission for debugging
@@ -2606,16 +2615,41 @@ class MavlinkTelemetryRepository(
         }
         Log.i("ResumeMission", "------------------------------")
 
+        // Find the target waypoint to get its altitude if resumeAltitude is not provided
+        val targetWaypoint = allWaypoints.find { it.seq.toInt() == resumeWaypointSeq }
+        val effectiveAltitude = resumeAltitude ?: targetWaypoint?.z ?: 50f
+
         for (waypoint in allWaypoints) {
             val seq = waypoint.seq.toInt()
             val cmdId = waypoint.command.value
 
             // Always keep HOME (waypoint 0)
             if (seq == 0) {
-                // Verify HOME is a NAV_WAYPOINT (cmd 16) - ArduPilot standard
                 val cmdName = waypoint.command.entry?.name ?: "CMD_$cmdId"
                 Log.i("ResumeMission", "✅ Keeping HOME (seq=$seq, cmd=$cmdName, frame=${waypoint.frame.value})")
                 filtered.add(waypoint)
+
+                // Insert resume location waypoint right after HOME if we have valid coordinates
+                if (resumeLatitude != null && resumeLongitude != null) {
+                    val resumeWp = MissionItemInt(
+                        targetSystem = fcuSystemId,
+                        targetComponent = fcuComponentId,
+                        seq = 1u, // Will be resequenced later
+                        frame = MavEnumValue.of(com.divpundir.mavlink.definitions.common.MavFrame.GLOBAL_RELATIVE_ALT_INT),
+                        command = MavEnumValue.of(MavCmd.NAV_WAYPOINT),
+                        current = 0u,
+                        autocontinue = 1u,
+                        param1 = 0f, // Hold time
+                        param2 = 0f, // Acceptance radius
+                        param3 = 0f, // Pass through radius
+                        param4 = 0f, // Yaw angle
+                        x = (resumeLatitude * 1E7).toInt(),
+                        y = (resumeLongitude * 1E7).toInt(),
+                        z = effectiveAltitude
+                    )
+                    Log.i("ResumeMission", "✅ INSERTING Resume Location WP: lat=$resumeLatitude, lon=$resumeLongitude, alt=$effectiveAltitude")
+                    filtered.add(resumeWp)
+                }
                 continue
             }
 
@@ -2634,7 +2668,11 @@ class MavlinkTelemetryRepository(
         }
 
         Log.i("ResumeMission", "Filtered: ${allWaypoints.size} → ${filtered.size} waypoints")
-        Log.i("ResumeMission", "Structure: HOME + ${filtered.size - 1} waypoints starting from resume point")
+        if (resumeLatitude != null && resumeLongitude != null) {
+            Log.i("ResumeMission", "Structure: HOME + Resume Location WP + ${filtered.size - 2} remaining waypoints")
+        } else {
+            Log.i("ResumeMission", "Structure: HOME + ${filtered.size - 1} waypoints starting from target waypoint")
+        }
         Log.i("ResumeMission", "═══════════════════════════════════════════════════════")
 
         return filtered
