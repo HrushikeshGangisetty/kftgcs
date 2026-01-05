@@ -49,6 +49,12 @@ class WebSocketManager {
     var isArmed = false
     var failsafe = false
 
+    // Spray telemetry
+    var sprayOn = false
+    var sprayRate = 0.0
+    var flowPulse = 0
+    var tankLevel = 0.0
+
     // Change this URL based on your setup:
     // For emulator: ws://10.0.2.2:8080/ws/telemetry
     // For real device: ws://YOUR_PC_IP:8080/ws/telemetry (e.g., ws://192.168.1.100:8080/ws/telemetry)
@@ -197,12 +203,20 @@ class WebSocketManager {
                     put("armed", isArmed)
                     put("failsafe", failsafe)
                 })
+
+                put("spray", JSONObject().apply {
+                    put("on", sprayOn)
+                    put("rate_lpm", sprayRate)
+                    put("flow_pulse", flowPulse)
+                    put("tank_level", tankLevel)
+                })
             }
 
             webSocket.send(telemetry.toString())
             Log.d(TAG, "📤 Sent telemetry: lat=$lat, lng=$lng, alt=$alt, speed=$speed, " +
                 "voltage=$voltage, current=$current, battery=$batteryRemaining%, " +
-                "mode=$flightMode, armed=$isArmed")
+                "mode=$flightMode, armed=$isArmed, spray=${if(sprayOn) "ON" else "OFF"}, " +
+                "rate=${sprayRate}L/min, tank=${tankLevel}%")
         } catch (e: Exception) {
             Log.e(TAG, "Error sending telemetry: ${e.message}", e)
         }

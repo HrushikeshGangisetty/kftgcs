@@ -148,6 +148,12 @@ class MainActivity : ComponentActivity() {
                         wsManager.isArmed = telemetryState.armed
                         wsManager.failsafe = false // TODO: Add failsafe detection if available
 
+                        // Spray telemetry
+                        wsManager.sprayOn = telemetryState.sprayTelemetry.sprayEnabled
+                        wsManager.sprayRate = (telemetryState.sprayTelemetry.flowRateLiterPerMin ?: 0f).toDouble()
+                        wsManager.flowPulse = telemetryState.sprayTelemetry.rc7Value ?: 0
+                        wsManager.tankLevel = (telemetryState.sprayTelemetry.tankLevelPercent ?: 0).toDouble()
+
                         // NOTE: Don't call sendTelemetry() here - throttled sender handles it
                     } else {
                         android.util.Log.w("WebSocketTelemetry", "⚠️ Skipping telemetry update - drone not connected")
