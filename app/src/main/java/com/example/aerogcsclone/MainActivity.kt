@@ -80,13 +80,13 @@ class MainActivity : ComponentActivity() {
         wsManager.connect()
         android.util.Log.e("MAIN_ACTIVITY", "✅ WebSocket connect() method called")
 
-        // ✅ Throttled telemetry sender - sends every 300ms instead of on every update
+        // ✅ Throttled telemetry sender - sends every 1 second instead of on every update
         Handler(Looper.getMainLooper()).postDelayed(object : Runnable {
             override fun run() {
                 wsManager.sendTelemetry()
-                Handler(Looper.getMainLooper()).postDelayed(this, 300)
+                Handler(Looper.getMainLooper()).postDelayed(this, 1000)
             }
-        }, 300)
+        }, 1000)
 
         setContent {
             val navController = rememberNavController()
