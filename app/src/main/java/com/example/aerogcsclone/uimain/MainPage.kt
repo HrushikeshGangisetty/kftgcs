@@ -181,26 +181,6 @@ fun MainPage(
                 areaFormatted = areaToDisplay
             )
 
-            // Geofence adjustment helper text
-            if (geofenceEnabled && geofencePolygon.isNotEmpty()) {
-                Card(
-                    modifier = Modifier
-                        .align(Alignment.TopCenter)
-                        .padding(top = 16.dp),
-                    colors = CardDefaults.cardColors(
-                        containerColor = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.9f)
-                    ),
-                    elevation = CardDefaults.cardElevation(defaultElevation = 4.dp)
-                ) {
-                    Text(
-                        text = "💡 ${AppStrings.geofence}: Tap orange markers to select, then drag to adjust boundary",
-                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onPrimaryContainer,
-                        textAlign = TextAlign.Center
-                    )
-                }
-            }
 
 
             FloatingButtons(
