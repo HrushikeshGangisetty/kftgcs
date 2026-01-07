@@ -268,7 +268,6 @@ private fun MobileNumberField(
     )
 
     Row(
-        modifier = Modifier.fillMaxWidth(),
         verticalAlignment = Alignment.CenterVertically
     ) {
         // Country Code Dropdown
@@ -278,7 +277,7 @@ private fun MobileNumberField(
                 onValueChange = { },
                 readOnly = true,
                 modifier = Modifier
-                    .width(100.dp)
+                    .width(120.dp)
                     .clickable { onExpandedChange(true) },
                 label = { Text(text = "Code") },
                 trailingIcon = {
@@ -289,7 +288,8 @@ private fun MobileNumberField(
                         tint = Color.Black
                     )
                 },
-                colors = textFieldColors
+                colors = textFieldColors,
+                singleLine = true
             )
             DropdownMenu(
                 expanded = expanded,
@@ -316,10 +316,11 @@ private fun MobileNumberField(
                 onMobileNumberChange(newValue.filter { it.isDigit() })
             },
             label = { Text(text = AppStrings.mobileNumber) },
-            modifier = Modifier.weight(1f),
+            modifier = Modifier
+                .width(180.dp),
             keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Phone),
-            colors = textFieldColors
+            colors = textFieldColors,
+            singleLine = true
         )
     }
 }
-
