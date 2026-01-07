@@ -80,7 +80,7 @@ object ApiService {
                 val requestBody = json.toRequestBody(jsonMediaType)
 
                 val httpRequest = Request.Builder()
-                    .url("$BASE_URL/pilot-register")
+                    .url("$BASE_URL/api/pilot-register")
                     .addHeader("Content-Type", "application/json")
                     .addHeader("Accept", "application/json")
                     .post(requestBody)
@@ -138,7 +138,7 @@ object ApiService {
                 val requestBody = json.toRequestBody(jsonMediaType)
 
                 val httpRequest = Request.Builder()
-                    .url("$BASE_URL/verify-otp")
+                    .url("$BASE_URL/api/verify-otp")
                     .addHeader("Content-Type", "application/json")
                     .addHeader("Accept", "application/json")
                     .post(requestBody)
@@ -187,7 +187,7 @@ object ApiService {
                 val requestBody = json.toRequestBody(jsonMediaType)
 
                 val httpRequest = Request.Builder()
-                    .url("$BASE_URL/resend-otp")
+                    .url("$BASE_URL/api/resend-otp")
                     .addHeader("Content-Type", "application/json")
                     .addHeader("Accept", "application/json")
                     .post(requestBody)
@@ -235,7 +235,7 @@ object ApiService {
                 val requestBody = json.toRequestBody(jsonMediaType)
 
                 val httpRequest = Request.Builder()
-                    .url("$BASE_URL/pilot-login")
+                    .url("$BASE_URL/api/pilot-login")
                     .addHeader("Content-Type", "application/json")
                     .addHeader("Accept", "application/json")
                     .post(requestBody)
@@ -284,7 +284,7 @@ object ApiService {
                 val requestBody = json.toRequestBody(jsonMediaType)
 
                 val httpRequest = Request.Builder()
-                    .url("$BASE_URL/pilot-logout")
+                    .url("$BASE_URL/api/pilot-logout")
                     .addHeader("Content-Type", "application/json")
                     .addHeader("Accept", "application/json")
                     .post(requestBody)
