@@ -96,6 +96,7 @@ fun AppNavGraph(navController: NavHostController) {
         authViewModel.checkAuthStatus(context)
     }
 
+
     // Initialize TTS when the navigation graph is created
     LaunchedEffect(Unit) {
         sharedViewModel.initializeTextToSpeech(context)

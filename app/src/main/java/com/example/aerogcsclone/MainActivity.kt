@@ -24,6 +24,7 @@ import com.google.android.gms.maps.MapsInitializer
 import com.google.accompanist.systemuicontroller.rememberSystemUiController
 import com.example.aerogcsclone.telemetry.SharedViewModel
 import com.example.aerogcsclone.telemetry.WebSocketManager
+import com.example.aerogcsclone.api.SessionManager
 
 // ✅ Dark theme setup
 private val DarkColorScheme = darkColorScheme(
@@ -77,8 +78,19 @@ class MainActivity : ComponentActivity() {
 
         // ✅ Connect to WebSocket server for telemetry streaming
         android.util.Log.e("MAIN_ACTIVITY", "🔌 About to connect WebSocket...")
+
+        // ✅ Get pilotId and adminId from SessionManager (values from database after login)
+        val pilotId = SessionManager.getPilotId(this)
+        val adminId = SessionManager.getAdminId(this)
+
+        android.util.Log.e("MAIN_ACTIVITY", "📋 SessionManager values: pilotId=$pilotId, adminId=$adminId")
+
+        // ✅ Set the values on WebSocketManager before connecting
+        wsManager.pilotId = pilotId
+        wsManager.adminId = adminId
+
         wsManager.connect()
-        android.util.Log.e("MAIN_ACTIVITY", "✅ WebSocket connect() method called")
+        android.util.Log.e("MAIN_ACTIVITY", "✅ WebSocket connect() method called with pilotId=$pilotId, adminId=$adminId")
 
         // ✅ Throttled telemetry sender - sends every 1 second instead of on every update
         Handler(Looper.getMainLooper()).postDelayed(object : Runnable {
@@ -193,6 +205,7 @@ class MainActivity : ComponentActivity() {
         // Cleanup WebSocket connection
         wsManager.disconnect()
     }
+
 
     private fun askForPermissions() {
         val permissionsToRequest = mutableListOf(

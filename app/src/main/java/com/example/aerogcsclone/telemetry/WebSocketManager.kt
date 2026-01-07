@@ -23,6 +23,10 @@ class WebSocketManager {
     private var telemetryEnabled = false
     private var readyForTelemetry = false
 
+    // ✅ Pilot and Admin identification (must be set before connecting)
+    var adminId: Int = -1  // Will be set from SessionManager
+    var pilotId: Int = -1  // Will be set from SessionManager
+
     // Mission tracking (received from backend)
     var missionId: String? = null
         private set
@@ -65,6 +69,19 @@ class WebSocketManager {
 
     fun connect() {
         Log.e("WebSocketManager", "🔥 connect() method CALLED")
+
+        // ✅ Validate pilotId and adminId are set from SessionManager
+        if (pilotId <= 0) {
+            Log.e(TAG, "⛔ Cannot connect - pilotId not set! Please login first.")
+            return
+        }
+        if (adminId <= 0) {
+            Log.w(TAG, "⚠️ adminId not set, using default value 1")
+            adminId = 1
+        }
+
+        Log.d(TAG, "📋 Connecting with pilotId=$pilotId, adminId=$adminId")
+
         try {
             Log.d(TAG, "Building WebSocket request for URL: $WS_URL")
             val request = Request.Builder()
@@ -91,10 +108,12 @@ class WebSocketManager {
             val sessionStart = JSONObject().apply {
                 put("type", "session_start")
                 put("vehicle_name", "DRONE_01") // MUST match DB
+                put("admin_id", adminId)
+                put("pilot_id", pilotId)
             }
 
             webSocket.send(sessionStart.toString())
-            Log.d(TAG, "📤 Sent session_start for DRONE_01")
+            Log.d(TAG, "📤 Sent session_start: $sessionStart")
         }
 
         // ✅ STEP 3 — Android MUST wait for ACK
@@ -169,10 +188,21 @@ class WebSocketManager {
             return
         }
 
+        // ✅ Check if we have mission_id from backend
+        if (missionId == null) {
+            Log.e(TAG, "⛔ Telemetry blocked — No mission_id received from backend yet")
+            return
+        }
+
         try {
             val telemetry = JSONObject().apply {
                 put("type", "telemetry")
                 put("ts", System.currentTimeMillis())
+
+                // ✅ CRITICAL: Include pilot_id, admin_id, and mission_id
+                put("pilot_id", pilotId)
+                put("admin_id", adminId)
+                put("mission_id", missionId)
 
                 put("position", JSONObject().apply {
                     put("lat", lat)
@@ -213,7 +243,8 @@ class WebSocketManager {
             }
 
             webSocket.send(telemetry.toString())
-            Log.d(TAG, "📤 Sent telemetry: lat=$lat, lng=$lng, alt=$alt, speed=$speed, " +
+            Log.d(TAG, "📤 Sent telemetry: mission=$missionId, pilot=$pilotId, admin=$adminId, " +
+                "lat=$lat, lng=$lng, alt=$alt, speed=$speed, " +
                 "voltage=$voltage, current=$current, battery=$batteryRemaining%, " +
                 "mode=$flightMode, armed=$isArmed, spray=${if(sprayOn) "ON" else "OFF"}, " +
                 "rate=${sprayRate}L/min, tank=${tankLevel}%")
