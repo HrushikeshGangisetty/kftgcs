@@ -41,6 +41,9 @@ class MainActivity : ComponentActivity() {
     private val hasRequiredPermissions = mutableStateOf(false)
     private val wsManager by lazy { WebSocketManager.getInstance() }
 
+    // 🔥 Flag to prevent duplicate low battery events
+    private var lowBatteryEventSent = false
+
     private val requestPermissionsLauncher = registerForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
     ) { grants ->
@@ -175,6 +178,25 @@ class MainActivity : ComponentActivity() {
                                 wsManager.droneUid = uid
                                 android.util.Log.i("WebSocketTelemetry", "🔥 DroneUID set: $uid")
                             }
+                        }
+
+                        // 🔥 Low Battery Event Detection
+                        val batteryPercent = telemetryState.batteryPercent
+                        if (batteryPercent != null && batteryPercent <= 20 && !lowBatteryEventSent && wsManager.isConnected) {
+                            try {
+                                wsManager.sendMissionEvent(
+                                    eventType = "LOW_BATTERY",
+                                    eventStatus = "WARNING",
+                                    description = "Battery dropped below 20% (${batteryPercent}%)"
+                                )
+                                lowBatteryEventSent = true
+                                android.util.Log.w("WebSocketTelemetry", "⚠️ LOW_BATTERY event sent: ${batteryPercent}%")
+                            } catch (e: Exception) {
+                                android.util.Log.e("WebSocketTelemetry", "Failed to send LOW_BATTERY event", e)
+                            }
+                        } else if (batteryPercent != null && batteryPercent > 25) {
+                            // Reset flag when battery is above 25% (allows re-triggering if battery replaced)
+                            lowBatteryEventSent = false
                         }
 
                         // NOTE: Don't call sendTelemetry() here - throttled sender handles it

@@ -57,6 +57,9 @@ class WebSocketManager {
     // 🔥 Drone UID - Real drone identifier from Flight Controller
     var droneUid: String = ""  // Set from TelemetryState / FC AUTOPILOT_VERSION
 
+    // 🔥 Plot name - Selected plot/field name from UI
+    var selectedPlotName: String = ""  // Set from UI when mission starts
+
     /**
      * Resolves the drone UID, providing a fallback for SITL testing
      * @return Real drone UID if available, otherwise "SITL_DRONE_001" as fallback
@@ -71,6 +74,11 @@ class WebSocketManager {
 
     // Mission tracking (received from backend)
     var missionId: String? = null
+        private set
+
+    // 🔥 Mission statistics tracking
+    var missionBatteryStart: Int = 100  // Battery % at mission start
+    var missionAlertsCount: Int = 0     // Count of alerts/warnings during mission
         private set
 
     // Real-time telemetry state (updated by MAVSDK)
@@ -147,6 +155,11 @@ class WebSocketManager {
             sessionStarted = false
             readyForTelemetry = false
 
+            // 🔥 Reset mission statistics when new session starts
+            missionAlertsCount = 0
+            missionBatteryStart = batteryRemaining  // Capture current battery as start
+            Log.d(TAG, "📊 Mission stats reset - Battery start: $missionBatteryStart%")
+
             val sessionStart = JSONObject().apply {
                 put("type", "session_start")
                 put("vehicle_name", "DRONE_01") // MUST match DB
@@ -154,6 +167,8 @@ class WebSocketManager {
                 put("pilot_id", pilotId)
                 // 🔥 REAL DRONE ID from Flight Controller (with SITL fallback)
                 put("drone_uid", resolveDroneUid())
+                // 🔥 Plot name from UI
+                put("plot_name", selectedPlotName)
             }
 
             webSocket.send(sessionStart.toString())
@@ -371,10 +386,76 @@ class WebSocketManager {
             }
 
             webSocket.send(msg.toString())
+
+            // 🔥 Auto-increment alerts count for WARNING/ERROR/CRITICAL events
+            if (eventStatus in listOf("WARNING", "ERROR", "CRITICAL")) {
+                missionAlertsCount++
+                Log.d(TAG, "📊 Alert count incremented: $missionAlertsCount (event: $eventType)")
+            }
+
             Log.d(TAG, "📤 Sent mission event: type=$eventType, status=$eventStatus, desc=$description, drone_uid=${resolveDroneUid()}")
 
         } catch (e: Exception) {
             Log.e(TAG, "❌ Failed to send mission event", e)
+        }
+    }
+
+    /**
+     * Send mission summary to backend when mission ends
+     * @param totalArea Total area covered in the mission (sq meters or hectares)
+     * @param totalSprayUsed Total spray/liquid used (liters)
+     * @param flyingTimeMinutes Total flying time in minutes
+     * @param averageSpeed Average speed during mission (m/s)
+     * @param batteryStart Battery percentage at mission start
+     * @param batteryEnd Battery percentage at mission end
+     * @param alertsCount Number of alerts/warnings during mission
+     * @param status Mission completion status ("COMPLETED" or "FAILED")
+     */
+    fun sendMissionSummary(
+        totalArea: Double,
+        totalSprayUsed: Double,
+        flyingTimeMinutes: Double,
+        averageSpeed: Double,
+        batteryStart: Int,
+        batteryEnd: Int,
+        alertsCount: Int,
+        status: String  // "COMPLETED" or "FAILED"
+    ) {
+        if (!isConnected || missionId == null) {
+            Log.e(TAG, "⛔ Cannot send mission summary — socket not ready (connected=$isConnected, missionId=$missionId)")
+            return
+        }
+
+        if (!::webSocket.isInitialized) {
+            Log.e(TAG, "⛔ Cannot send mission summary — webSocket not initialized")
+            return
+        }
+
+        try {
+            val msg = JSONObject().apply {
+                put("type", "mission_summary")
+
+                put("mission_id", missionId)
+                put("drone_uid", resolveDroneUid())
+
+                put("total_area", totalArea)
+                put("total_spray_used", totalSprayUsed)
+                put("flying_time_minutes", flyingTimeMinutes)
+                put("average_speed", averageSpeed)
+
+                put("battery_start", batteryStart)
+                put("battery_end", batteryEnd)
+
+                put("alerts_count", alertsCount)
+                put("status", status)  // COMPLETED / FAILED
+            }
+
+            webSocket.send(msg.toString())
+            Log.d(TAG, "📤 Mission summary sent: area=$totalArea, spray=$totalSprayUsed, time=$flyingTimeMinutes min, " +
+                "speed=$averageSpeed, battery=$batteryStart%→$batteryEnd%, alerts=$alertsCount, status=$status")
+
+        } catch (e: Exception) {
+            Log.e(TAG, "❌ Failed to send mission summary", e)
         }
     }
 

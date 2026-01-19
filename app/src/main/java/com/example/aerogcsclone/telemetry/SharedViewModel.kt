@@ -1804,6 +1804,9 @@ class SharedViewModel : ViewModel() {
                         val wsManager = WebSocketManager.getInstance()
                         if (!wsManager.isConnected) {
                             Log.i("SharedVM", "🔌 Opening WebSocket connection for mission...")
+                            // 🔥 Set plot name before connecting
+                            wsManager.selectedPlotName = _currentPlotName.value
+                            Log.i("SharedVM", "📋 Plot name set for WebSocket: ${_currentPlotName.value}")
                             wsManager.connect()
                         }
                     } catch (e: Exception) {
@@ -1813,6 +1816,11 @@ class SharedViewModel : ViewModel() {
                     // ✅ Send mission status STARTED to backend (crash-safe)
                     try {
                         WebSocketManager.getInstance().sendMissionStatus(WebSocketManager.MISSION_STATUS_STARTED)
+                        WebSocketManager.getInstance().sendMissionEvent(
+                            eventType = "MISSION_STARTED",
+                            eventStatus = "INFO",
+                            description = "Mission started successfully"
+                        )
                     } catch (e: Exception) {
                         Log.e("SharedVM", "Failed to send STARTED status", e)
                     }
@@ -1884,6 +1892,11 @@ class SharedViewModel : ViewModel() {
                     // ✅ Send mission status PAUSED to backend (crash-safe)
                     try {
                         WebSocketManager.getInstance().sendMissionStatus(WebSocketManager.MISSION_STATUS_PAUSED)
+                        WebSocketManager.getInstance().sendMissionEvent(
+                            eventType = "MISSION_PAUSED",
+                            eventStatus = "INFO",
+                            description = "Mission paused"
+                        )
                     } catch (e: Exception) {
                         Log.e("SharedVM", "Failed to send PAUSED status", e)
                     }
@@ -2085,6 +2098,11 @@ class SharedViewModel : ViewModel() {
                 // ✅ Send mission status RESUMED to backend (crash-safe)
                 try {
                     WebSocketManager.getInstance().sendMissionStatus(WebSocketManager.MISSION_STATUS_RESUMED)
+                    WebSocketManager.getInstance().sendMissionEvent(
+                        eventType = "MISSION_RESUMED",
+                        eventStatus = "INFO",
+                        description = "Mission resumed"
+                    )
                 } catch (e: Exception) {
                     Log.e("SharedVM", "Failed to send RESUMED status", e)
                 }
@@ -2137,6 +2155,11 @@ class SharedViewModel : ViewModel() {
                         // ✅ Send mission status RESUMED to backend (crash-safe)
                         try {
                             WebSocketManager.getInstance().sendMissionStatus(WebSocketManager.MISSION_STATUS_RESUMED)
+                            WebSocketManager.getInstance().sendMissionEvent(
+                                eventType = "MISSION_RESUMED",
+                                eventStatus = "INFO",
+                                description = "Mission resumed from current position"
+                            )
                         } catch (e: Exception) {
                             Log.e("SharedVM", "Failed to send RESUMED status", e)
                         }
@@ -2176,6 +2199,11 @@ class SharedViewModel : ViewModel() {
                     // ✅ Send mission status RESUMED to backend (crash-safe)
                     try {
                         WebSocketManager.getInstance().sendMissionStatus(WebSocketManager.MISSION_STATUS_RESUMED)
+                        WebSocketManager.getInstance().sendMissionEvent(
+                            eventType = "MISSION_RESUMED",
+                            eventStatus = "INFO",
+                            description = "Mission resumed from waypoint $pausedWaypoint"
+                        )
                     } catch (e: Exception) {
                         Log.e("SharedVM", "Failed to send RESUMED status", e)
                     }
