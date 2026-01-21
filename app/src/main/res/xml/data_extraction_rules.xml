@@ -1,19 +1,66 @@
-<?xml version="1.0" encoding="utf-8"?><!--
-   Sample data extraction rules file; uncomment and customize as necessary.
-   See https://developer.android.com/about/versions/12/backup-restore#xml-changes
-   for details.
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    SECURITY: Data extraction rules for Android 12+ (API 31+)
+    Excludes sensitive data from cloud backup and device-to-device transfer.
+
+    See https://developer.android.com/about/versions/12/backup-restore#xml-changes
 -->
 <data-extraction-rules>
+    <!-- Cloud Backup Rules (Google Drive backup) -->
     <cloud-backup>
-        <!-- TODO: Use <include> and <exclude> to control what is backed up.
-        <include .../>
-        <exclude .../>
+        <!--
+            EXCLUDE ALL SENSITIVE DATA FROM CLOUD BACKUP
+            This protects against data exfiltration and unauthorized access
         -->
+
+        <!-- Encrypted session data -->
+        <exclude domain="sharedpref" path="secure_pilot_session.xml"/>
+
+        <!-- Legacy plaintext session -->
+        <exclude domain="sharedpref" path="pilot_session.xml"/>
+
+        <!-- Encrypted PIN storage -->
+        <exclude domain="sharedpref" path="secure_pin_prefs.xml"/>
+
+        <!-- Legacy plaintext PIN -->
+        <exclude domain="sharedpref" path="security_prefs.xml"/>
+
+        <!-- Fallback preferences -->
+        <exclude domain="sharedpref" path="secure_pilot_session_fallback.xml"/>
+
+        <!-- Firebase/Google auth tokens -->
+        <exclude domain="sharedpref" path="com.google.firebase.auth.api.Store.xml"/>
+        <exclude domain="sharedpref" path="com.google.android.gms.signin.xml"/>
+
+        <!-- All databases (flight logs, telemetry, mission data) -->
+        <exclude domain="database" path="."/>
+
+        <!-- External files -->
+        <exclude domain="external" path="."/>
+
+        <!-- Root files -->
+        <exclude domain="root" path="."/>
     </cloud-backup>
-    <!--
+
+    <!-- Device-to-Device Transfer Rules (for device migration) -->
     <device-transfer>
-        <include .../>
-        <exclude .../>
+        <!--
+            Also exclude sensitive data from device transfer
+            User should re-authenticate on new device
+        -->
+
+        <!-- Session and authentication data -->
+        <exclude domain="sharedpref" path="secure_pilot_session.xml"/>
+        <exclude domain="sharedpref" path="pilot_session.xml"/>
+        <exclude domain="sharedpref" path="secure_pin_prefs.xml"/>
+        <exclude domain="sharedpref" path="security_prefs.xml"/>
+        <exclude domain="sharedpref" path="secure_pilot_session_fallback.xml"/>
+
+        <!-- Auth tokens -->
+        <exclude domain="sharedpref" path="com.google.firebase.auth.api.Store.xml"/>
+        <exclude domain="sharedpref" path="com.google.android.gms.signin.xml"/>
+
+        <!-- Databases -->
+        <exclude domain="database" path="."/>
     </device-transfer>
-    -->
 </data-extraction-rules>

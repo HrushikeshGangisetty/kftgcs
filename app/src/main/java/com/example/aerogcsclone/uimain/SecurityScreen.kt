@@ -22,19 +22,24 @@ import androidx.navigation.NavHostController
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.ui.platform.LocalContext
-import android.content.Context
 import android.widget.Toast
 import com.example.aerogcsclone.navigation.Screen
 import com.example.aerogcsclone.utils.AppStrings
-import androidx.core.content.edit
+import com.example.aerogcsclone.security.SecurePinManager
 
 @Composable
 fun SecurityScreen(navController: NavHostController) {
     val context = LocalContext.current
+
+    // Migrate any existing plaintext PIN to secure storage (one-time operation)
+    LaunchedEffect(Unit) {
+        SecurePinManager.migrateFromPlaintextStorage(context)
+    }
+
     // PIN dialog visibility and input state
     var showPinDialog by remember { mutableStateOf(false) }
     var pinInput by remember { mutableStateOf("") }
-    var savedPin by remember { mutableStateOf(loadSavedPin(context)) }
+    var isPinSet by remember { mutableStateOf(SecurePinManager.isPinSet(context)) }
     // Simple security settings screen with a couple of toggles as examples
     var requireAuth by remember { mutableStateOf(false) }
     var lockOnBackground by remember { mutableStateOf(false) }
@@ -82,12 +87,12 @@ fun SecurityScreen(navController: NavHostController) {
                 Column {
                     Text(text = "4-digit PIN", color = Color.White)
                     Text(
-                        text = if (savedPin.isNullOrEmpty()) "Not set" else "•••• (set)",
+                        text = if (!isPinSet) "Not set" else "•••• (set)",
                         color = Color.Gray
                     )
                 }
                 Button(onClick = { showPinDialog = true }) {
-                    Text(text = if (savedPin.isNullOrEmpty()) "Set PIN" else "Change PIN")
+                    Text(text = if (!isPinSet) "Set PIN" else "Change PIN")
                 }
             }
 
@@ -106,9 +111,9 @@ fun SecurityScreen(navController: NavHostController) {
                                     pinInput = filtered
                                     // Auto-save and close dialog immediately when 4 digits entered
                                     if (filtered.length == 4) {
-                                        savePin(context, filtered)
-                                        savedPin = filtered
-                                        Toast.makeText(context, "PIN set", Toast.LENGTH_SHORT).show()
+                                        SecurePinManager.savePin(context, filtered)
+                                        isPinSet = true
+                                        Toast.makeText(context, "PIN set securely", Toast.LENGTH_SHORT).show()
                                         showPinDialog = false
                                         pinInput = ""
                                     }
@@ -118,14 +123,14 @@ fun SecurityScreen(navController: NavHostController) {
                                 modifier = Modifier.fillMaxWidth()
                             )
                             Spacer(modifier = Modifier.height(8.dp))
-                            Text(text = "PIN will be saved automatically when you confirm.", color = Color.Gray)
+                            Text(text = "PIN will be encrypted and saved securely.", color = Color.Gray)
                         }
                     },
                     confirmButton = {
                         TextButton(onClick = {
                             if (pinInput.length == 4) {
-                                savePin(context, pinInput)
-                                savedPin = pinInput
+                                SecurePinManager.savePin(context, pinInput)
+                                isPinSet = true
                                 Toast.makeText(context, AppStrings.pinSet, Toast.LENGTH_SHORT).show()
                                 showPinDialog = false
                                 pinInput = ""
@@ -184,12 +189,6 @@ fun SecurityScreen(navController: NavHostController) {
     }
 }
 
-private fun savePin(context: Context, pin: String) {
-    val prefs = context.getSharedPreferences("security_prefs", Context.MODE_PRIVATE)
-    prefs.edit { putString("pin", pin) }
-}
-
-private fun loadSavedPin(context: Context): String? {
-    val prefs = context.getSharedPreferences("security_prefs", Context.MODE_PRIVATE)
-    return prefs.getString("pin", null)
-}
+// NOTE: Old insecure plaintext PIN storage functions have been removed.
+// PIN is now encrypted using SecurePinManager with Android Keystore.
+// See: com.example.aerogcsclone.security.SecurePinManager

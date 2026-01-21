@@ -12,6 +12,23 @@ captures/
 # Local configuration (SDK/keystore, do not share!)
 local.properties
 
+# Firebase configuration (contains sensitive API keys - DO NOT COMMIT)
+app/google-services.json
+google-services.json
+
+# Sensitive configuration files
+*.keystore
+*.jks
+secrets.properties
+api-keys.properties
+
+# Git configuration files (prevent accidental commit of credentials)
+.gitconfig
+**/config
+clear
+.git-credentials
+.netrc
+
 # Mac/Windows system files
 .DS_Store
 Thumbs.db

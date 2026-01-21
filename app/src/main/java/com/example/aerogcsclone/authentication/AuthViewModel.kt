@@ -1,6 +1,7 @@
 package com.example.aerogcsclone.authentication
 
 import android.content.Context
+import android.util.Patterns
 import androidx.lifecycle.LiveData
 import androidx.lifecycle.MutableLiveData
 import androidx.lifecycle.ViewModel
@@ -27,9 +28,87 @@ class AuthViewModel : ViewModel() {
         }
     }
 
+    /**
+     * Validates email format and password strength for login
+     * @return error message if validation fails, null if valid
+     */
+    private fun validateLoginInput(email: String, password: String): String? {
+        if (email.isEmpty()) return "Email is required"
+        if (!Patterns.EMAIL_ADDRESS.matcher(email).matches()) {
+            return "Invalid email format"
+        }
+        if (email.length > 254) return "Email is too long"
+        // Sanitize email - check for potentially dangerous characters
+        if (email.contains(Regex("[<>\"';&|]"))) {
+            return "Email contains invalid characters"
+        }
+        if (password.isEmpty()) return "Password is required"
+        if (password.length > 128) return "Password is too long"
+        return null
+    }
+
+    /**
+     * Validates email format and password strength for signup
+     * @return error message if validation fails, null if valid
+     */
+    private fun validateSignupInput(
+        firstName: String,
+        lastName: String,
+        email: String,
+        mobileNumber: String,
+        password: String,
+        rePassword: String
+    ): String? {
+        // Name validation
+        if (firstName.isEmpty()) return "First name is required"
+        if (firstName.length > 50) return "First name is too long (max 50 characters)"
+        // Sanitize names - only allow letters, spaces, hyphens, and apostrophes
+        if (!firstName.matches(Regex("^[a-zA-Z\\s'-]+$"))) {
+            return "First name contains invalid characters"
+        }
+        if (lastName.isEmpty()) return "Last name is required"
+        if (lastName.length > 50) return "Last name is too long (max 50 characters)"
+        if (!lastName.matches(Regex("^[a-zA-Z\\s'-]+$"))) {
+            return "Last name contains invalid characters"
+        }
+
+        // Email validation
+        if (email.isEmpty()) return "Email is required"
+        if (!Patterns.EMAIL_ADDRESS.matcher(email).matches()) {
+            return "Invalid email format"
+        }
+        if (email.length > 254) return "Email is too long"
+        // Sanitize email - check for potentially dangerous characters
+        if (email.contains(Regex("[<>\"';&|]"))) {
+            return "Email contains invalid characters"
+        }
+
+        // Mobile number validation
+        if (mobileNumber.isEmpty()) return "Mobile number is required"
+        if (!mobileNumber.matches(Regex("^[+]?[0-9]{10,15}$"))) {
+            return "Invalid mobile number format"
+        }
+
+        // Password validation
+        if (password.isEmpty()) return "Password is required"
+        if (password.length < 8) return "Password must be at least 8 characters"
+        if (password.length > 128) return "Password is too long (max 128 characters)"
+        if (!password.any { it.isDigit() }) return "Password must contain at least one digit"
+        if (!password.any { it.isUpperCase() }) return "Password must contain at least one uppercase letter"
+        if (!password.any { it.isLowerCase() }) return "Password must contain at least one lowercase letter"
+        if (!password.any { !it.isLetterOrDigit() }) return "Password must contain at least one special character"
+
+        // Password confirmation
+        if (rePassword.isEmpty()) return "Please confirm your password"
+        if (password != rePassword) return "Passwords do not match"
+
+        return null
+    }
+
     fun login(context: Context, email: String, password: String) {
-        if (email.isEmpty() || password.isEmpty()) {
-            _authState.value = AuthState.Error("Email and password can't be empty")
+        val validationError = validateLoginInput(email, password)
+        if (validationError != null) {
+            _authState.value = AuthState.Error(validationError)
             return
         }
 
@@ -62,9 +141,9 @@ class AuthViewModel : ViewModel() {
         password: String,
         rePassword: String
     ) {
-        if (firstName.isEmpty() || lastName.isEmpty() || email.isEmpty() ||
-            mobileNumber.isEmpty() || password.isEmpty() || rePassword.isEmpty()) {
-            _authState.value = AuthState.Error("All fields are required")
+        val validationError = validateSignupInput(firstName, lastName, email, mobileNumber, password, rePassword)
+        if (validationError != null) {
+            _authState.value = AuthState.Error(validationError)
             return
         }
 

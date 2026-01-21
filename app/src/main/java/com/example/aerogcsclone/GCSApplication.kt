@@ -1,7 +1,9 @@
 package com.example.aerogcsclone
 
 import android.app.Application
-import android.util.Log
+import com.example.aerogcsclone.api.SessionManager
+import com.example.aerogcsclone.security.SecurePinManager
+import timber.log.Timber
 
 /**
  * Custom Application class to handle app-level initialization and crash detection.
@@ -28,16 +30,68 @@ class GCSApplication : Application() {
         // Callback to trigger RTL
         @Volatile
         var onTriggerEmergencyRTL: (() -> Unit)? = null
+
+        /**
+         * Check if running in debug mode using reflection
+         * This avoids compile-time dependency on BuildConfig
+         */
+        fun isDebugBuild(): Boolean {
+            return try {
+                val buildConfigClass = Class.forName("com.example.aerogcsclone.BuildConfig")
+                val debugField = buildConfigClass.getField("DEBUG")
+                debugField.getBoolean(null)
+            } catch (e: Exception) {
+                // Default to false (production behavior) if we can't determine
+                false
+            }
+        }
     }
 
     override fun onCreate() {
         super.onCreate()
         instance = this
 
+        // Initialize Timber for logging - ONLY in debug builds
+        // In release builds, no logs will be output (security feature)
+        initializeTimber()
+
+        // Migrate any plaintext data to secure encrypted storage (one-time operation)
+        migrateToSecureStorage()
+
         // Setup global crash handler
         setupCrashHandler()
 
-        Log.i("GCSApplication", "✓ Application initialized with crash handler")
+        Timber.i("✓ Application initialized with crash handler")
+    }
+
+    /**
+     * Initialize Timber logging - only plants tree in debug builds
+     * This prevents sensitive data from being logged in production
+     */
+    private fun initializeTimber() {
+        if (isDebugBuild()) {
+            Timber.plant(Timber.DebugTree())
+            Timber.d("🌲 Timber initialized for DEBUG build")
+        }
+        // In release builds, no tree is planted, so all Timber calls are no-ops
+    }
+
+    /**
+     * Migrate plaintext session data and PIN to encrypted storage
+     * This runs once on app startup to ensure legacy data is securely migrated
+     */
+    private fun migrateToSecureStorage() {
+        try {
+            // Migrate session data (email, pilot ID, etc.)
+            SessionManager.migrateFromPlaintextStorage(this)
+
+            // Migrate PIN (handled by SecurePinManager)
+            SecurePinManager.migrateFromPlaintextStorage(this)
+
+            Timber.i("✓ Secure storage migration check completed")
+        } catch (e: Exception) {
+            Timber.e(e, "❌ Migration error: ${e.message}")
+        }
     }
 
     /**
@@ -49,15 +103,15 @@ class GCSApplication : Application() {
 
         // Set custom exception handler
         Thread.setDefaultUncaughtExceptionHandler { thread, throwable ->
-            Log.e("GCSApplication", "========== APP CRASH DETECTED ==========")
-            Log.e("GCSApplication", "Thread: ${thread.name}")
-            Log.e("GCSApplication", "Error: ${throwable.message}", throwable)
-            Log.e("GCSApplication", "Drone in flight: $isDroneInFlight")
-            Log.e("GCSApplication", "Connected: $isConnectedToDrone")
+            Timber.e("========== APP CRASH DETECTED ==========")
+            Timber.e("Thread: ${thread.name}")
+            Timber.e(throwable, "Error: ${throwable.message}")
+            Timber.e("Drone in flight: $isDroneInFlight")
+            Timber.e("Connected: $isConnectedToDrone")
 
             // If drone is in flight and connected, trigger emergency RTL
             if (isDroneInFlight && isConnectedToDrone) {
-                Log.w("GCSApplication", "🚨 TRIGGERING EMERGENCY RTL DUE TO APP CRASH 🚨")
+                Timber.w("🚨 TRIGGERING EMERGENCY RTL DUE TO APP CRASH 🚨")
 
                 try {
                     // Trigger RTL synchronously before app dies
@@ -66,15 +120,15 @@ class GCSApplication : Application() {
                     // Give some time for RTL command to be sent
                     Thread.sleep(500)
 
-                    Log.i("GCSApplication", "✓ Emergency RTL command sent")
+                    Timber.i("✓ Emergency RTL command sent")
                 } catch (e: Exception) {
-                    Log.e("GCSApplication", "❌ Failed to send emergency RTL", e)
+                    Timber.e(e, "❌ Failed to send emergency RTL")
                 }
             } else {
-                Log.i("GCSApplication", "No emergency RTL needed (not in flight or not connected)")
+                Timber.i("No emergency RTL needed (not in flight or not connected)")
             }
 
-            Log.e("GCSApplication", "=========================================")
+            Timber.e("=========================================")
 
             // Call the default handler to properly crash the app
             defaultExceptionHandler?.uncaughtException(thread, throwable)
