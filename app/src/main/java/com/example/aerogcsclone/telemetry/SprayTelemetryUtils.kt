@@ -47,6 +47,79 @@ class FlowRateFilter(private val windowSize: Int = 5) {
 }
 
 /**
+ * Voltage filter with moving average and spike rejection for tank level sensor (BATT3)
+ * Helps smooth out fluctuating readings from analog level sensors
+ */
+class VoltageFilter(private val windowSize: Int = 10) {
+    private val values = mutableListOf<Int>()
+    private var lastStableValue: Int? = null
+
+    /**
+     * Add a new voltage reading and return the filtered (median) value
+     * Uses median instead of average to better reject outliers
+     */
+    fun addValue(value: Int): Int {
+        values.add(value)
+        if (values.size > windowSize) values.removeAt(0)
+
+        // Use median for better outlier rejection
+        val sorted = values.sorted()
+        val median = if (sorted.size % 2 == 0) {
+            (sorted[sorted.size / 2 - 1] + sorted[sorted.size / 2]) / 2
+        } else {
+            sorted[sorted.size / 2]
+        }
+
+        lastStableValue = median
+        return median
+    }
+
+    /**
+     * Detect if a new value is a spike (anomaly) compared to recent values
+     * @param newValue The new value to check
+     * @param maxDeviation Maximum allowed deviation in mV from the median
+     * @return true if the value is likely an erratic reading
+     */
+    fun detectSpike(newValue: Int, maxDeviation: Int = 50): Boolean {
+        if (values.size < 3) return false
+        val sorted = values.sorted()
+        val median = sorted[sorted.size / 2]
+        return abs(newValue - median) > maxDeviation
+    }
+
+    /**
+     * Get current median without adding new value
+     */
+    fun getMedian(): Int? {
+        if (values.isEmpty()) return null
+        val sorted = values.sorted()
+        return if (sorted.size % 2 == 0) {
+            (sorted[sorted.size / 2 - 1] + sorted[sorted.size / 2]) / 2
+        } else {
+            sorted[sorted.size / 2]
+        }
+    }
+
+    /**
+     * Get last stable value (useful when current reading is a spike)
+     */
+    fun getLastStable(): Int? = lastStableValue
+
+    /**
+     * Clear all stored values
+     */
+    fun reset() {
+        values.clear()
+        lastStableValue = null
+    }
+
+    /**
+     * Get the number of values currently in the filter
+     */
+    fun size(): Int = values.size
+}
+
+/**
  * Calibration point for piecewise tank level calibration
  * Supports non-linear tank shapes
  */

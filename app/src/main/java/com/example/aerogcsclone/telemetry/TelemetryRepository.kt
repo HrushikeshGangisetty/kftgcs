@@ -112,6 +112,9 @@ class MavlinkTelemetryRepository(
     // Flow rate filter for sensor fault detection and smoothing
     private val flowRateFilter = FlowRateFilter(windowSize = 5)
 
+    // Voltage filter for BATT3 tank level sensor smoothing
+    private val tankVoltageFilter = VoltageFilter(windowSize = 10)
+
     // Manual mission tracking removed - now handled by UnifiedFlightTracker
     private var previousArmedState = false  // Track previous armed state for TTS announcements
     private var isMissionUploadInProgress = false  // Track if mission upload is actively in progress (not just clearing)
@@ -126,6 +129,10 @@ class MavlinkTelemetryRepository(
 
     // RC Battery failsafe tracking
     private var rcBatteryFailsafeTriggered = false
+
+    // Tank empty notification tracking
+    private var tankEmptyNotificationShown = false
+    private var lastTankLevelPercent: Int? = null
 
     // MAG_CAL_PROGRESS flow for compass calibration progress
     private val _magCalProgress = MutableSharedFlow<MagCalProgress>(replay = 0, extraBufferCapacity = 10)
@@ -692,41 +699,116 @@ class MavlinkTelemetryRepository(
                     // Level sensor (BATT3 - id=2)
                     else if (b.id.toInt() == 2) {
                         Log.d("Spray Telemetry", "💧 Processing LEVEL SENSOR (BATT3 - id=2)")
-                        Log.d("Spray Telemetry", "Level sensor (BATT3) - Raw data: " +
-                                "voltages=${b.voltages.firstOrNull()} mV, " +
+
+                        // ═══ DIAGNOSTIC: Log ALL voltage cells for debugging ═══
+                        Log.d("Spray Telemetry", "═══ BATT3 VOLTAGE DIAGNOSTICS ═══")
+                        b.voltages.forEachIndexed { index, voltage ->
+                            Log.d("Spray Telemetry", "   voltages[$index]: $voltage mV (raw UShort)")
+                        }
+                        Log.d("Spray Telemetry", "   battery_remaining: ${b.batteryRemaining}%")
+                        Log.d("Spray Telemetry", "   current_battery: ${b.currentBattery} cA")
+                        Log.d("Spray Telemetry", "   current_consumed: ${b.currentConsumed} mAh")
+
+                        // Get VOLT_MULT from parameters (if available)
+                        val voltMult = state.value.sprayTelemetry.batt3VoltMult ?: 1.0f
+                        Log.d("Spray Telemetry", "   BATT3_VOLT_MULT: $voltMult")
+                        Log.d("Spray Telemetry", "═══════════════════════════════════")
+
+                        // Parse raw voltage from level sensor
+                        // Note: voltages[] in MAVLink is UShort (0-65535), representing millivolts
+                        val rawVoltageUShort = b.voltages.firstOrNull()
+                        val rawVoltageMv = rawVoltageUShort?.toInt()
+
+                        // Check for UINT16_MAX (65535) which means "not available"
+                        val validRawVoltageMv = if (rawVoltageMv == 65535 || rawVoltageMv == null) {
+                            Log.w("Spray Telemetry", "⚠️ Voltage is UINT16_MAX (65535) or null - sensor not configured properly")
+                            null
+                        } else {
+                            rawVoltageMv
+                        }
+
+                        Log.d("Spray Telemetry", "Level sensor (BATT3) - Raw voltage: $validRawVoltageMv mV, " +
                                 "battery_remaining=${b.batteryRemaining}%")
 
-                        // Parse voltage from level sensor
-                        val tankVoltageMv = b.voltages.firstOrNull()?.toInt()
-                        if (tankVoltageMv != null) {
-                            Log.d("Spray Telemetry", "✓ Tank voltage: $tankVoltageMv mV")
+                        // Calculate true sensor voltage (before FCU multiplied it)
+                        val trueSensorVoltageMv = if (validRawVoltageMv != null && voltMult > 0) {
+                            (validRawVoltageMv / voltMult).toInt()
                         } else {
-                            Log.w("Spray Telemetry", "⚠️ Tank voltage is null")
+                            validRawVoltageMv
+                        }
+                        Log.d("Spray Telemetry", "   True sensor voltage (÷$voltMult): $trueSensorVoltageMv mV")
+
+                        // Apply voltage filter to smooth out fluctuations
+                        val tankVoltageMv = if (validRawVoltageMv != null && validRawVoltageMv > 0) {
+                            // Check for spike before adding to filter
+                            if (tankVoltageFilter.size() >= 3 && tankVoltageFilter.detectSpike(validRawVoltageMv, maxDeviation = 100)) {
+                                Log.w("Spray Telemetry", "⚠️ VOLTAGE SPIKE DETECTED: $validRawVoltageMv mV")
+                                Log.w("Spray Telemetry", "   Current median: ${tankVoltageFilter.getMedian()} mV")
+                                Log.w("Spray Telemetry", "   Using last stable value instead")
+                                // Use last stable value instead of spike
+                                tankVoltageFilter.getLastStable() ?: validRawVoltageMv
+                            } else {
+                                // Normal value - add to filter and get smoothed result
+                                val filtered = tankVoltageFilter.addValue(validRawVoltageMv)
+                                Log.d("Spray Telemetry", "✓ Voltage: raw=$validRawVoltageMv mV, filtered=$filtered mV (samples: ${tankVoltageFilter.size()})")
+                                filtered
+                            }
+                        } else {
+                            Log.w("Spray Telemetry", "⚠️ Tank voltage is null or invalid: $validRawVoltageMv")
+                            null
                         }
 
                         // Get calibration values from state (configurable in settings)
                         val emptyVoltageMv = state.value.sprayTelemetry.levelSensorEmptyMv
                         val fullVoltageMv = state.value.sprayTelemetry.levelSensorFullMv
 
-                        // Calculate tank level percentage from voltage
-                        // Linear interpolation: level% = (currentV - emptyV) / (fullV - emptyV) * 100
+                        // Determine if sensor is inverted (higher voltage = empty)
+                        val isInverted = emptyVoltageMv > fullVoltageMv
+
+                        // Calculate tank level percentage from filtered voltage
+                        // Supports both normal (voltage increases with level) and inverted sensors
                         val tankLevelPercent = if (tankVoltageMv != null) {
-                            when {
-                                tankVoltageMv < emptyVoltageMv -> {
-                                    Log.d("Spray Telemetry", "⚠️ Voltage below empty threshold: $tankVoltageMv < $emptyVoltageMv mV")
-                                    0  // Below empty threshold
+                            if (isInverted) {
+                                // Inverted sensor: higher voltage = lower tank level
+                                // Empty = high voltage, Full = low voltage
+                                when {
+                                    tankVoltageMv >= emptyVoltageMv -> {
+                                        Log.d("Spray Telemetry", "⚠️ Voltage at/above empty threshold (inverted): $tankVoltageMv >= $emptyVoltageMv mV")
+                                        0  // At or above empty voltage = empty
+                                    }
+                                    tankVoltageMv <= fullVoltageMv -> {
+                                        Log.d("Spray Telemetry", "⚠️ Voltage at/below full threshold (inverted): $tankVoltageMv <= $fullVoltageMv mV")
+                                        100  // At or below full voltage = full
+                                    }
+                                    else -> {
+                                        // Linear interpolation for inverted sensor
+                                        // level% = (emptyV - currentV) / (emptyV - fullV) * 100
+                                        val level = ((emptyVoltageMv - tankVoltageMv).toFloat() /
+                                                (emptyVoltageMv - fullVoltageMv) * 100).toInt()
+                                            .coerceIn(0, 100)
+                                        Log.d("Spray Telemetry", "✓ Calculated tank level (inverted): $level% (from ${tankVoltageMv}mV)")
+                                        level
+                                    }
                                 }
-                                tankVoltageMv > fullVoltageMv -> {
-                                    Log.d("Spray Telemetry", "⚠️ Voltage above full threshold: $tankVoltageMv > $fullVoltageMv mV")
-                                    100  // Above full threshold
-                                }
-                                else -> {
-                                    // Linear interpolation
-                                    val level = ((tankVoltageMv - emptyVoltageMv).toFloat() /
-                                            (fullVoltageMv - emptyVoltageMv) * 100).toInt()
-                                        .coerceIn(0, 100)
-                                    Log.d("Spray Telemetry", "✓ Calculated tank level: $level% (from ${tankVoltageMv}mV)")
-                                    level
+                            } else {
+                                // Normal sensor: higher voltage = higher tank level
+                                when {
+                                    tankVoltageMv <= emptyVoltageMv -> {
+                                        Log.d("Spray Telemetry", "⚠️ Voltage at/below empty threshold: $tankVoltageMv <= $emptyVoltageMv mV")
+                                        0  // At or below empty threshold
+                                    }
+                                    tankVoltageMv >= fullVoltageMv -> {
+                                        Log.d("Spray Telemetry", "⚠️ Voltage at/above full threshold: $tankVoltageMv >= $fullVoltageMv mV")
+                                        100  // At or above full threshold
+                                    }
+                                    else -> {
+                                        // Linear interpolation for normal sensor
+                                        val level = ((tankVoltageMv - emptyVoltageMv).toFloat() /
+                                                (fullVoltageMv - emptyVoltageMv) * 100).toInt()
+                                            .coerceIn(0, 100)
+                                        Log.d("Spray Telemetry", "✓ Calculated tank level: $level% (from ${tankVoltageMv}mV)")
+                                        level
+                                    }
                                 }
                             }
                         } else {
@@ -740,10 +822,16 @@ class MavlinkTelemetryRepository(
                         Log.d("Spray Telemetry", "   Calibration: empty=$emptyVoltageMv mV, full=$fullVoltageMv mV")
 
                         Log.i("Spray Telemetry", "📊 BATT3 Summary:")
-                        Log.i("Spray Telemetry", "   Voltage: ${tankVoltageMv?.toString() ?: "N/A"} mV")
-                        Log.i("Spray Telemetry", "   Level: ${tankLevelPercent?.toString() ?: "N/A"}% (calculated)")
+                        Log.i("Spray Telemetry", "   FCU Reported Voltage: ${validRawVoltageMv?.toString() ?: "N/A"} mV")
+                        Log.i("Spray Telemetry", "   True Sensor Voltage: ${trueSensorVoltageMv?.toString() ?: "N/A"} mV (÷$voltMult)")
+                        Log.i("Spray Telemetry", "   Filtered Voltage: ${tankVoltageMv?.toString() ?: "N/A"} mV")
+                        Log.i("Spray Telemetry", "   Level: ${tankLevelPercent?.toString() ?: "N/A"}%")
+                        Log.i("Spray Telemetry", "   Sensor Mode: ${if (isInverted) "INVERTED (higher V = empty)" else "NORMAL (higher V = full)"}")
+                        Log.i("Spray Telemetry", "   Calibration: Empty=$emptyVoltageMv mV, Full=$fullVoltageMv mV")
+                        Log.i("Spray Telemetry", "   Voltage Range: ${kotlin.math.abs(fullVoltageMv - emptyVoltageMv)} mV")
+                        Log.i("Spray Telemetry", "   BATT3_VOLT_MULT: $voltMult")
                         Log.i("Spray Telemetry", "   Capacity: $tankCapacityLiters L")
-                        Log.i("Spray Telemetry", "   ArduPilot battery_remaining: ${b.batteryRemaining}% (not used for MONITOR=25)")
+                        Log.i("Spray Telemetry", "   ArduPilot battery_remaining: ${b.batteryRemaining}% (not used)")
 
                         _state.update { state ->
                             state.copy(
@@ -755,6 +843,38 @@ class MavlinkTelemetryRepository(
                             )
                         }
                         Log.i("Spray Telemetry", "✅ State updated with BATT3 data")
+
+                        // Tank empty notification logic
+                        if (tankLevelPercent != null) {
+                            // Check if tank just became empty (0% or below)
+                            if (tankLevelPercent == 0 && !tankEmptyNotificationShown) {
+                                Log.w("Spray Telemetry", "⚠️ TANK EMPTY - Showing notification")
+                                sharedViewModel.addNotification(
+                                    Notification(
+                                        message = "Tank Empty! Please refill the tank.",
+                                        type = NotificationType.WARNING
+                                    )
+                                )
+                                sharedViewModel.announceTankEmpty()
+                                tankEmptyNotificationShown = true
+                            }
+                            // Reset the flag when tank is refilled (level goes above 10%)
+                            else if (tankLevelPercent > 10 && tankEmptyNotificationShown) {
+                                Log.i("Spray Telemetry", "✓ Tank refilled - resetting notification flag")
+                                tankEmptyNotificationShown = false
+                            }
+                            // Low tank warning at 15%
+                            else if (tankLevelPercent <= 15 && tankLevelPercent > 0 && lastTankLevelPercent != null && lastTankLevelPercent!! > 15) {
+                                Log.w("Spray Telemetry", "⚠️ TANK LOW (${tankLevelPercent}%) - Showing warning")
+                                sharedViewModel.addNotification(
+                                    Notification(
+                                        message = "Tank Low! ${tankLevelPercent}% remaining.",
+                                        type = NotificationType.WARNING
+                                    )
+                                )
+                            }
+                            lastTankLevelPercent = tankLevelPercent
+                        }
                     }
                     else {
                         Log.w("Spray Telemetry", "⚠️ Unknown battery ID: ${b.id.toInt()} - ignoring")
@@ -1410,6 +1530,38 @@ class MavlinkTelemetryRepository(
                                 Log.w("Spray Telemetry", "⚠️ BATT3_VOLT_PIN not configured ($voltPin)")
                             } else {
                                 Log.i("Spray Telemetry", "✅ BATT3_VOLT_PIN configured: pin $voltPin")
+                            }
+                        }
+
+                        "BATT3_VOLT_MULT" -> {
+                            val voltMult = paramValue.paramValue
+                            Log.i("Spray Telemetry", "📊 BATT3_VOLT_MULT parameter read: $voltMult")
+
+                            // Store the multiplier
+                            _state.update { state ->
+                                state.copy(
+                                    sprayTelemetry = state.sprayTelemetry.copy(
+                                        batt3VoltMult = voltMult
+                                    )
+                                )
+                            }
+
+                            // Warn if multiplier is high (typical for battery monitoring, not level sensors)
+                            if (voltMult > 2.0f) {
+                                Log.w("Spray Telemetry", "⚠️⚠️⚠️ HIGH VOLTAGE MULTIPLIER DETECTED ⚠️⚠️⚠️")
+                                Log.w("Spray Telemetry", "   BATT3_VOLT_MULT = $voltMult")
+                                Log.w("Spray Telemetry", "   This is typical for BATTERY monitoring with voltage divider")
+                                Log.w("Spray Telemetry", "   For a LEVEL SENSOR, consider setting BATT3_VOLT_MULT = 1.0")
+                                Log.w("Spray Telemetry", "   Current readings are being multiplied by ${voltMult}x!")
+
+                                sharedViewModel.addNotification(
+                                    Notification(
+                                        "Level sensor VOLT_MULT=$voltMult (high). Consider setting to 1.0 for level sensors.",
+                                        NotificationType.WARNING
+                                    )
+                                )
+                            } else {
+                                Log.i("Spray Telemetry", "✅ BATT3_VOLT_MULT looks reasonable for level sensor: $voltMult")
                             }
                         }
                     }
@@ -2652,7 +2804,8 @@ class MavlinkTelemetryRepository(
                 "BATT2_AMP_PERVLT",   // Flow sensor calibration factor
                 "BATT2_CURR_PIN",     // Flow sensor pin configuration
                 "BATT3_CAPACITY",     // Tank capacity for level sensor
-                "BATT3_VOLT_PIN"      // Level sensor pin configuration
+                "BATT3_VOLT_PIN",     // Level sensor pin configuration
+                "BATT3_VOLT_MULT"     // Level sensor voltage multiplier (important for calibration!)
             )
 
             for ((index, paramId) in parametersToRequest.withIndex()) {

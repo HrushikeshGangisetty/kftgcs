@@ -195,6 +195,10 @@ class SharedViewModel : ViewModel() {
         ttsManager?.speak("Warning! RC battery critical at $batteryPercent percent. Emergency RTL activated.")
     }
 
+    fun announceTankEmpty() {
+        ttsManager?.speak("Warning! Tank is empty. Please refill the tank.")
+    }
+
     fun speak(text: String) {
         ttsManager?.speak(text)
     }
@@ -912,6 +916,15 @@ class SharedViewModel : ViewModel() {
 
         // Hide the popup
         _showAddResumeHerePopup.value = false
+
+        // Reset mission paused state since user declined to set resume point
+        // This allows the mission to be cleared when navigating back and clicking Manual
+        _telemetryState.update {
+            it.copy(
+                missionPaused = false,
+                pausedAtWaypoint = null
+            )
+        }
 
         // Do NOT show resume marker - user declined
     }

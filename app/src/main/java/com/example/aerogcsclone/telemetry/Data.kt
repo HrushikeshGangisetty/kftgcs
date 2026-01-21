@@ -21,8 +21,8 @@ data class SprayTelemetry(
     val tankCapacityLiters: Float? = null,   // Total tank capacity for level sensor
 
     // Level sensor calibration (voltage ranges)
-    val levelSensorEmptyMv: Int = 10000,     // Voltage when tank is EMPTY (calibrated)
-    val levelSensorFullMv: Int = 45000,      // Voltage when tank is FULL (calibrated)
+    val levelSensorEmptyMv: Int = 29044,     // Voltage when tank is EMPTY (calibrated)
+    val levelSensorFullMv: Int = 29232 ,      // Voltage when tank is FULL (calibrated)
 
     // Piecewise calibration points for non-linear tanks (optional, overrides simple calibration)
     val levelCalibrationPoints: List<CalibrationPoint>? = null,
@@ -37,6 +37,7 @@ data class SprayTelemetry(
     val batt2MonitorType: Int? = null,       // BATT2_MONITOR (should be 11 for flow sensor)
     val batt2AmpPerVolt: Float? = null,      // BATT2_AMP_PERVLT (calibration factor)
     val batt2CurrPin: Int? = null,           // BATT2_CURR_PIN (sensor pin)
+    val batt3VoltMult: Float? = null,        // BATT3_VOLT_MULT (voltage multiplier from FCU)
 
     // Configuration status flags
     val parametersReceived: Boolean = false, // True when all params are received
