@@ -41,6 +41,9 @@ class MainActivity : ComponentActivity() {
     private val hasRequiredPermissions = mutableStateOf(false)
     private val wsManager by lazy { WebSocketManager.getInstance() }
 
+    // 🔥 Flag to prevent duplicate low battery events
+    private var lowBatteryEventSent = false
+
     private val requestPermissionsLauncher = registerForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
     ) { grants ->
@@ -129,9 +132,8 @@ class MainActivity : ComponentActivity() {
                     GCSApplication.isDroneInFlight = isArmed && isInAir
 
                     // ✅ Update WebSocket telemetry with real-time MAVSDK data
+                    // NOTE: This updates the values frequently, but sendTelemetry() is only called every 1 second by the Handler
                     if (telemetryState.connected) {
-                        android.util.Log.d("WebSocketTelemetry", "📊 Updating telemetry data from MAVSDK (connected=${telemetryState.connected})")
-
                         // Position
                         wsManager.lat = telemetryState.latitude ?: 0.0
                         wsManager.lng = telemetryState.longitude ?: 0.0
@@ -147,12 +149,6 @@ class MainActivity : ComponentActivity() {
                         wsManager.voltage = (telemetryState.voltage ?: 0f).toDouble()
                         wsManager.current = (telemetryState.currentA ?: 0f).toDouble()
                         wsManager.batteryRemaining = telemetryState.batteryPercent ?: 0
-
-                        // Debug logging for battery telemetry
-                        android.util.Log.d("WebSocketTelemetry", "Battery Data -> " +
-                            "Voltage: ${telemetryState.voltage}, " +
-                            "Current: ${telemetryState.currentA}, " +
-                            "Remaining: ${telemetryState.batteryPercent}%")
 
                         // GPS
                         wsManager.satellites = telemetryState.sats ?: 0
@@ -177,12 +173,29 @@ class MainActivity : ComponentActivity() {
                             }
                         }
 
-                        // NOTE: Don't call sendTelemetry() here - throttled sender handles it
-                    } else {
-                        android.util.Log.w("WebSocketTelemetry", "⚠️ Skipping telemetry update - drone not connected")
+                        // 🔥 Low Battery Event Detection
+                        val batteryPercent = telemetryState.batteryPercent
+                        if (batteryPercent != null && batteryPercent <= 20 && !lowBatteryEventSent && wsManager.isConnected) {
+                            try {
+                                wsManager.sendMissionEvent(
+                                    eventType = "LOW_BATTERY",
+                                    eventStatus = "WARNING",
+                                    description = "Battery dropped below 20% (${batteryPercent}%)"
+                                )
+                                lowBatteryEventSent = true
+                                android.util.Log.w("WebSocketTelemetry", "⚠️ LOW_BATTERY event sent: ${batteryPercent}%")
+                            } catch (e: Exception) {
+                                android.util.Log.e("WebSocketTelemetry", "Failed to send LOW_BATTERY event", e)
+                            }
+                        } else if (batteryPercent != null && batteryPercent > 25) {
+                            // Reset flag when battery is above 25% (allows re-triggering if battery replaced)
+                            lowBatteryEventSent = false
+                        }
+
+                        // NOTE: Don't call sendTelemetry() here - throttled sender handles it every 1 second
                     }
 
-                    // Log status changes for debugging
+                    // Log status changes for debugging (only when drone is in flight)
                     if (GCSApplication.isDroneInFlight) {
                         android.util.Log.d("MainActivity", "Drone in flight - crash protection active (Alt: ${altitude}m)")
                     }

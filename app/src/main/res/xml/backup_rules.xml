@@ -1,13 +1,42 @@
-<?xml version="1.0" encoding="utf-8"?><!--
-   Sample backup rules file; uncomment and customize as necessary.
-   See https://developer.android.com/guide/topics/data/autobackup
-   for details.
-   Note: This file is ignored for devices older than API 31
-   See https://developer.android.com/about/versions/12/backup-restore
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    SECURITY: Backup rules to exclude sensitive data from Android backup.
+    This prevents extraction of credentials, session data, and sensitive telemetry.
+
+    See https://developer.android.com/guide/topics/data/autobackup
+    Note: This file is used for devices older than API 31
 -->
 <full-backup-content>
     <!--
-   <include domain="sharedpref" path="."/>
-   <exclude domain="sharedpref" path="device.xml"/>
--->
+        EXCLUDE ALL SENSITIVE DATA FROM BACKUP
+        This protects against ADB backup data exfiltration attacks
+    -->
+
+    <!-- Encrypted session data (contains email, pilot ID, admin ID, login status) -->
+    <exclude domain="sharedpref" path="secure_pilot_session.xml"/>
+
+    <!-- Legacy plaintext session (in case migration hasn't run yet) -->
+    <exclude domain="sharedpref" path="pilot_session.xml"/>
+
+    <!-- Encrypted PIN storage -->
+    <exclude domain="sharedpref" path="secure_pin_prefs.xml"/>
+
+    <!-- Legacy plaintext PIN storage -->
+    <exclude domain="sharedpref" path="security_prefs.xml"/>
+
+    <!-- Fallback preferences (if encryption fails) -->
+    <exclude domain="sharedpref" path="secure_pilot_session_fallback.xml"/>
+
+    <!-- Firebase/Google auth tokens -->
+    <exclude domain="sharedpref" path="com.google.firebase.auth.api.Store.xml"/>
+    <exclude domain="sharedpref" path="com.google.android.gms.signin.xml"/>
+
+    <!-- All databases (flight logs, telemetry, mission data) -->
+    <exclude domain="database" path="."/>
+
+    <!-- External files that may contain sensitive data -->
+    <exclude domain="external" path="."/>
+
+    <!-- Root files -->
+    <exclude domain="root" path="."/>
 </full-backup-content>

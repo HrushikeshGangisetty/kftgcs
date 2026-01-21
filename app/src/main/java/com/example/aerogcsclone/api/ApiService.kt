@@ -1,51 +1,93 @@
 package com.example.aerogcsclone.api
 
 import android.os.Build
-import android.util.Log
 import com.google.gson.Gson
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import okhttp3.CertificatePinner
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
+import timber.log.Timber
 import java.util.concurrent.TimeUnit
 
 object ApiService {
-    private const val TAG = "ApiService"
 
     // ===========================================
-    // CONFIGURATION - CHANGE THESE VALUES
+    // SECURITY: Server configuration
+    // In production, these values are loaded from BuildConfig (set in build.gradle.kts)
+    // BuildConfig values are injected at build time from local.properties
     // ===========================================
 
-    // Option 1: For LOCAL development (Django running on your computer)
-    // - Your computer's local IP address (find using 'ipconfig' in cmd)
-    // - Make sure phone and computer are on SAME WiFi network
-    private const val LOCAL_SERVER_IP = "10.41.213.197"  // <-- CHANGE THIS to your computer's IP
-    private const val LOCAL_SERVER_PORT = "8000"
+    /**
+     * Server configuration helper object
+     * Attempts to read from BuildConfig first, falls back to defaults for development
+     */
+    private object ServerConfig {
+        // Default values for development (emulator)
+        private const val DEFAULT_SERVER_IP = "10.0.2.2"
+        private const val DEFAULT_SERVER_PORT = "8000"
+        private const val DEFAULT_API_URL = "http://10.0.2.2:8000"
 
-    // Option 2: For PRODUCTION (deployed Django server)
-    // - Your actual deployed server URL (e.g., on Railway, Heroku, AWS, etc.)
-    private const val PRODUCTION_URL = "https://your-server-domain.com"  // <-- CHANGE THIS when deployed
+        val apiBaseUrl: String
+            get() = tryGetBuildConfigString("API_BASE_URL") ?: DEFAULT_API_URL
 
-    // Set this to true when using deployed production server
-    private const val USE_PRODUCTION_SERVER = false
+        val serverIp: String
+            get() = tryGetBuildConfigString("SERVER_IP") ?: DEFAULT_SERVER_IP
+
+        val serverPort: String
+            get() = tryGetBuildConfigString("SERVER_PORT") ?: DEFAULT_SERVER_PORT
+
+        val useProductionServer: Boolean
+            get() = tryGetBuildConfigBoolean("USE_PRODUCTION_SERVER") ?: false
+
+        /**
+         * Try to get a String field from BuildConfig using reflection
+         * Returns null if BuildConfig is not available
+         */
+        private fun tryGetBuildConfigString(fieldName: String): String? {
+            return try {
+                val buildConfigClass = Class.forName("com.example.aerogcsclone.BuildConfig")
+                val field = buildConfigClass.getField(fieldName)
+                field.get(null) as? String
+            } catch (e: Exception) {
+                Timber.w("BuildConfig.$fieldName not available, using default")
+                null
+            }
+        }
+
+        /**
+         * Try to get a Boolean field from BuildConfig using reflection
+         * Returns null if BuildConfig is not available
+         */
+        private fun tryGetBuildConfigBoolean(fieldName: String): Boolean? {
+            return try {
+                val buildConfigClass = Class.forName("com.example.aerogcsclone.BuildConfig")
+                val field = buildConfigClass.getField(fieldName)
+                field.get(null) as? Boolean
+            } catch (e: Exception) {
+                Timber.w("BuildConfig.$fieldName not available, using default")
+                null
+            }
+        }
+    }
 
     // ===========================================
-    // AUTO-DETECTION LOGIC (DO NOT CHANGE)
+    // AUTO-DETECTION LOGIC
     // ===========================================
 
     private val BASE_URL: String
         get() {
             return when {
-                // If using production server
-                USE_PRODUCTION_SERVER -> PRODUCTION_URL
+                // If using production server (release builds)
+                ServerConfig.useProductionServer -> ServerConfig.apiBaseUrl
 
-                // If running on emulator, use 10.0.2.2
-                isEmulator() -> "http://10.0.2.2:$LOCAL_SERVER_PORT"
+                // If running on emulator, use 10.0.2.2 with configured port
+                isEmulator() -> "http://10.0.2.2:${ServerConfig.serverPort}"
 
-                // If running on physical device, use local IP
-                else -> "http://$LOCAL_SERVER_IP:$LOCAL_SERVER_PORT"
+                // If running on physical device, use configured IP
+                else -> "http://${ServerConfig.serverIp}:${ServerConfig.serverPort}"
             }
         }
 
@@ -62,11 +104,81 @@ object ApiService {
                 || Build.PRODUCT.contains("emulator"))
     }
 
-    private val client = OkHttpClient.Builder()
-        .connectTimeout(30, TimeUnit.SECONDS)
-        .readTimeout(30, TimeUnit.SECONDS)
-        .writeTimeout(30, TimeUnit.SECONDS)
-        .build()
+    // ===========================================
+    // SECURITY: Certificate Pinning Configuration
+    // ===========================================
+
+    /**
+     * Certificate pinner for production HTTPS connections.
+     * This prevents man-in-the-middle attacks by validating server certificates.
+     *
+     * IMPORTANT: Update these pins when server certificates are rotated.
+     * To get the SHA256 pin for your server certificate:
+     * 1. Run: openssl s_client -connect api.yourserver.com:443 | openssl x509 -pubkey -noout | openssl pkey -pubin -outform der | openssl dgst -sha256 -binary | openssl enc -base64
+     * 2. Or use https://www.ssllabs.com/ssltest/ to analyze your server
+     *
+     * Include at least 2 pins (primary + backup) to prevent lockouts during certificate rotation.
+     *
+     * SECURITY WARNING: The placeholder pins below MUST be replaced with real certificate
+     * pins before deploying to production. Placeholder pins will cause connection failures
+     * in production and log security warnings.
+     */
+    // Placeholder indicator - set to false once real pins are configured
+    private const val CERTIFICATE_PINS_CONFIGURED = false
+
+    // Primary certificate pin (current certificate) - REPLACE WITH REAL PIN
+    private const val PRIMARY_CERTIFICATE_PIN = "sha256/AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+    // Backup certificate pin (next certificate or CA intermediate) - REPLACE WITH REAL PIN
+    private const val BACKUP_CERTIFICATE_PIN = "sha256/BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB="
+
+    private val certificatePinner: CertificatePinner by lazy {
+        if (!CERTIFICATE_PINS_CONFIGURED) {
+            Timber.w("SECURITY WARNING: Certificate pins are not configured! " +
+                    "Replace placeholder pins with real certificate pins before production deployment.")
+        }
+
+        CertificatePinner.Builder()
+            // Primary certificate pin (current certificate)
+            .add(getProductionHostname(), PRIMARY_CERTIFICATE_PIN)
+            // Backup certificate pin (next certificate or CA intermediate)
+            .add(getProductionHostname(), BACKUP_CERTIFICATE_PIN)
+            .build()
+    }
+
+    /**
+     * Extracts hostname from the production API URL for certificate pinning
+     */
+    private fun getProductionHostname(): String {
+        return try {
+            val url = ServerConfig.apiBaseUrl
+            java.net.URL(url).host
+        } catch (e: Exception) {
+            Timber.w("Failed to parse production hostname, using default")
+            "api.production.com" // Fallback placeholder
+        }
+    }
+
+    /**
+     * Creates OkHttpClient with appropriate security settings based on build configuration.
+     * - Production: Certificate pinning enabled for HTTPS connections
+     * - Development: No certificate pinning (allows local HTTP testing)
+     */
+    private val client: OkHttpClient by lazy {
+        OkHttpClient.Builder()
+            .apply {
+                // Only apply certificate pinning in production with HTTPS
+                if (ServerConfig.useProductionServer && ServerConfig.apiBaseUrl.startsWith("https")) {
+                    certificatePinner(certificatePinner)
+                    Timber.d("Certificate pinning enabled for production")
+                } else {
+                    Timber.d("Certificate pinning disabled (development mode or HTTP)")
+                }
+            }
+            .connectTimeout(30, TimeUnit.SECONDS)
+            .readTimeout(30, TimeUnit.SECONDS)
+            .writeTimeout(30, TimeUnit.SECONDS)
+            .build()
+    }
 
     private val gson = Gson()
     private val jsonMediaType = "application/json; charset=utf-8".toMediaType()
@@ -74,9 +186,9 @@ object ApiService {
     suspend fun pilotRegister(request: PilotRegisterRequest): ApiResponse<PilotRegisterResponse> {
         return withContext(Dispatchers.IO) {
             try {
-                Log.d(TAG, "Attempting pilot registration for email: ${request.email}")
+                Timber.d("Attempting pilot registration for email: ${request.email}")
                 val json = gson.toJson(request)
-                Log.d(TAG, "Request JSON: $json")
+                Timber.d("Request JSON: $json")
                 val requestBody = json.toRequestBody(jsonMediaType)
 
                 val httpRequest = Request.Builder()
@@ -86,15 +198,15 @@ object ApiService {
                     .post(requestBody)
                     .build()
 
-                Log.d(TAG, "Sending request to: ${httpRequest.url}")
+                Timber.d("Sending request to: ${httpRequest.url}")
                 val response = client.newCall(httpRequest).execute()
                 val responseBody = response.body?.string() ?: ""
-                Log.d(TAG, "Response code: ${response.code}")
-                Log.d(TAG, "Response body (first 500 chars): ${responseBody.take(500)}")
+                Timber.d("Response code: ${response.code}")
+                Timber.d("Response body (first 500 chars): ${responseBody.take(500)}")
 
                 // Check if response is HTML (Django error page)
                 if (responseBody.trimStart().startsWith("<") || responseBody.contains("<!DOCTYPE")) {
-                    Log.e(TAG, "Received HTML instead of JSON - Django server error")
+                    Timber.e("Received HTML instead of JSON - Django server error")
                     val errorMsg = when {
                         responseBody.contains("CSRF") -> "CSRF verification failed. Please configure Django to exempt these API endpoints from CSRF protection."
                         responseBody.contains("404") -> "API endpoint not found. Make sure Django URL routing is configured correctly."
@@ -107,24 +219,24 @@ object ApiService {
                 if (response.isSuccessful) {
                     try {
                         val successResponse = gson.fromJson(responseBody, PilotRegisterResponse::class.java)
-                        Log.d(TAG, "Registration successful: ${successResponse.message}")
+                        Timber.d("Registration successful: ${successResponse.message}")
                         ApiResponse.Success(successResponse)
                     } catch (e: Exception) {
-                        Log.e(TAG, "Failed to parse success response", e)
+                        Timber.e(e, "Failed to parse success response")
                         ApiResponse.Error("Invalid response format: ${e.message}", response.code)
                     }
                 } else {
                     try {
                         val errorResponse = gson.fromJson(responseBody, ErrorResponse::class.java)
-                        Log.e(TAG, "Registration failed: ${errorResponse.error}")
+                        Timber.e("Registration failed: ${errorResponse.error}")
                         ApiResponse.Error(errorResponse.error, errorResponse.status_code)
                     } catch (e: Exception) {
-                        Log.e(TAG, "Failed to parse error response", e)
+                        Timber.e(e, "Failed to parse error response")
                         ApiResponse.Error(responseBody.take(200).ifEmpty { "Unknown error" }, response.code)
                     }
                 }
             } catch (e: Exception) {
-                Log.e(TAG, "Network error during registration", e)
+                Timber.e(e, "Network error during registration")
                 ApiResponse.Error("Network error: ${e.message}", 0)
             }
         }
@@ -133,7 +245,7 @@ object ApiService {
     suspend fun verifyOtp(request: VerifyOtpRequest): ApiResponse<MessageResponse> {
         return withContext(Dispatchers.IO) {
             try {
-                Log.d(TAG, "Verifying OTP for email: ${request.email}")
+                Timber.d("Verifying OTP for email: ${request.email}")
                 val json = gson.toJson(request)
                 val requestBody = json.toRequestBody(jsonMediaType)
 
@@ -146,34 +258,34 @@ object ApiService {
 
                 val response = client.newCall(httpRequest).execute()
                 val responseBody = response.body?.string() ?: ""
-                Log.d(TAG, "OTP verification response code: ${response.code}")
+                Timber.d("OTP verification response code: ${response.code}")
 
                 if (responseBody.trimStart().startsWith("<") || responseBody.contains("<!DOCTYPE")) {
-                    Log.e(TAG, "Received HTML instead of JSON")
+                    Timber.e("Received HTML instead of JSON")
                     return@withContext ApiResponse.Error("Server configuration error. Please check Django settings.", response.code)
                 }
 
                 if (response.isSuccessful) {
                     try {
                         val successResponse = gson.fromJson(responseBody, MessageResponse::class.java)
-                        Log.d(TAG, "OTP verification successful")
+                        Timber.d("OTP verification successful")
                         ApiResponse.Success(successResponse)
                     } catch (e: Exception) {
-                        Log.e(TAG, "Failed to parse OTP success response", e)
+                        Timber.e(e, "Failed to parse OTP success response")
                         ApiResponse.Error("Invalid response format: ${e.message}", response.code)
                     }
                 } else {
                     try {
                         val errorResponse = gson.fromJson(responseBody, ErrorResponse::class.java)
-                        Log.e(TAG, "OTP verification failed: ${errorResponse.error}")
+                        Timber.e("OTP verification failed: ${errorResponse.error}")
                         ApiResponse.Error(errorResponse.error, errorResponse.status_code)
                     } catch (e: Exception) {
-                        Log.e(TAG, "Failed to parse OTP error response", e)
+                        Timber.e(e, "Failed to parse OTP error response")
                         ApiResponse.Error(responseBody.take(200).ifEmpty { "Unknown error" }, response.code)
                     }
                 }
             } catch (e: Exception) {
-                Log.e(TAG, "Network error during OTP verification", e)
+                Timber.e(e, "Network error during OTP verification")
                 ApiResponse.Error("Network error: ${e.message}", 0)
             }
         }
@@ -182,7 +294,7 @@ object ApiService {
     suspend fun resendOtp(request: ResendOtpRequest): ApiResponse<MessageResponse> {
         return withContext(Dispatchers.IO) {
             try {
-                Log.d(TAG, "Resending OTP for email: ${request.email}")
+                Timber.d("Resending OTP for email: ${request.email}")
                 val json = gson.toJson(request)
                 val requestBody = json.toRequestBody(jsonMediaType)
 
@@ -195,7 +307,7 @@ object ApiService {
 
                 val response = client.newCall(httpRequest).execute()
                 val responseBody = response.body?.string() ?: ""
-                Log.d(TAG, "Resend OTP response code: ${response.code}")
+                Timber.d("Resend OTP response code: ${response.code}")
 
                 if (responseBody.trimStart().startsWith("<") || responseBody.contains("<!DOCTYPE")) {
                     return@withContext ApiResponse.Error("Server configuration error", response.code)
@@ -204,24 +316,24 @@ object ApiService {
                 if (response.isSuccessful) {
                     try {
                         val successResponse = gson.fromJson(responseBody, MessageResponse::class.java)
-                        Log.d(TAG, "OTP resent successfully")
+                        Timber.d("OTP resent successfully")
                         ApiResponse.Success(successResponse)
                     } catch (e: Exception) {
-                        Log.e(TAG, "Failed to parse resend OTP success response", e)
+                        Timber.e(e, "Failed to parse resend OTP success response")
                         ApiResponse.Error("Invalid response format: ${e.message}", response.code)
                     }
                 } else {
                     try {
                         val errorResponse = gson.fromJson(responseBody, ErrorResponse::class.java)
-                        Log.e(TAG, "Resend OTP failed: ${errorResponse.error}")
+                        Timber.e("Resend OTP failed: ${errorResponse.error}")
                         ApiResponse.Error(errorResponse.error, errorResponse.status_code)
                     } catch (e: Exception) {
-                        Log.e(TAG, "Failed to parse resend OTP error response", e)
+                        Timber.e(e, "Failed to parse resend OTP error response")
                         ApiResponse.Error(responseBody.take(200).ifEmpty { "Unknown error" }, response.code)
                     }
                 }
             } catch (e: Exception) {
-                Log.e(TAG, "Network error during resend OTP", e)
+                Timber.e(e, "Network error during resend OTP")
                 ApiResponse.Error("Network error: ${e.message}", 0)
             }
         }
@@ -230,7 +342,7 @@ object ApiService {
     suspend fun pilotLogin(request: PilotLoginRequest): ApiResponse<PilotLoginResponse> {
         return withContext(Dispatchers.IO) {
             try {
-                Log.d(TAG, "Attempting login for email: ${request.email}")
+                Timber.d("Attempting login for email: ${request.email}")
                 val json = gson.toJson(request)
                 val requestBody = json.toRequestBody(jsonMediaType)
 
@@ -241,10 +353,10 @@ object ApiService {
                     .post(requestBody)
                     .build()
 
-                Log.d(TAG, "Sending login request to: ${httpRequest.url}")
+                Timber.d("Sending login request to: ${httpRequest.url}")
                 val response = client.newCall(httpRequest).execute()
                 val responseBody = response.body?.string() ?: ""
-                Log.d(TAG, "Login response code: ${response.code}")
+                Timber.d("Login response code: ${response.code}")
 
                 if (responseBody.trimStart().startsWith("<") || responseBody.contains("<!DOCTYPE")) {
                     return@withContext ApiResponse.Error("Server configuration error", response.code)
@@ -253,24 +365,24 @@ object ApiService {
                 if (response.isSuccessful) {
                     try {
                         val successResponse = gson.fromJson(responseBody, PilotLoginResponse::class.java)
-                        Log.d(TAG, "Login successful for pilot ID: ${successResponse.pilot_id}")
+                        Timber.d("Login successful for pilot ID: ${successResponse.pilot_id}")
                         ApiResponse.Success(successResponse)
                     } catch (e: Exception) {
-                        Log.e(TAG, "Failed to parse login success response", e)
+                        Timber.e(e, "Failed to parse login success response")
                         ApiResponse.Error("Invalid response format: ${e.message}", response.code)
                     }
                 } else {
                     try {
                         val errorResponse = gson.fromJson(responseBody, ErrorResponse::class.java)
-                        Log.e(TAG, "Login failed: ${errorResponse.error}")
+                        Timber.e("Login failed: ${errorResponse.error}")
                         ApiResponse.Error(errorResponse.error, errorResponse.status_code)
                     } catch (e: Exception) {
-                        Log.e(TAG, "Failed to parse login error response", e)
+                        Timber.e(e, "Failed to parse login error response")
                         ApiResponse.Error(responseBody.take(200).ifEmpty { "Unknown error" }, response.code)
                     }
                 }
             } catch (e: Exception) {
-                Log.e(TAG, "Network error during login", e)
+                Timber.e(e, "Network error during login")
                 ApiResponse.Error("Network error: ${e.message}", 0)
             }
         }
@@ -279,7 +391,7 @@ object ApiService {
     suspend fun pilotLogout(request: PilotLogoutRequest): ApiResponse<MessageResponse> {
         return withContext(Dispatchers.IO) {
             try {
-                Log.d(TAG, "Attempting logout for email: ${request.email}")
+                Timber.d("Attempting logout for email: ${request.email}")
                 val json = gson.toJson(request)
                 val requestBody = json.toRequestBody(jsonMediaType)
 
@@ -292,7 +404,7 @@ object ApiService {
 
                 val response = client.newCall(httpRequest).execute()
                 val responseBody = response.body?.string() ?: ""
-                Log.d(TAG, "Logout response code: ${response.code}")
+                Timber.d("Logout response code: ${response.code}")
 
                 if (responseBody.trimStart().startsWith("<") || responseBody.contains("<!DOCTYPE")) {
                     return@withContext ApiResponse.Error("Server configuration error", response.code)
@@ -301,24 +413,24 @@ object ApiService {
                 if (response.isSuccessful) {
                     try {
                         val successResponse = gson.fromJson(responseBody, MessageResponse::class.java)
-                        Log.d(TAG, "Logout successful")
+                        Timber.d("Logout successful")
                         ApiResponse.Success(successResponse)
                     } catch (e: Exception) {
-                        Log.e(TAG, "Failed to parse logout success response", e)
+                        Timber.e(e, "Failed to parse logout success response")
                         ApiResponse.Error("Invalid response format: ${e.message}", response.code)
                     }
                 } else {
                     try {
                         val errorResponse = gson.fromJson(responseBody, ErrorResponse::class.java)
-                        Log.e(TAG, "Logout failed: ${errorResponse.error}")
+                        Timber.e("Logout failed: ${errorResponse.error}")
                         ApiResponse.Error(errorResponse.error, errorResponse.status_code)
                     } catch (e: Exception) {
-                        Log.e(TAG, "Failed to parse logout error response", e)
+                        Timber.e(e, "Failed to parse logout error response")
                         ApiResponse.Error(responseBody.take(200).ifEmpty { "Unknown error" }, response.code)
                     }
                 }
             } catch (e: Exception) {
-                Log.e(TAG, "Network error during logout", e)
+                Timber.e(e, "Network error during logout")
                 ApiResponse.Error("Network error: ${e.message}", 0)
             }
         }

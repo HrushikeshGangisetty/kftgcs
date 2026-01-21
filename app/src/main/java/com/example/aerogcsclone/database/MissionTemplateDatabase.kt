@@ -20,7 +20,7 @@ import com.example.aerogcsclone.database.tlog.*
         EventEntity::class,
         MapDataEntity::class
     ],
-    version = 6,
+    version = 7,
     exportSchema = false
 )
 @TypeConverters(MissionTemplateTypeConverters::class, TlogTypeConverters::class)
@@ -50,6 +50,13 @@ abstract class MissionTemplateDatabase : RoomDatabase() {
             }
         }
 
+        // Migration from version 6 to 7 (no schema change, just version bump for hash fix)
+        private val MIGRATION_6_7 = object : Migration(6, 7) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                // No schema changes needed - fixing hash mismatch
+            }
+        }
+
         // Direct migration from version 4 to 6
         private val MIGRATION_4_6 = object : Migration(4, 6) {
             override fun migrate(db: SupportSQLiteDatabase) {
@@ -64,7 +71,7 @@ abstract class MissionTemplateDatabase : RoomDatabase() {
                     MissionTemplateDatabase::class.java,
                     "mission_template_database"
                 )
-                .addMigrations(MIGRATION_4_5, MIGRATION_5_6, MIGRATION_4_6)
+                .addMigrations(MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7, MIGRATION_4_6)
                 .fallbackToDestructiveMigration()  // Fallback if migration fails
                 .build()
                 INSTANCE = instance

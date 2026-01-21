@@ -1,19 +1,48 @@
 <?xml version="1.0" encoding="utf-8"?>
 <network-security-config>
-    <!-- Allow cleartext traffic for all domains (for TCP/IP drone connections) -->
-    <base-config cleartextTrafficPermitted="true">
+    <!--
+        SECURITY: Cleartext traffic is disabled by default.
+        Only local network addresses are permitted for drone TCP/IP connections.
+        All external API calls (Firebase, Google Maps, etc.) must use HTTPS.
+    -->
+
+    <!-- Base configuration: Block cleartext traffic for all domains -->
+    <base-config cleartextTrafficPermitted="false">
         <trust-anchors>
             <certificates src="system" />
-            <certificates src="user" />
         </trust-anchors>
     </base-config>
 
-    <!-- Allow all local network connections -->
+    <!--
+        Allow cleartext ONLY for local network drone connections.
+        Drones typically communicate over local IP addresses.
+        This is necessary for MAVLink TCP/UDP communication.
+    -->
     <domain-config cleartextTrafficPermitted="true">
+        <!-- Localhost for emulator/local testing -->
         <domain includeSubdomains="true">localhost</domain>
-        <domain includeSubdomains="true">10.0.0.0/8</domain>
-        <domain includeSubdomains="true">192.168.0.0/16</domain>
-        <domain includeSubdomains="true">172.16.0.0/12</domain>
+        <domain includeSubdomains="true">127.0.0.1</domain>
+
+        <!-- Private network ranges for drone connections -->
+        <!-- Class A private network (10.x.x.x) -->
+        <domain includeSubdomains="true">10.0.0.1</domain>
+
+        <!-- Class C private network (192.168.x.x) - most common for drones -->
+        <domain includeSubdomains="true">192.168.0.1</domain>
+        <domain includeSubdomains="true">192.168.1.1</domain>
+        <domain includeSubdomains="true">192.168.4.1</domain>
+
+        <!-- Class B private network (172.16.x.x - 172.31.x.x) -->
+        <domain includeSubdomains="true">172.16.0.1</domain>
     </domain-config>
+
+    <!-- Debug-only overrides for development/testing -->
+    <debug-overrides>
+        <trust-anchors>
+            <!-- Trust user-installed certificates only in debug builds -->
+            <certificates src="user" />
+            <certificates src="system" />
+        </trust-anchors>
+    </debug-overrides>
 </network-security-config>
 

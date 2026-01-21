@@ -1008,6 +1008,7 @@ class MavlinkTelemetryRepository(
                             missionTimerJob = scope.launch {
                                 var elapsed = 0L
                                 _state.update { it.copy(missionElapsedSec = 0L, missionCompleted = false, lastMissionElapsedSec = null, missionCompletedHandled = false) }
+
                                 while (isActive && state.value.mode?.equals("Auto", ignoreCase = true) == true && state.value.armed) {
                                     delay(1000)
                                     elapsed += 1
@@ -1062,9 +1063,39 @@ class MavlinkTelemetryRepository(
 
                                         // ✅ Send mission status ENDED to backend (crash-safe)
                                         try {
-                                            WebSocketManager.getInstance().sendMissionStatus(WebSocketManager.MISSION_STATUS_ENDED)
+                                            val wsManager = WebSocketManager.getInstance()
+                                            wsManager.sendMissionStatus(WebSocketManager.MISSION_STATUS_ENDED)
+                                            wsManager.sendMissionEvent(
+                                                eventType = "MISSION_ENDED",
+                                                eventStatus = "INFO",
+                                                description = "Mission completed successfully"
+                                            )
+
+                                            // 🔥 Send mission summary with all statistics
+                                            val currentState = state.value
+                                            val batteryEnd = currentState.batteryPercent ?: 0
+                                            val totalDistance = currentState.totalDistanceMeters ?: 0f
+                                            val flyingTimeMinutes = (lastElapsed ?: 0L) / 60.0
+                                            val avgSpeed = if (flyingTimeMinutes > 0) (totalDistance / 1000.0) / (flyingTimeMinutes / 60.0) else 0.0 // km/h
+                                            val totalSprayUsed = currentState.sprayTelemetry.consumedLiters?.toDouble() ?: 0.0
+
+                                            // Calculate area (approximate from distance and spray width - adjust as needed)
+                                            val sprayWidthMeters = 5.0 // Default spray width, should come from settings
+                                            val totalArea = (totalDistance * sprayWidthMeters) / 10000.0 // Convert to hectares
+
+                                            wsManager.sendMissionSummary(
+                                                totalArea = totalArea,
+                                                totalSprayUsed = totalSprayUsed,
+                                                flyingTimeMinutes = flyingTimeMinutes,
+                                                averageSpeed = avgSpeed,
+                                                batteryStart = wsManager.missionBatteryStart,
+                                                batteryEnd = batteryEnd,
+                                                alertsCount = wsManager.missionAlertsCount,
+                                                status = "COMPLETED"
+                                            )
+                                            Log.i("TelemetryRepo", "📊 Mission summary sent - Area: $totalArea ha, Spray: $totalSprayUsed L, Time: $flyingTimeMinutes min, Battery: ${wsManager.missionBatteryStart}%→$batteryEnd%, Alerts: ${wsManager.missionAlertsCount}")
                                         } catch (e: Exception) {
-                                            Log.e("TelemetryRepo", "Failed to send ENDED status", e)
+                                            Log.e("TelemetryRepo", "Failed to send ENDED status/summary", e)
                                         }
 
                                         // 🔥 Disconnect WebSocket when mission ends
