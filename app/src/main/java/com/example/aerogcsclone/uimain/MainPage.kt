@@ -525,7 +525,7 @@ fun StatusPanel(
 ) {
     Surface(
         modifier = modifier
-            .widthIn(min = 140.dp, max = 380.dp)
+            .widthIn(min = 180.dp, max = 480.dp)
             .heightIn(min = 48.dp, max = 74.dp),
         color = Color.Black.copy(alpha = 0.22f),
         shape = RoundedCornerShape(10.dp)

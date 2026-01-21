@@ -130,9 +130,13 @@ class MavlinkTelemetryRepository(
     // RC Battery failsafe tracking
     private var rcBatteryFailsafeTriggered = false
 
-    // Tank empty notification tracking
+    // Tank empty notification tracking (based on flow rate when sprayer is ON)
     private var tankEmptyNotificationShown = false
     private var lastTankLevelPercent: Int? = null
+
+    // Zero flow detection for tank empty (when sprayer is ON but flow is 0)
+    private var zeroFlowStartTime: Long? = null
+    private val ZERO_FLOW_THRESHOLD_MS = 1500L // 1.5 seconds of zero flow = tank empty
 
     // MAG_CAL_PROGRESS flow for compass calibration progress
     private val _magCalProgress = MutableSharedFlow<MagCalProgress>(replay = 0, extraBufferCapacity = 10)
@@ -360,7 +364,7 @@ class MavlinkTelemetryRepository(
                             setMessageRate(33u, 5f)    // GLOBAL_POSITION_INT - increased to 5Hz for smoother position updates
                             setMessageRate(74u, 20f)   // VFR_HUD - 20Hz (50ms) for INSTANT speed updates (pilot critical)
                             setMessageRate(30u, 20f)   // ATTITUDE - 20Hz (50ms) for smooth yaw updates (critical for nose position)
-                            setMessageRate(147u, 0.5f) // BATTERY_STATUS - reduced from 1Hz for Bluetooth
+                            setMessageRate(147u, 4f)   // BATTERY_STATUS - 4Hz for fast flow rate updates (spray telemetry)
                             setMessageRate(65u, 1f)    // RC_CHANNELS - reduced from 2Hz for Bluetooth
 
                             // Request RADIO_STATUS for RC battery monitoring
@@ -695,6 +699,50 @@ class MavlinkTelemetryRepository(
                             )
                         }
                         Log.d("Spray Telemetry", "✅ State updated with BATT2 data")
+
+                        // ═══ FLOW-BASED TANK EMPTY DETECTION ═══
+                        // Tank is considered empty when:
+                        // 1. Sprayer is ON (rc7 enabled)
+                        // 2. Flow rate is 0 for 1.5+ seconds
+                        // 3. BATT2 is properly configured
+                        val currentSprayEnabledForEmpty = state.value.sprayTelemetry.sprayEnabled
+                        val configValid = state.value.sprayTelemetry.configurationValid
+                        val flowIsZero = flowRateLiterPerMin == null || flowRateLiterPerMin == 0f
+
+                        if (currentSprayEnabledForEmpty && configValid && flowIsZero) {
+                            // Sprayer is ON but no flow - start/continue timing
+                            if (zeroFlowStartTime == null) {
+                                zeroFlowStartTime = System.currentTimeMillis()
+                                Log.d("Spray Telemetry", "⏱️ Zero flow detected with sprayer ON - starting timer")
+                            } else {
+                                val zeroFlowDuration = System.currentTimeMillis() - zeroFlowStartTime!!
+                                Log.d("Spray Telemetry", "⏱️ Zero flow duration: ${zeroFlowDuration}ms")
+
+                                if (zeroFlowDuration >= ZERO_FLOW_THRESHOLD_MS && !tankEmptyNotificationShown) {
+                                    Log.w("Spray Telemetry", "⚠️ TANK EMPTY - Sprayer ON but no flow for ${zeroFlowDuration}ms")
+                                    sharedViewModel.addNotification(
+                                        Notification(
+                                            message = "Tank Empty! Sprayer is ON but no flow detected.",
+                                            type = NotificationType.WARNING
+                                        )
+                                    )
+                                    sharedViewModel.announceTankEmpty()
+                                    tankEmptyNotificationShown = true
+                                }
+                            }
+                        } else {
+                            // Reset zero flow timer if sprayer is OFF or flow is detected
+                            if (zeroFlowStartTime != null) {
+                                Log.d("Spray Telemetry", "✓ Zero flow timer reset (sprayer=${currentSprayEnabledForEmpty}, flow=${flowRateLiterPerMin}, config=${configValid})")
+                                zeroFlowStartTime = null
+                            }
+
+                            // Reset tank empty notification if flow is detected again (tank refilled)
+                            if (!flowIsZero && tankEmptyNotificationShown) {
+                                Log.i("Spray Telemetry", "✓ Tank refilled - flow detected, resetting notification flag")
+                                tankEmptyNotificationShown = false
+                            }
+                        }
                     }
                     // Level sensor (BATT3 - id=2)
                     else if (b.id.toInt() == 2) {
@@ -844,27 +892,11 @@ class MavlinkTelemetryRepository(
                         }
                         Log.i("Spray Telemetry", "✅ State updated with BATT3 data")
 
-                        // Tank empty notification logic
+                        // NOTE: Tank empty detection is now handled by flow-based detection in BATT2 section
+                        // BATT3 level is still tracked for display purposes only
+                        // Low tank warning at 15% (still useful as an early warning)
                         if (tankLevelPercent != null) {
-                            // Check if tank just became empty (0% or below)
-                            if (tankLevelPercent == 0 && !tankEmptyNotificationShown) {
-                                Log.w("Spray Telemetry", "⚠️ TANK EMPTY - Showing notification")
-                                sharedViewModel.addNotification(
-                                    Notification(
-                                        message = "Tank Empty! Please refill the tank.",
-                                        type = NotificationType.WARNING
-                                    )
-                                )
-                                sharedViewModel.announceTankEmpty()
-                                tankEmptyNotificationShown = true
-                            }
-                            // Reset the flag when tank is refilled (level goes above 10%)
-                            else if (tankLevelPercent > 10 && tankEmptyNotificationShown) {
-                                Log.i("Spray Telemetry", "✓ Tank refilled - resetting notification flag")
-                                tankEmptyNotificationShown = false
-                            }
-                            // Low tank warning at 15%
-                            else if (tankLevelPercent <= 15 && tankLevelPercent > 0 && lastTankLevelPercent != null && lastTankLevelPercent!! > 15) {
+                            if (tankLevelPercent <= 15 && tankLevelPercent > 0 && lastTankLevelPercent != null && lastTankLevelPercent!! > 15) {
                                 Log.w("Spray Telemetry", "⚠️ TANK LOW (${tankLevelPercent}%) - Showing warning")
                                 sharedViewModel.addNotification(
                                     Notification(
