@@ -584,26 +584,28 @@ fun DividerBlock() {
 
 @Composable
 fun InfoBlock(icon: ImageVector, value: String) {
-    Column(
+    Row(
         modifier = Modifier.padding(horizontal = 4.dp), // slightly less padding
-        horizontalAlignment = Alignment.CenterHorizontally
+        verticalAlignment = Alignment.CenterVertically
     ) {
         Icon(icon, contentDescription = null, tint = Color.White, modifier = Modifier.size(13.dp)) // just a little smaller
-        Spacer(modifier = Modifier.height(1.dp))
+        Spacer(modifier = Modifier.width(3.dp))
         Text(value, color = Color.White, fontSize = 9.sp) // just a little smaller
     }
 }
 
 @Composable
 fun InfoBlockGroup(icon: ImageVector, values: List<String>) {
-    Column(
+    Row(
         modifier = Modifier.padding(horizontal = 4.dp), // slightly less padding
-        horizontalAlignment = Alignment.CenterHorizontally
+        verticalAlignment = Alignment.CenterVertically
     ) {
         Icon(icon, contentDescription = null, tint = Color.White, modifier = Modifier.size(13.dp)) // just a little smaller
-        Spacer(modifier = Modifier.height(1.dp))
-        values.forEach { value ->
-            Text(value, color = Color.White, fontSize = 9.sp) // just a little smaller
+        Spacer(modifier = Modifier.width(3.dp))
+        Column(horizontalAlignment = Alignment.Start) {
+            values.forEach { value ->
+                Text(value, color = Color.White, fontSize = 9.sp) // just a little smaller
+            }
         }
     }
 }
