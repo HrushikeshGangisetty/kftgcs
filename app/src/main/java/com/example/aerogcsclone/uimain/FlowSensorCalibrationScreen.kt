@@ -484,8 +484,6 @@ fun FlowSensorCalibrationScreen(
                     onClick = {
                         scope.launch {
                             try {
-                                Log.i("FlowCal", "Starting flow sensor calibration for ${selectedVolumeLiters}L")
-
                                 // Record starting flow reading
                                 startFlowReading = currentConsumed
 
@@ -495,10 +493,7 @@ fun FlowSensorCalibrationScreen(
                                 calibrationState = FlowCalibrationState.CALIBRATING
                                 errorMessage = null
                                 calculatedCalibrationFactor = null
-
-                                Log.i("FlowCal", "Spray enabled, starting reading: ${startFlowReading}L")
                             } catch (e: Exception) {
-                                Log.e("FlowCal", "Error starting calibration", e)
                                 errorMessage = "Failed to start calibration: ${e.message}"
                                 calibrationState = FlowCalibrationState.ERROR
                             }
@@ -529,16 +524,12 @@ fun FlowSensorCalibrationScreen(
                     onClick = {
                         scope.launch {
                             try {
-                                Log.i("FlowCal", "Stopping flow sensor calibration")
-
                                 // Disable spray system (set RC7 to low PWM value ~1000)
                                 sharedViewModel.controlSpray(false)
 
                                 // Calculate the calibration factor
                                 val endFlowReading = currentConsumed
                                 val actualDispensed = endFlowReading - startFlowReading
-
-                                Log.i("FlowCal", "End reading: ${endFlowReading}L, Start: ${startFlowReading}L, Actual dispensed: ${actualDispensed}L")
 
                                 if (actualDispensed <= 0) {
                                     errorMessage = "No liquid was dispensed. Please check the spray system."
@@ -553,14 +544,11 @@ fun FlowSensorCalibrationScreen(
 
                                 calculatedCalibrationFactor = newFactor
 
-                                Log.i("FlowCal", "Calibration complete! Expected: ${selectedVolumeLiters}L, Actual: ${actualDispensed}L, New factor: $newFactor")
-
                                 // Save the calibration factor
                                 sharedViewModel.updateFlowSensorCalibration(newFactor)
 
                                 calibrationState = FlowCalibrationState.COMPLETED
                             } catch (e: Exception) {
-                                Log.e("FlowCal", "Error stopping calibration", e)
                                 errorMessage = "Failed to stop calibration: ${e.message}"
                                 calibrationState = FlowCalibrationState.ERROR
                             }

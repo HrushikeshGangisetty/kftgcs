@@ -116,7 +116,6 @@ fun MainPage(
             ?: telemetryState.currentWaypoint
             ?: 1
         resumeWaypointNumber = newWaypoint
-        android.util.Log.i("MainPage", "Updated resumeWaypointNumber to: $resumeWaypointNumber (from pausedAt: ${telemetryState.pausedAtWaypoint}, current: ${telemetryState.currentWaypoint})")
     }
 
     var resumeProgressMessage by remember { mutableStateOf("Initializing...") }
@@ -127,13 +126,6 @@ fun MainPage(
     val currentProjectName by telemetryViewModel.currentProjectName.collectAsState()
     val currentPlotName by telemetryViewModel.currentPlotName.collectAsState()
 
-    // Debug: Monitor dialog state changes
-    LaunchedEffect(showResumeWarningDialog) {
-        android.util.Log.i("MainPage", "showResumeWarningDialog changed to: $showResumeWarningDialog")
-    }
-    LaunchedEffect(showResumeWaypointDialog) {
-        android.util.Log.i("MainPage", "showResumeWaypointDialog changed to: $showResumeWaypointDialog")
-    }
 
     Column(
         modifier = Modifier
@@ -251,7 +243,6 @@ fun MainPage(
                 val missionDistance = telemetryState.totalDistanceMeters
                 val litresConsumed = telemetryState.sprayTelemetry.consumedLiters
 
-                Log.i("MainPage", "✅ Mission completed - Time: ${missionTime}s, Distance: ${missionDistance}m, Litres: ${litresConsumed}L")
                 lastHandledCompletionTime = currentCompletionTime
                 // No popup - notification already shown by UnifiedFlightTracker
             }
@@ -278,10 +269,8 @@ fun MainPage(
 
         // Resume Mission Warning Dialog (Step 1)
         if (showResumeWarningDialog) {
-            android.util.Log.i("MainPage", "Rendering Resume Warning Dialog")
             androidx.compose.material3.AlertDialog(
                 onDismissRequest = {
-                    android.util.Log.i("MainPage", "Dialog dismissed")
                     showResumeWarningDialog = false
                 },
                 confirmButton = {

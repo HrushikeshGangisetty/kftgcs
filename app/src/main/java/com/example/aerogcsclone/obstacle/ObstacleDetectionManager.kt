@@ -1,7 +1,6 @@
 package com.example.aerogcsclone.obstacle
 
 import android.content.Context
-import android.util.Log
 import com.divpundir.mavlink.definitions.common.MissionItemInt
 import com.example.aerogcsclone.Telemetry.TelemetryState
 import com.example.aerogcsclone.telemetry.SharedViewModel
@@ -23,7 +22,6 @@ class ObstacleDetectionManager(
     private val missionStateRepository: MissionStateRepository,
     private val config: ObstacleDetectionConfig = ObstacleDetectionConfig()
 ) {
-    private val tag = "ObstacleDetectionMgr"
     private val scope = CoroutineScope(Dispatchers.Default + SupervisorJob())
 
     // Core components
@@ -45,9 +43,11 @@ class ObstacleDetectionManager(
     val currentObstacle: StateFlow<ObstacleInfo?> = _currentObstacle.asStateFlow()
 
     private val _rtlMonitoring = MutableStateFlow(RTLMonitoringState())
+    @Suppress("unused")
     val rtlMonitoring: StateFlow<RTLMonitoringState> = _rtlMonitoring.asStateFlow()
 
     private val _savedMissionState = MutableStateFlow<SavedMissionState?>(null)
+    @Suppress("unused")
     val savedMissionState: StateFlow<SavedMissionState?> = _savedMissionState.asStateFlow()
 
     private val _resumeOptions = MutableStateFlow<List<ResumeOption>>(emptyList())
@@ -61,21 +61,16 @@ class ObstacleDetectionManager(
      * PHASE 2: Initialize sensor systems
      */
     fun initialize(): Boolean {
-        Log.i(tag, "═══ PHASE 2: PRE-FLIGHT SETUP & INITIALIZATION ═══")
-
         val sensorReady = sensorManager.initialize()
         if (!sensorReady) {
-            Log.e(tag, "❌ Sensor initialization failed")
             return false
         }
 
         val calibration = sensorManager.calibrate()
         if (!calibration.success) {
-            Log.e(tag, "❌ Sensor calibration failed: ${calibration.message}")
             return false
         }
 
-        Log.i(tag, "✅ Sensor calibrated: ${calibration.minDistance}m - ${calibration.maxDistance}m (±${calibration.accuracy}m)")
         return true
     }
 
@@ -88,16 +83,11 @@ class ObstacleDetectionManager(
         polygon: List<LatLng> = emptyList(),
         parameters: MissionParameters? = null
     ) {
-        Log.i(tag, "═══ PHASE 4: MISSION IN PROGRESS - OBSTACLE MONITORING ═══")
-
         currentMissionWaypoints = waypoints.toMutableList()
         homeLocation = home
         surveyPolygon = polygon
         missionParameters = parameters
         currentWaypointIndex = 0
-
-        Log.i(tag, "Mission loaded: ${waypoints.size} waypoints")
-        Log.i(tag, "Home location: ${home.latitude}, ${home.longitude}")
 
         _detectionStatus.value = ObstacleDetectionStatus.MONITORING
 
@@ -106,8 +96,6 @@ class ObstacleDetectionManager(
 
         // Start obstacle detection loop
         startObstacleMonitoringLoop()
-
-        Log.i(tag, "✅ Obstacle monitoring started (checking every ${config.detectionIntervalMs}ms)")
     }
 
     /**
@@ -167,7 +155,6 @@ class ObstacleDetectionManager(
 
         // Check if HIGH threat should trigger RTL
         if (obstacle != null && obstacleDetector.shouldTriggerRTL()) {
-            Log.w(tag, "⚠️ HIGH THREAT DETECTED - TRIGGERING EMERGENCY RTL")
             triggerEmergencyRTL(telemetry, obstacle)
         }
     }
@@ -212,7 +199,6 @@ class ObstacleDetectionManager(
 
         _detectionStatus.value = ObstacleDetectionStatus.OBSTACLE_DETECTED
 
-        Log.i(tag, "═══ PHASE 5: OBSTACLE DETECTED - EMERGENCY RTL TRIGGER ═══")
 
         // Capture complete mission state
         val droneLocation = LatLng(telemetry.latitude ?: 0.0, telemetry.longitude ?: 0.0)
@@ -242,11 +228,6 @@ class ObstacleDetectionManager(
         val saved = missionStateRepository.saveMissionState(missionState)
         if (saved) {
             _savedMissionState.value = missionState
-            Log.i(tag, "✅ Mission state saved at waypoint $currentWaypointIndex")
-            Log.i(tag, "   Progress: ${missionProgress.toInt()}% complete")
-            Log.i(tag, "   Remaining waypoints: ${remainingWaypoints.size}")
-        } else {
-            Log.e(tag, "❌ Failed to save mission state")
         }
 
         // Issue RTL command to drone
@@ -256,29 +237,17 @@ class ObstacleDetectionManager(
             if (repo != null) {
                 val success = repo.changeMode(MavMode.RTL)
                 if (success) {
-                    Log.i(tag, "✅ RTL mode activated")
                     _detectionStatus.value = ObstacleDetectionStatus.RTL_IN_PROGRESS
                     startRTLMonitoring()
-                } else {
-                    Log.e(tag, "❌ RTL activation failed")
                 }
-            } else {
-                Log.e(tag, "❌ Repository not available")
             }
         }
-
-        // Notify user
-        Log.w(tag, "⚠️ OBSTACLE DETECTED - RTL ACTIVATED")
-        Log.w(tag, "   Distance: ${obstacle.distance}m")
-        Log.w(tag, "   Waypoint: $currentWaypointIndex")
-        Log.w(tag, "   Mission progress: ${missionProgress.toInt()}%")
     }
 
     /**
      * PHASE 6: Monitor RTL - drone return to home
      */
     private fun startRTLMonitoring() {
-        Log.i(tag, "═══ PHASE 6: MONITORING RTL - DRONE RETURN TO HOME ═══")
 
         rtlMonitoringJob?.cancel()
         rtlMonitoringJob = scope.launch {
@@ -312,7 +281,6 @@ class ObstacleDetectionManager(
                 initialDistance = distance,
                 currentDistance = distance
             )
-            Log.i(tag, "RTL monitoring started - Initial distance: ${distance}m")
             return
         }
 
@@ -327,7 +295,6 @@ class ObstacleDetectionManager(
                 currentDistance = distance
             )
 
-            Log.d(tag, "Near home: ${distance}m (${newConsecutiveChecks}/3 confirmations)")
 
             // Require 3 consecutive readings below threshold
             if (newConsecutiveChecks >= 3) {
@@ -348,17 +315,12 @@ class ObstacleDetectionManager(
      * Handle drone arrival at home
      */
     private fun onDroneArrivedHome() {
-        Log.i(tag, "✅ Drone arrived at home")
-
         rtlMonitoringJob?.cancel()
         _rtlMonitoring.value = RTLMonitoringState()
         _detectionStatus.value = ObstacleDetectionStatus.READY_TO_RESUME
 
         // Generate resume options
         generateResumeOptions()
-
-        Log.i(tag, "═══ PHASE 7: USER PREPARATION FOR RESUME ═══")
-        Log.i(tag, "System ready for mission resume")
     }
 
     /**
@@ -400,25 +362,14 @@ class ObstacleDetectionManager(
         }
 
         _resumeOptions.value = options
-
-        Log.i(tag, "Generated ${options.size} resume options")
-        options.forEachIndexed { index, option ->
-            val marker = if (option.isRecommended) "⭐" else "  "
-            Log.i(tag, "$marker Option ${index + 1}: WP${option.waypointIndex} " +
-                       "(${option.distanceFromObstacle.toInt()}m from obstacle, " +
-                       "${option.coveragePercentage.toInt()}% coverage)")
-        }
     }
 
     /**
      * PHASE 8-9: Create and upload new mission for resume
      */
     suspend fun resumeMissionFromWaypoint(selectedOption: ResumeOption): Boolean {
-        Log.i(tag, "═══ PHASE 8: CREATE NEW MISSION PLAN FOR RESUME ═══")
-
         val missionState = _savedMissionState.value
         if (missionState == null) {
-            Log.e(tag, "❌ No saved mission state available")
             return false
         }
 
@@ -427,20 +378,11 @@ class ObstacleDetectionManager(
         // Build new mission structure
         val newMission = buildResumeMission(missionState, selectedOption)
 
-        Log.i(tag, "New mission created: ${newMission.size} waypoints")
-        Log.i(tag, "  - Waypoint 0: TAKEOFF (home)")
-        Log.i(tag, "  - Waypoint 1: GOTO WP${selectedOption.waypointIndex}")
-        Log.i(tag, "  - Waypoints 2-${newMission.size - 2}: Continue mission")
-        Log.i(tag, "  - Waypoint ${newMission.size - 1}: LAND")
-
-        Log.i(tag, "═══ PHASE 9: UPLOAD NEW MISSION TO DRONE ═══")
-
         // Upload mission via SharedViewModel
         return withContext(Dispatchers.Main) {
             suspendCancellableCoroutine { continuation ->
-                sharedViewModel.uploadMission(newMission) { success, error ->
+                sharedViewModel.uploadMission(newMission) { success, _ ->
                     if (success) {
-                        Log.i(tag, "✅ New mission uploaded successfully")
                         scope.launch {
                             // Mark old mission as resolved
                             missionStateRepository.markAsResolved(missionState.missionId)
@@ -450,13 +392,9 @@ class ObstacleDetectionManager(
                             currentMissionWaypoints = newMission.toMutableList()
                             homeLocation = newHome
                             currentWaypointIndex = 0
-
-                            Log.i(tag, "═══ PHASE 10: ARM AND RESUME MISSION ═══")
-                            Log.i(tag, "System ready for arm and takeoff")
                         }
                         continuation.resume(true)
                     } else {
-                        Log.e(tag, "❌ Mission upload failed: $error")
                         _detectionStatus.value = ObstacleDetectionStatus.READY_TO_RESUME
                         continuation.resume(false)
                     }
@@ -525,22 +463,17 @@ class ObstacleDetectionManager(
      * Resume monitoring after mission uploaded and drone armed
      */
     fun resumeMonitoring() {
-        Log.i(tag, "═══ PHASE 11: CONTINUE MISSION EXECUTION ═══")
-
         _detectionStatus.value = ObstacleDetectionStatus.MONITORING
 
         // Restart sensor and obstacle monitoring
         sensorManager.startMonitoring()
         startObstacleMonitoringLoop()
-
-        Log.i(tag, "✅ Obstacle monitoring resumed")
     }
 
     /**
      * Stop mission monitoring
      */
     fun stopMissionMonitoring() {
-        Log.i(tag, "Stopping obstacle monitoring")
 
         monitoringJob?.cancel()
         sensorManager.stopMonitoring()
@@ -554,8 +487,6 @@ class ObstacleDetectionManager(
      * Complete mission successfully
      */
     fun completeMission() {
-        Log.i(tag, "═══ PHASE 12: MISSION COMPLETE & DATA LOGGING ═══")
-
         stopMissionMonitoring()
         rtlMonitoringJob?.cancel()
 
@@ -569,8 +500,6 @@ class ObstacleDetectionManager(
         currentMissionWaypoints.clear()
         _savedMissionState.value = null
         _currentObstacle.value = null
-
-        Log.i(tag, "✅ Mission completed successfully")
     }
 
     /**
@@ -591,20 +520,15 @@ class ObstacleDetectionManager(
     /**
      * Log mission statistics
      */
+    @Suppress("UNUSED_PARAMETER")
     private fun logMissionStatistics(stats: MissionStatistics) {
-        Log.i(tag, "Mission Statistics:")
-        Log.i(tag, "  - Coverage: ${stats.coveragePercentage.toInt()}%")
-        Log.i(tag, "  - Obstacles detected: ${stats.obstaclesDetected}")
-        Log.i(tag, "  - Interrupts: ${stats.missionInterrupts}")
-        Log.i(tag, "  - Resumes: ${stats.missionResumes}")
-        Log.i(tag, "  - Final status: ${stats.finalStatus}")
+        // Mission statistics logged internally
     }
 
     /**
      * Cleanup resources
      */
     fun cleanup() {
-        Log.i(tag, "Cleaning up obstacle detection system")
 
         monitoringJob?.cancel()
         rtlMonitoringJob?.cancel()
@@ -618,7 +542,6 @@ class ObstacleDetectionManager(
     fun injectSimulatedObstacle(distance: Float) {
         if (config.sensorType == SensorType.SIMULATED) {
             sensorManager.injectSimulatedReading(distance)
-            Log.d(tag, "Simulated obstacle injected: ${distance}m")
         }
     }
 }

@@ -449,7 +449,6 @@ fun LogsScreen(
                         FlightItem(
                             flight = flight,
                             onViewDetails = { /* Navigate to flight details */ },
-                            onDelete = { tlogViewModel.deleteFlight(flight.id) },
                             onExport = { format -> tlogViewModel.exportFlight(flight, format) },
                             modifier = Modifier.fillMaxWidth()
                         )
@@ -817,11 +816,9 @@ fun ActiveFlightCard(
 fun FlightItem(
     flight: FlightEntity,
     onViewDetails: () -> Unit,
-    onDelete: () -> Unit,
     onExport: (ExportFormat) -> Unit,
     modifier: Modifier = Modifier
 ) {
-    var showDeleteDialog by remember { mutableStateOf(false) }
     var showExportDialog by remember { mutableStateOf(false) }
     val dateFormat = SimpleDateFormat("MMM dd, yyyy", Locale.getDefault())
     val timeFormat = SimpleDateFormat("HH:mm", Locale.getDefault())
@@ -909,9 +906,6 @@ fun FlightItem(
                 // Small action icons
                 IconButton(onClick = { showExportDialog = true }, modifier = Modifier.size(28.dp)) {
                     Icon(Icons.Default.Download, contentDescription = "Export", modifier = Modifier.size(12.dp), tint = Color(0xFF60A5FA))
-                }
-                IconButton(onClick = { showDeleteDialog = true }, modifier = Modifier.size(28.dp)) {
-                    Icon(Icons.Default.Delete, contentDescription = "Delete", modifier = Modifier.size(12.dp), tint = Color(0xFFEF4444))
                 }
             }
         }
@@ -1035,111 +1029,6 @@ fun FlightItem(
             dismissButton = {
                 TextButton(
                     onClick = { showExportDialog = false },
-                    colors = ButtonDefaults.textButtonColors(
-                        contentColor = Color(0xFF60A5FA)
-                    )
-                ) {
-                    Text("Cancel", fontWeight = FontWeight.SemiBold)
-                }
-            }
-        )
-    }
-
-    // Modern Delete Confirmation Dialog
-    if (showDeleteDialog) {
-        AlertDialog(
-            onDismissRequest = { showDeleteDialog = false },
-            title = {
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    modifier = Modifier.padding(bottom = 8.dp)
-                ) {
-                    Box(
-                        modifier = Modifier
-                            .size(40.dp)
-                            .clip(CircleShape)
-                            .background(
-                                Brush.linearGradient(
-                                    colors = listOf(
-                                        Color(0xFFEF4444),
-                                        Color(0xFFDC2626)
-                                    )
-                                )
-                            ),
-                        contentAlignment = Alignment.Center
-                    ) {
-                        Icon(
-                            Icons.Default.Warning,
-                            contentDescription = "Warning",
-                            tint = Color.White,
-                            modifier = Modifier.size(24.dp)
-                        )
-                    }
-                    Spacer(modifier = Modifier.width(12.dp))
-                    Text(
-                        "Delete Flight",
-                        fontWeight = FontWeight.Bold,
-                        fontSize = 20.sp,
-                        color = Color(0xFFEF4444)
-                    )
-                }
-            },
-            text = {
-                Column {
-                    Text(
-                        "Are you sure you want to delete this flight?",
-                        fontSize = 15.sp,
-                        fontWeight = FontWeight.Medium,
-                        color = Color.White
-                    )
-                    Spacer(modifier = Modifier.height(8.dp))
-                    Text(
-                        "⚠️ This action cannot be undone.",
-                        fontSize = 13.sp,
-                        color = Color(0xFFEF4444).copy(alpha = 0.8f)
-                    )
-                }
-            },
-            confirmButton = {
-                Button(
-                    onClick = {
-                        onDelete()
-                        showDeleteDialog = false
-                    },
-                    colors = ButtonDefaults.buttonColors(
-                        containerColor = Color.Transparent
-                    ),
-                    modifier = Modifier
-                        .shadow(6.dp, RoundedCornerShape(20.dp))
-                        .background(
-                            Brush.horizontalGradient(
-                                colors = listOf(
-                                    Color(0xFFEF4444),
-                                    Color(0xFFDC2626)
-                                )
-                            ),
-                            shape = RoundedCornerShape(20.dp)
-                        ),
-                    shape = RoundedCornerShape(20.dp),
-                    contentPadding = PaddingValues(horizontal = 20.dp, vertical = 10.dp)
-                ) {
-                    Icon(
-                        Icons.Default.Delete,
-                        contentDescription = "Delete",
-                        modifier = Modifier.size(18.dp),
-                        tint = Color.White
-                    )
-                    Spacer(modifier = Modifier.width(6.dp))
-                    Text(
-                        "Delete",
-                        fontWeight = FontWeight.Bold,
-                        color = Color.White
-                    )
-                }
-            },
-            dismissButton = {
-                TextButton(
-                    onClick = { showDeleteDialog = false },
                     colors = ButtonDefaults.textButtonColors(
                         contentColor = Color(0xFF60A5FA)
                     )

@@ -1,6 +1,5 @@
-package com.example.aerogcsclone.telemetry
+﻿package com.example.aerogcsclone.telemetry
 
-import android.util.Log
 import com.divpundir.mavlink.adapters.coroutines.asCoroutine
 import com.divpundir.mavlink.adapters.coroutines.tryConnect
 import com.divpundir.mavlink.adapters.coroutines.trySendUnsignedV2
@@ -176,7 +175,6 @@ class MavlinkTelemetryRepository(
                         return // Exit on successful connection
                     }
                 } catch (e: Exception) {
-                    Log.e("MavlinkRepo", "Connection attempt failed", e)
                     _lastFailure.value = e
                 }
                 delay(1000)
@@ -191,14 +189,11 @@ class MavlinkTelemetryRepository(
                     is StreamState.Active -> {
                         // Don't set connected=true here anymore
                         // Connection will be marked as true only when FCU heartbeat is received
-                        Log.d("MavlinkRepo", "Stream Active - waiting for FCU heartbeat")
                     }
                     is StreamState.Inactive -> {
-                        Log.d("MavlinkRepo", "Stream Inactive")
                         _state.update { it.copy(connected = false, fcuDetected = false) }
                         lastFcuHeartbeatTime.set(0L)
                         // Auto-reconnect disabled - user must manually reconnect via connection tab
-                        Log.d("MavlinkRepo", "Connection lost - user must manually reconnect via connection tab")
                     }
                 }
             }
@@ -212,7 +207,6 @@ class MavlinkTelemetryRepository(
                     val timeSinceLastHeartbeat = System.currentTimeMillis() - lastFcuHeartbeatTime.get()
                     if (timeSinceLastHeartbeat > HEARTBEAT_TIMEOUT_MS) {
                         if (state.value.connected) {
-                            Log.w("MavlinkRepo", "FCU heartbeat timeout - marking as disconnected")
                             _state.update { it.copy(connected = false, fcuDetected = false) }
                             lastFcuHeartbeatTime.set(0L)
                         }
@@ -235,7 +229,6 @@ class MavlinkTelemetryRepository(
                 try {
                     connection.trySendUnsignedV2(gcsSystemId, gcsComponentId, heartbeat)
                 } catch (e: Exception) {
-                    Log.e("MavlinkRepo", "Failed to send heartbeat", e)
                     _lastFailure.value = e
                 }
                 delay(1000)
@@ -249,7 +242,6 @@ class MavlinkTelemetryRepository(
         // Log raw messages
         scope.launch {
             mavFrame.collect {
-                Log.d("MavlinkRepo", "Frame: ${it.message.javaClass.simpleName} (sysId=${it.systemId}, compId=${it.componentId})")
             }
         }
 
@@ -264,7 +256,6 @@ class MavlinkTelemetryRepository(
                         val isAutopilot = msg.autopilot != MavAutopilot.INVALID.wrap()
 
                         if (!isNotGCS || !isAutopilot) {
-                            Log.d("MavlinkRepo", "Ignoring heartbeat: type=${msg.type.entry?.name ?: msg.type.value}, autopilot=${msg.autopilot.entry?.name ?: msg.autopilot.value}")
                             return@filter false
                         }
                         return@filter true
@@ -315,14 +306,6 @@ class MavlinkTelemetryRepository(
                             else -> "Mode ${hb.customMode}"
                         }
 
-                        Log.i("MavlinkRepo", "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-                        Log.i("MavlinkRepo", "✅ FCU DETECTED:")
-                        Log.i("MavlinkRepo", "  System ID: ${it.systemId}, Component ID: ${it.componentId}")
-                        Log.i("MavlinkRepo", "  Type: ${hb.type.entry?.name ?: hb.type.value}")
-                        Log.i("MavlinkRepo", "  Autopilot: ${hb.autopilot.entry?.name ?: hb.autopilot.value}")
-                        Log.i("MavlinkRepo", "  customMode: ${hb.customMode} → $initialMode")
-                        Log.i("MavlinkRepo", "  armed: $armed")
-                        Log.i("MavlinkRepo", "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 
                         // Set fcuDetected, connected, AND initial mode/armed state
                         _state.update { state ->
@@ -354,7 +337,6 @@ class MavlinkTelemetryRepository(
                                 try {
                                     connection.trySendUnsignedV2(gcsSystemId, gcsComponentId, cmd)
                                 } catch (e: Exception) {
-                                    Log.e("MavlinkRepo", "Failed to send SET_MESSAGE_INTERVAL", e)
                                     _lastFailure.value = e
                                 }
                             }
@@ -368,12 +350,9 @@ class MavlinkTelemetryRepository(
                             setMessageRate(65u, 1f)    // RC_CHANNELS - reduced from 2Hz for Bluetooth
 
                             // Request RADIO_STATUS for RC battery monitoring
-                            Log.i("RCBattery", "📡 Requesting RADIO_STATUS messages (ID: 109) at 1Hz for RC battery telemetry")
                             setMessageRate(109u, 1f) // RADIO_STATUS (1Hz for RC battery monitoring)
-                            Log.i("RCBattery", "✓ RADIO_STATUS message request sent to FCU")
 
                             // Request AUTOPILOT_VERSION for drone identification
-                            Log.i("DroneID", "📡 Requesting AUTOPILOT_VERSION for drone identification")
                             val autopilotVersionCmd = CommandLong(
                                 targetSystem = fcuSystemId,
                                 targetComponent = fcuComponentId,
@@ -389,9 +368,7 @@ class MavlinkTelemetryRepository(
                             )
                             try {
                                 connection.trySendUnsignedV2(gcsSystemId, gcsComponentId, autopilotVersionCmd)
-                                Log.i("DroneID", "✓ AUTOPILOT_VERSION request sent to FCU")
                             } catch (e: Exception) {
-                                Log.e("DroneID", "Failed to request AUTOPILOT_VERSION", e)
                             }
 
                             // Request spray telemetry capacity parameters
@@ -400,7 +377,6 @@ class MavlinkTelemetryRepository(
                         }
                     } else if (!state.value.connected) {
                         // FCU was detected before but connection was lost, now it's back
-                        Log.i("MavlinkRepo", "FCU heartbeat resumed - marking as connected")
                         _state.update { state -> state.copy(connected = true) }
                     }
                 }
@@ -414,14 +390,9 @@ class MavlinkTelemetryRepository(
                 .filterIsInstance<CommandAck>()
                 .collect { ack ->
                     try {
-                        Log.d(
-                            "MavlinkRepo",
-                            "COMMAND_ACK received: command=${ack.command} result=${ack.result} progress=${ack.progress}"
-                        )
                         // Emit to the shared flow for ViewModels to consume
                         _commandAck.emit(ack)
                     } catch (t: Throwable) {
-                        Log.d("MavlinkRepo", "COMMAND_ACK received (unable to stringify fields)")
                     }
                 }
         }
@@ -434,14 +405,9 @@ class MavlinkTelemetryRepository(
                 .filterIsInstance<CommandLong>()
                 .collect { cmd ->
                     try {
-                        Log.d(
-                            "MavlinkRepo",
-                            "COMMAND_LONG received: command=${cmd.command.value} param1=${cmd.param1}"
-                        )
                         // Emit to the shared flow for ViewModels to consume
                         _commandLong.emit(cmd)
                     } catch (t: Throwable) {
-                        Log.d("MavlinkRepo", "COMMAND_LONG received (unable to stringify fields)")
                     }
                 }
         }
@@ -529,11 +495,9 @@ class MavlinkTelemetryRepository(
                     // Announce armed/disarmed state transitions via TTS
                     if (currentArmed && !previousArmedState) {
                         // Drone just armed - announce it
-                        Log.i("MavlinkRepo", "[TTS] Drone armed - announcing via TTS")
                         sharedViewModel.announceDroneArmed()
                     } else if (!currentArmed && previousArmedState) {
                         // Drone just disarmed - announce it
-                        Log.i("MavlinkRepo", "[TTS] Drone disarmed - announcing via TTS")
                         sharedViewModel.announceDroneDisarmed()
                     }
 
@@ -562,65 +526,35 @@ class MavlinkTelemetryRepository(
                 .filterIsInstance<BatteryStatus>()
                 .collect { b ->
                     // Log ALL battery status messages first for debugging
-                    Log.d("Spray Telemetry", "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-                    Log.d("Spray Telemetry", "📦 BATTERY_STATUS message received:")
-                    Log.d("Spray Telemetry", "   Battery ID: ${b.id.toInt()}")
-                    Log.d("Spray Telemetry", "   current_battery: ${b.currentBattery} cA (${b.currentBattery / 100f} A)")
-                    Log.d("Spray Telemetry", "   current_consumed: ${b.currentConsumed} mAh")
-                    Log.d("Spray Telemetry", "   battery_remaining: ${b.batteryRemaining}%")
-                    Log.d("Spray Telemetry", "   voltages[0]: ${b.voltages.firstOrNull()} mV")
-                    Log.d("Spray Telemetry", "   temperature: ${b.temperature} °C")
-                    Log.d("Spray Telemetry", "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 
                     // Main battery (id=0)
                     if (b.id.toInt() == 0) {
-                        Log.d("Spray Telemetry", "✅ Processing main battery (id=0)")
                         val currentA = if (b.currentBattery.toInt() == -1) null else b.currentBattery / 100f
                         _state.update { it.copy(currentA = currentA) }
                     }
                     // Flow sensor (BATT2 - id=1)
                     else if (b.id.toInt() == 1) {
-                        Log.d("Spray Telemetry", "🚿 Processing FLOW SENSOR (BATT2 - id=1)")
-                        Log.d("Spray Telemetry", "Flow sensor (BATT2) - Raw data: " +
-                                "current_battery=${b.currentBattery} cA, " +
-                                "current_consumed=${b.currentConsumed} mAh, " +
-                                "battery_remaining=${b.batteryRemaining}%")
 
                         // Check for spray enabled but no flow detected
                         val currentSprayEnabled = state.value.sprayTelemetry.sprayEnabled
                         val currentRc7 = state.value.sprayTelemetry.rc7Value
 
                         if (currentSprayEnabled && b.currentBattery == 0.toShort()) {
-                            Log.e("Spray Telemetry", "⚠️⚠️⚠️ CONFIGURATION ERROR DETECTED ⚠️⚠️⚠️")
-                            Log.e("Spray Telemetry", "RC7 shows spray ENABLED ($currentRc7 PWM > 1500)")
-                            Log.e("Spray Telemetry", "BUT flow sensor reports 0 cA (no flow data)")
-                            Log.e("Spray Telemetry", "")
-                            Log.e("Spray Telemetry", "Possible causes:")
-                            Log.e("Spray Telemetry", "1. Flow sensor not physically connected")
-                            Log.e("Spray Telemetry", "2. BATT2_MONITOR parameter not set correctly")
-                            Log.e("Spray Telemetry", "   (should be 11 for Fuel Flow sensor)")
-                            Log.e("Spray Telemetry", "3. Flow sensor pin not configured in FCU")
-                            Log.e("Spray Telemetry", "4. Flow sensor not calibrated (BATT2_AMP_PERVLT)")
-                            Log.e("Spray Telemetry", "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
                         }
 
-                        // ═══ IMPROVED: Input validation and conversion ═══
+                        // â•â•â• IMPROVED: Input validation and conversion â•â•â•
                         val flowRateLiterPerHour = FlowRateValidator.validateAndConvert(b.currentBattery)
 
                         // Apply filtering and spike detection for non-zero values
                         val filteredFlowRate = if (flowRateLiterPerHour != null && flowRateLiterPerHour > 0f) {
                             // Check for sensor spikes before adding to filter
                             if (flowRateFilter.detectSpike(flowRateLiterPerHour, threshold = 2.0f)) {
-                                Log.w("Spray Telemetry", "⚠️ SENSOR SPIKE DETECTED: ${flowRateLiterPerHour} L/h (${flowRateLiterPerHour/60f} L/min)")
-                                Log.w("Spray Telemetry", "   Average was: ${flowRateFilter.getAverage()} L/h")
-                                Log.w("Spray Telemetry", "   Possible sensor fault or erratic reading - using filtered average")
 
                                 // Use current average instead of spike value
                                 flowRateFilter.getAverage()
                             } else {
                                 // Normal value - add to filter and get smoothed result
                                 val smoothed = flowRateFilter.addValue(flowRateLiterPerHour)
-                                Log.d("Spray Telemetry", "✓ Flow rate: raw=${flowRateLiterPerHour} L/h, filtered=${smoothed} L/h")
                                 smoothed
                             }
                         } else {
@@ -633,34 +567,27 @@ class MavlinkTelemetryRepository(
 
                         val flowRateLiterPerMin = filteredFlowRate?.let {
                             val ratePerMin = it / 60f
-                            Log.d("Spray Telemetry", "✓ Flow rate per minute: $ratePerMin L/min")
                             ratePerMin
                         }
 
                         // Parse consumed volume (current_consumed in mAh = mL)
                         val consumedLiters = if (b.currentConsumed == -1) {
-                            Log.w("Spray Telemetry", "⚠️ Consumed volume is -1 (invalid)")
                             null
                         } else if (b.currentConsumed == 0) {
                             // 0 is valid for start of spraying
-                            Log.d("Spray Telemetry", "✓ Consumed volume: 0.0 L (0 mL) - No consumption yet")
                             0f
                         } else {
                             val consumed = b.currentConsumed / 1000f  // Convert mAh (mL) to Liters
-                            Log.d("Spray Telemetry", "✓ Consumed volume: $consumed L (${b.currentConsumed} mL)")
                             consumed
                         }
 
                         // Use capacity from parameters (read dynamically from FCU)
                         val flowCapacityLiters = state.value.sprayTelemetry.batt2CapacityMah / 1000f
-                        Log.d("Spray Telemetry", "✓ Tank capacity (from params): $flowCapacityLiters L")
 
                         val flowRemainingPercent = if (b.batteryRemaining.toInt() == -1) {
-                            Log.w("Spray Telemetry", "⚠️ Remaining percentage is -1 (invalid)")
                             null
                         } else {
                             val remaining = b.batteryRemaining.toInt()
-                            Log.d("Spray Telemetry", "✓ Remaining: $remaining%")
                             remaining
                         }
 
@@ -680,11 +607,6 @@ class MavlinkTelemetryRepository(
                             else -> "%.2f L".format(consumedLiters)
                         }
 
-                        Log.d("Spray Telemetry", "📊 BATT2 Summary:")
-                        Log.d("Spray Telemetry", "   Flow Rate: ${formattedFlowRate ?: "N/A"}")
-                        Log.d("Spray Telemetry", "   Consumed: ${formattedConsumed ?: "N/A"} (raw: ${consumedLiters}L)")
-                        Log.d("Spray Telemetry", "   Capacity: $flowCapacityLiters L")
-                        Log.d("Spray Telemetry", "   Remaining: ${flowRemainingPercent?.toString() ?: "N/A"}%")
 
                         _state.update { state ->
                             state.copy(
@@ -698,9 +620,8 @@ class MavlinkTelemetryRepository(
                                 )
                             )
                         }
-                        Log.d("Spray Telemetry", "✅ State updated with BATT2 data")
 
-                        // ═══ FLOW-BASED TANK EMPTY DETECTION ═══
+                        // â•â•â• FLOW-BASED TANK EMPTY DETECTION â•â•â•
                         // Tank is considered empty when:
                         // 1. Sprayer is ON (rc7 enabled)
                         // 2. Flow rate is 0 for 1.5+ seconds
@@ -713,13 +634,10 @@ class MavlinkTelemetryRepository(
                             // Sprayer is ON but no flow - start/continue timing
                             if (zeroFlowStartTime == null) {
                                 zeroFlowStartTime = System.currentTimeMillis()
-                                Log.d("Spray Telemetry", "⏱️ Zero flow detected with sprayer ON - starting timer")
                             } else {
                                 val zeroFlowDuration = System.currentTimeMillis() - zeroFlowStartTime!!
-                                Log.d("Spray Telemetry", "⏱️ Zero flow duration: ${zeroFlowDuration}ms")
 
                                 if (zeroFlowDuration >= ZERO_FLOW_THRESHOLD_MS && !tankEmptyNotificationShown) {
-                                    Log.w("Spray Telemetry", "⚠️ TANK EMPTY - Sprayer ON but no flow for ${zeroFlowDuration}ms")
                                     sharedViewModel.addNotification(
                                         Notification(
                                             message = "Tank Empty! Sprayer is ON but no flow detected.",
@@ -733,34 +651,24 @@ class MavlinkTelemetryRepository(
                         } else {
                             // Reset zero flow timer if sprayer is OFF or flow is detected
                             if (zeroFlowStartTime != null) {
-                                Log.d("Spray Telemetry", "✓ Zero flow timer reset (sprayer=${currentSprayEnabledForEmpty}, flow=${flowRateLiterPerMin}, config=${configValid})")
                                 zeroFlowStartTime = null
                             }
 
                             // Reset tank empty notification if flow is detected again (tank refilled)
                             if (!flowIsZero && tankEmptyNotificationShown) {
-                                Log.i("Spray Telemetry", "✓ Tank refilled - flow detected, resetting notification flag")
                                 tankEmptyNotificationShown = false
                             }
                         }
                     }
                     // Level sensor (BATT3 - id=2)
                     else if (b.id.toInt() == 2) {
-                        Log.d("Spray Telemetry", "💧 Processing LEVEL SENSOR (BATT3 - id=2)")
 
-                        // ═══ DIAGNOSTIC: Log ALL voltage cells for debugging ═══
-                        Log.d("Spray Telemetry", "═══ BATT3 VOLTAGE DIAGNOSTICS ═══")
+                        // â•â•â• DIAGNOSTIC: Log ALL voltage cells for debugging â•â•â•
                         b.voltages.forEachIndexed { index, voltage ->
-                            Log.d("Spray Telemetry", "   voltages[$index]: $voltage mV (raw UShort)")
                         }
-                        Log.d("Spray Telemetry", "   battery_remaining: ${b.batteryRemaining}%")
-                        Log.d("Spray Telemetry", "   current_battery: ${b.currentBattery} cA")
-                        Log.d("Spray Telemetry", "   current_consumed: ${b.currentConsumed} mAh")
 
                         // Get VOLT_MULT from parameters (if available)
                         val voltMult = state.value.sprayTelemetry.batt3VoltMult ?: 1.0f
-                        Log.d("Spray Telemetry", "   BATT3_VOLT_MULT: $voltMult")
-                        Log.d("Spray Telemetry", "═══════════════════════════════════")
 
                         // Parse raw voltage from level sensor
                         // Note: voltages[] in MAVLink is UShort (0-65535), representing millivolts
@@ -769,14 +677,11 @@ class MavlinkTelemetryRepository(
 
                         // Check for UINT16_MAX (65535) which means "not available"
                         val validRawVoltageMv = if (rawVoltageMv == 65535 || rawVoltageMv == null) {
-                            Log.w("Spray Telemetry", "⚠️ Voltage is UINT16_MAX (65535) or null - sensor not configured properly")
                             null
                         } else {
                             rawVoltageMv
                         }
 
-                        Log.d("Spray Telemetry", "Level sensor (BATT3) - Raw voltage: $validRawVoltageMv mV, " +
-                                "battery_remaining=${b.batteryRemaining}%")
 
                         // Calculate true sensor voltage (before FCU multiplied it)
                         val trueSensorVoltageMv = if (validRawVoltageMv != null && voltMult > 0) {
@@ -784,25 +689,19 @@ class MavlinkTelemetryRepository(
                         } else {
                             validRawVoltageMv
                         }
-                        Log.d("Spray Telemetry", "   True sensor voltage (÷$voltMult): $trueSensorVoltageMv mV")
 
                         // Apply voltage filter to smooth out fluctuations
                         val tankVoltageMv = if (validRawVoltageMv != null && validRawVoltageMv > 0) {
                             // Check for spike before adding to filter
                             if (tankVoltageFilter.size() >= 3 && tankVoltageFilter.detectSpike(validRawVoltageMv, maxDeviation = 100)) {
-                                Log.w("Spray Telemetry", "⚠️ VOLTAGE SPIKE DETECTED: $validRawVoltageMv mV")
-                                Log.w("Spray Telemetry", "   Current median: ${tankVoltageFilter.getMedian()} mV")
-                                Log.w("Spray Telemetry", "   Using last stable value instead")
                                 // Use last stable value instead of spike
                                 tankVoltageFilter.getLastStable() ?: validRawVoltageMv
                             } else {
                                 // Normal value - add to filter and get smoothed result
                                 val filtered = tankVoltageFilter.addValue(validRawVoltageMv)
-                                Log.d("Spray Telemetry", "✓ Voltage: raw=$validRawVoltageMv mV, filtered=$filtered mV (samples: ${tankVoltageFilter.size()})")
                                 filtered
                             }
                         } else {
-                            Log.w("Spray Telemetry", "⚠️ Tank voltage is null or invalid: $validRawVoltageMv")
                             null
                         }
 
@@ -821,11 +720,9 @@ class MavlinkTelemetryRepository(
                                 // Empty = high voltage, Full = low voltage
                                 when {
                                     tankVoltageMv >= emptyVoltageMv -> {
-                                        Log.d("Spray Telemetry", "⚠️ Voltage at/above empty threshold (inverted): $tankVoltageMv >= $emptyVoltageMv mV")
                                         0  // At or above empty voltage = empty
                                     }
                                     tankVoltageMv <= fullVoltageMv -> {
-                                        Log.d("Spray Telemetry", "⚠️ Voltage at/below full threshold (inverted): $tankVoltageMv <= $fullVoltageMv mV")
                                         100  // At or below full voltage = full
                                     }
                                     else -> {
@@ -834,7 +731,6 @@ class MavlinkTelemetryRepository(
                                         val level = ((emptyVoltageMv - tankVoltageMv).toFloat() /
                                                 (emptyVoltageMv - fullVoltageMv) * 100).toInt()
                                             .coerceIn(0, 100)
-                                        Log.d("Spray Telemetry", "✓ Calculated tank level (inverted): $level% (from ${tankVoltageMv}mV)")
                                         level
                                     }
                                 }
@@ -842,11 +738,9 @@ class MavlinkTelemetryRepository(
                                 // Normal sensor: higher voltage = higher tank level
                                 when {
                                     tankVoltageMv <= emptyVoltageMv -> {
-                                        Log.d("Spray Telemetry", "⚠️ Voltage at/below empty threshold: $tankVoltageMv <= $emptyVoltageMv mV")
                                         0  // At or below empty threshold
                                     }
                                     tankVoltageMv >= fullVoltageMv -> {
-                                        Log.d("Spray Telemetry", "⚠️ Voltage at/above full threshold: $tankVoltageMv >= $fullVoltageMv mV")
                                         100  // At or above full threshold
                                     }
                                     else -> {
@@ -854,32 +748,17 @@ class MavlinkTelemetryRepository(
                                         val level = ((tankVoltageMv - emptyVoltageMv).toFloat() /
                                                 (fullVoltageMv - emptyVoltageMv) * 100).toInt()
                                             .coerceIn(0, 100)
-                                        Log.d("Spray Telemetry", "✓ Calculated tank level: $level% (from ${tankVoltageMv}mV)")
                                         level
                                     }
                                 }
                             }
                         } else {
-                            Log.w("Spray Telemetry", "⚠️ Cannot calculate level - voltage is null")
                             null
                         }
 
                         // Use capacity from parameters (read dynamically from FCU)
                         val tankCapacityLiters = state.value.sprayTelemetry.batt3CapacityMah / 1000f
-                        Log.d("Spray Telemetry", "✓ Tank capacity (from params): $tankCapacityLiters L")
-                        Log.d("Spray Telemetry", "   Calibration: empty=$emptyVoltageMv mV, full=$fullVoltageMv mV")
 
-                        Log.i("Spray Telemetry", "📊 BATT3 Summary:")
-                        Log.i("Spray Telemetry", "   FCU Reported Voltage: ${validRawVoltageMv?.toString() ?: "N/A"} mV")
-                        Log.i("Spray Telemetry", "   True Sensor Voltage: ${trueSensorVoltageMv?.toString() ?: "N/A"} mV (÷$voltMult)")
-                        Log.i("Spray Telemetry", "   Filtered Voltage: ${tankVoltageMv?.toString() ?: "N/A"} mV")
-                        Log.i("Spray Telemetry", "   Level: ${tankLevelPercent?.toString() ?: "N/A"}%")
-                        Log.i("Spray Telemetry", "   Sensor Mode: ${if (isInverted) "INVERTED (higher V = empty)" else "NORMAL (higher V = full)"}")
-                        Log.i("Spray Telemetry", "   Calibration: Empty=$emptyVoltageMv mV, Full=$fullVoltageMv mV")
-                        Log.i("Spray Telemetry", "   Voltage Range: ${kotlin.math.abs(fullVoltageMv - emptyVoltageMv)} mV")
-                        Log.i("Spray Telemetry", "   BATT3_VOLT_MULT: $voltMult")
-                        Log.i("Spray Telemetry", "   Capacity: $tankCapacityLiters L")
-                        Log.i("Spray Telemetry", "   ArduPilot battery_remaining: ${b.batteryRemaining}% (not used)")
 
                         _state.update { state ->
                             state.copy(
@@ -890,14 +769,12 @@ class MavlinkTelemetryRepository(
                                 )
                             )
                         }
-                        Log.i("Spray Telemetry", "✅ State updated with BATT3 data")
 
                         // NOTE: Tank empty detection is now handled by flow-based detection in BATT2 section
                         // BATT3 level is still tracked for display purposes only
                         // Low tank warning at 15% (still useful as an early warning)
                         if (tankLevelPercent != null) {
                             if (tankLevelPercent <= 15 && tankLevelPercent > 0 && lastTankLevelPercent != null && lastTankLevelPercent!! > 15) {
-                                Log.w("Spray Telemetry", "⚠️ TANK LOW (${tankLevelPercent}%) - Showing warning")
                                 sharedViewModel.addNotification(
                                     Notification(
                                         message = "Tank Low! ${tankLevelPercent}% remaining.",
@@ -909,7 +786,6 @@ class MavlinkTelemetryRepository(
                         }
                     }
                     else {
-                        Log.w("Spray Telemetry", "⚠️ Unknown battery ID: ${b.id.toInt()} - ignoring")
                     }
                 }
         }
@@ -928,13 +804,6 @@ class MavlinkTelemetryRepository(
                 .filterIsInstance<Heartbeat>()
                 .collect { hb ->
                     // CRITICAL: Log the RAW customMode value from the FCU heartbeat
-                    Log.d("MavlinkRepo", "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-                    Log.d("MavlinkRepo", "HEARTBEAT from FCU - RAW DATA:")
-                    Log.d("MavlinkRepo", "  customMode = ${hb.customMode} (raw UInt value)")
-                    Log.d("MavlinkRepo", "  baseMode = ${hb.baseMode.value}")
-                    Log.d("MavlinkRepo", "  type = ${hb.type.entry?.name ?: hb.type.value}")
-                    Log.d("MavlinkRepo", "  autopilot = ${hb.autopilot.entry?.name ?: hb.autopilot.value}")
-                    Log.d("MavlinkRepo", "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 
                     val armed = (hb.baseMode.value and MavModeFlag.SAFETY_ARMED.value) != 0u
 
@@ -969,21 +838,16 @@ class MavlinkTelemetryRepository(
                         26u -> "AutoRotate"
                         27u -> "Auto_RTL"
                         else -> {
-                            Log.w("MavlinkRepo", "⚠️ Unknown customMode in heartbeat: ${hb.customMode}")
-                            Log.w("MavlinkRepo", "   This mode is not in the ArduPilot Copter mode table")
                             "Mode ${hb.customMode}"
                         }
                     }
 
                     // Log the parsed mode for verification
-                    Log.d("MavlinkRepo", "✅ Parsed mode: $mode (from customMode: ${hb.customMode})")
 
                     // Only update state if mode or armed status actually changed
                     if (mode != state.value.mode || armed != state.value.armed) {
                         _state.update { it.copy(armed = armed, mode = mode) }
-                        Log.d("MavlinkRepo", "🔄 State updated - Mode: $mode, Armed: $armed")
                     } else {
-                        Log.d("MavlinkRepo", "No change - Mode: $mode, Armed: $armed")
                     }
 
                     // Arm/Disarm Notifications
@@ -1000,7 +864,6 @@ class MavlinkTelemetryRepository(
                         if (mode.equals("Auto", ignoreCase = true) && armed && (lastMode != mode || lastArmed != armed)) {
                             // === NEW: Check if this is a transition TO AUTO for resume mission ===
                             if (lastMode != null && !lastMode.equals("Auto", ignoreCase = true)) {
-                                Log.i("TelemetryRepo", "🔄 Mode changed TO AUTO from $lastMode - checking for resume mission")
                                 sharedViewModel.onModeChangedToAuto()
                             }
 
@@ -1027,7 +890,7 @@ class MavlinkTelemetryRepository(
                             missionTimerJob?.cancel()
                             missionTimerJob = null
 
-                            // === NEW: Detect AUTO → LOITER transition for "Add Resume Here" popup ===
+                            // === NEW: Detect AUTO â†’ LOITER transition for "Add Resume Here" popup ===
                             // Only show popup if:
                             // 1. This is a user-initiated LOITER, not geofence-triggered
                             // 2. User selected Automatic mode (not Manual mode)
@@ -1037,7 +900,6 @@ class MavlinkTelemetryRepository(
                                     ?: state.value.currentWaypoint
                                     ?: 1
 
-                                Log.i("TelemetryRepo", "🔄 AUTO → LOITER detected at waypoint $resumeWaypoint (user-initiated, pause/resume enabled)")
 
                                 // Trigger the "Add Resume Here" popup in SharedViewModel
                                 sharedViewModel.onModeChangedToLoiterFromAuto(resumeWaypoint)
@@ -1049,10 +911,8 @@ class MavlinkTelemetryRepository(
                                 }
                             } else if (mode.equals("Loiter", ignoreCase = true) && !sharedViewModel.isPauseResumeEnabled()) {
                                 // User is in Manual mode - don't show resume popup
-                                Log.i("TelemetryRepo", "🔄 Mode change detected but SKIPPING resume popup (user in MANUAL mode)")
                             } else if (mode.equals("Loiter", ignoreCase = true)) {
                                 // Geofence triggered this LOITER - don't show resume popup
-                                Log.i("TelemetryRepo", "🔄 AUTO → LOITER detected but SKIPPING resume popup (geofence-triggered)")
                             } else {
                                 // Only mark as completed if NOT paused AND not already marked
                                 if (!isPaused && !state.value.missionCompleted) {
@@ -1061,7 +921,7 @@ class MavlinkTelemetryRepository(
                                     if ((lastElapsed ?: 0L) > 0L) {
                                         _state.update { it.copy(missionElapsedSec = null, missionCompleted = true, lastMissionElapsedSec = lastElapsed) }
 
-                                        // ✅ Send mission status ENDED to backend (crash-safe)
+                                        // âœ… Send mission status ENDED to backend (crash-safe)
                                         try {
                                             val wsManager = WebSocketManager.getInstance()
                                             wsManager.sendMissionStatus(WebSocketManager.MISSION_STATUS_ENDED)
@@ -1071,7 +931,7 @@ class MavlinkTelemetryRepository(
                                                 description = "Mission completed successfully"
                                             )
 
-                                            // 🔥 Send mission summary with all statistics
+                                            // ðŸ”¥ Send mission summary with all statistics
                                             val currentState = state.value
                                             val batteryEnd = currentState.batteryPercent ?: 0
                                             val totalDistance = currentState.totalDistanceMeters ?: 0f
@@ -1093,48 +953,36 @@ class MavlinkTelemetryRepository(
                                                 alertsCount = wsManager.missionAlertsCount,
                                                 status = "COMPLETED"
                                             )
-                                            Log.i("TelemetryRepo", "📊 Mission summary sent - Area: $totalArea ha, Spray: $totalSprayUsed L, Time: $flyingTimeMinutes min, Battery: ${wsManager.missionBatteryStart}%→$batteryEnd%, Alerts: ${wsManager.missionAlertsCount}")
                                         } catch (e: Exception) {
-                                            Log.e("TelemetryRepo", "Failed to send ENDED status/summary", e)
                                         }
 
-                                        // 🔥 Disconnect WebSocket when mission ends
+                                        // ðŸ”¥ Disconnect WebSocket when mission ends
                                         try {
-                                            Log.i("TelemetryRepo", "🔌 Closing WebSocket connection - mission ended")
                                             WebSocketManager.getInstance().disconnect()
                                         } catch (e: Exception) {
-                                            Log.e("TelemetryRepo", "Failed to disconnect WebSocket", e)
                                         }
 
-                                        Log.i("TelemetryRepo", "✅ Mission completed - elapsed: ${lastElapsed}s (mode: $lastMode -> $mode)")
                                     } else {
                                         // No meaningful mission - just reset state without triggering completion
                                         _state.update { it.copy(missionElapsedSec = null) }
-                                        Log.i("TelemetryRepo", "Mode changed from Auto to $mode but no mission was running")
                                     }
                                 } else if (isPaused) {
-                                    Log.i("TelemetryRepo", "Mission paused - keeping state frozen, NOT marking as completed")
                                 } else {
-                                    Log.d("TelemetryRepo", "Mission already marked completed, not re-marking")
                                 }
                             }
 
                             // ISSUE FIX #2: Disable spray when mode changes from Auto to any other mode
-                            Log.i("TelemetryRepo", "🚿 Mode changed from Auto to $mode - disabling spray")
                             sharedViewModel.disableSprayOnModeChange()
 
                             // Disable yaw hold when exiting Auto mode
-                            Log.i("TelemetryRepo", "🧭 Mode changed from Auto to $mode - disabling yaw hold")
                             sharedViewModel.disableYawHold()
                         } else if (lastArmed == true && !armed) {
                             // Drone disarmed - cancel timer and DON'T show mission complete popup for disarm
                             missionTimerJob?.cancel()
                             missionTimerJob = null
                             _state.update { it.copy(missionElapsedSec = null) }
-                            Log.i("TelemetryRepo", "Drone disarmed - timer stopped, no completion popup")
 
                             // Also disable spray when drone is disarmed for safety
-                            Log.i("TelemetryRepo", "🚿 Drone disarmed - disabling spray for safety")
                             sharedViewModel.disableSprayOnModeChange()
                         }
                         lastMode = mode
@@ -1175,22 +1023,10 @@ class MavlinkTelemetryRepository(
                     }
 
                     // Enhanced logging for RC battery verification
-                    Log.d("RCBattery", "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-                    Log.d("RCBattery", "✅ RADIO_STATUS Message Received")
-                    Log.d("RCBattery", "   remnoise field: ${radioStatus.remnoise.toInt()}")
-                    Log.d("RCBattery", "   RC Battery %: ${rcBattPct ?: "N/A"}")
-                    Log.d("RCBattery", "   rssi: ${radioStatus.rssi.toInt()}")
-                    Log.d("RCBattery", "   remrssi: ${radioStatus.remrssi.toInt()}")
-                    Log.d("RCBattery", "   State updated: rcBatteryPercent = ${rcBattPct ?: "N/A"}%")
 
-                    // ═══ RC BATTERY FAILSAFE ═══
+                    // â•â•â• RC BATTERY FAILSAFE â•â•â•
                     // Trigger RTL if RC battery is critically low (0% or below) and drone is armed
                     if (rcBattPct != null && rcBattPct <= 0 && state.value.armed && !rcBatteryFailsafeTriggered) {
-                        Log.e("RCBattery", "⚠️⚠️⚠️ RC BATTERY FAILSAFE TRIGGERED ⚠️⚠️⚠️")
-                        Log.e("RCBattery", "   RC Battery: $rcBattPct%")
-                        Log.e("RCBattery", "   Armed: ${state.value.armed}")
-                        Log.e("RCBattery", "   Current Mode: ${state.value.mode}")
-                        Log.e("RCBattery", "   INITIATING EMERGENCY RTL...")
 
                         // Mark failsafe as triggered to prevent multiple RTL commands
                         rcBatteryFailsafeTriggered = true
@@ -1200,37 +1036,32 @@ class MavlinkTelemetryRepository(
                             try {
                                 val rtlSuccess = changeMode(MavMode.RTL)
                                 if (rtlSuccess) {
-                                    Log.e("RCBattery", "✅ EMERGENCY RTL ACTIVATED - RC BATTERY CRITICAL")
                                     sharedViewModel.addNotification(
                                         Notification(
-                                            message = "⚠️ RC BATTERY CRITICAL (${rcBattPct}%) - RTL ACTIVATED",
+                                            message = "âš ï¸ RC BATTERY CRITICAL (${rcBattPct}%) - RTL ACTIVATED",
                                             type = NotificationType.ERROR
                                         )
                                     )
                                     // Announce via TTS
                                     sharedViewModel.announceRCBatteryFailsafe(rcBattPct)
                                 } else {
-                                    Log.e("RCBattery", "❌ FAILED TO ACTIVATE RTL - RC BATTERY FAILSAFE")
                                     sharedViewModel.addNotification(
                                         Notification(
-                                            message = "❌ RC BATTERY FAILSAFE: Failed to activate RTL",
+                                            message = "âŒ RC BATTERY FAILSAFE: Failed to activate RTL",
                                             type = NotificationType.ERROR
                                         )
                                     )
                                 }
                             } catch (e: Exception) {
-                                Log.e("RCBattery", "❌ Exception during RC battery failsafe RTL", e)
                             }
                         }
                     }
                     // Reset failsafe flag when battery recovers and drone is disarmed
                     else if (!state.value.armed && rcBatteryFailsafeTriggered) {
-                        Log.d("RCBattery", "✓ Drone disarmed - resetting RC battery failsafe flag")
                         rcBatteryFailsafeTriggered = false
                     }
 
                     _state.update { it.copy(rcBatteryPercent = rcBattPct) }
-                    Log.d("RCBattery", "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 
                     _state.update { it.copy(rcBatteryPercent = rcBattPct) }
                 }
@@ -1263,7 +1094,6 @@ class MavlinkTelemetryRepository(
                     val matchesId = it.systemId == fcuSystemId
                     // DEBUG: Log filter conditions
                     if (it.message is MissionCurrent) {
-                        Log.i("DEBUG_MISSION", "MISSION_CURRENT received - fcuDetected=$detected, systemId=${it.systemId}, fcuSystemId=$fcuSystemId, matches=$matchesId")
                     }
                     detected && matchesId
                 }
@@ -1276,22 +1106,18 @@ class MavlinkTelemetryRepository(
                     val currentMode = state.value.mode
 
                     // DEBUG LOG: Track mode and waypoint updates
-                    Log.i("DEBUG_MISSION", "MISSION_CURRENT: seq=$currentSeq, mode=$currentMode, modeCheck=${currentMode?.equals("Auto", ignoreCase = true)}")
 
                     // Update current waypoint in state
                     _state.update { it.copy(currentWaypoint = currentSeq) }
-                    Log.d("MavlinkRepo", "Mission progress: waypoint $currentSeq")
 
                     // Track last AUTO waypoint (Mission Planner protocol)
                     // Only update lastAutoWaypoint when in AUTO mode and waypoint is non-zero
                     if (currentMode?.equals("Auto", ignoreCase = true) == true && currentSeq != 0) {
                         _state.update { it.copy(lastAutoWaypoint = currentSeq) }
-                        Log.d("MavlinkRepo", "Updated lastAutoWaypoint to: $currentSeq (mode=$currentMode)")
                     }
 
                     // Update SharedViewModel
                     sharedViewModel.updateCurrentWaypoint(currentSeq)
-                    Log.d("MavlinkRepo", "Updated SharedViewModel currentWaypoint to: $currentSeq")
 
                     if (currentSeq != lastMissionSeq) {
                         lastMissionSeq = currentSeq
@@ -1318,22 +1144,18 @@ class MavlinkTelemetryRepository(
                     val currentMode = state.value.mode
 
                     // DEBUG LOG: Track waypoint reached
-                    Log.i("DEBUG_MISSION", "MISSION_ITEM_REACHED: seq=$reachedSeq, mode=$currentMode, modeCheck=${currentMode?.equals("Auto", ignoreCase = true)}")
 
                     // Update current waypoint in state (as fallback if MISSION_CURRENT not available)
                     _state.update { it.copy(currentWaypoint = reachedSeq) }
-                    Log.d("MavlinkRepo", "Mission item reached: waypoint $reachedSeq")
 
                     // Track last AUTO waypoint (Mission Planner protocol)
                     // Only update lastAutoWaypoint when in AUTO mode and waypoint is non-zero
                     if (currentMode?.equals("Auto", ignoreCase = true) == true && reachedSeq != 0) {
                         _state.update { it.copy(lastAutoWaypoint = reachedSeq) }
-                        Log.d("MavlinkRepo", "Updated lastAutoWaypoint to: $reachedSeq (mode=$currentMode) [from MISSION_ITEM_REACHED]")
                     }
 
                     // Update SharedViewModel
                     sharedViewModel.updateCurrentWaypoint(reachedSeq)
-                    Log.d("MavlinkRepo", "Updated SharedViewModel currentWaypoint to: $reachedSeq")
 
                     sharedViewModel.addNotification(
                         Notification(
@@ -1354,7 +1176,6 @@ class MavlinkTelemetryRepository(
                     // CRITICAL: Ignore ACKs during mission upload process
                     // The uploadMissionWithAck function handles its own ACKs internally
                     if (isMissionUploadInProgress) {
-                        Log.d("MissionUpload", "Global listener: Ignoring ACK during upload (handled by upload function)")
                         return@collect
                     }
 
@@ -1384,12 +1205,6 @@ class MavlinkTelemetryRepository(
                 .map { it.message }
                 .filterIsInstance<MagCalProgress>()
                 .collect { progress ->
-                    Log.d("CompassCalVM", "📨 MAG_CAL_PROGRESS received:")
-                    Log.d("CompassCalVM", "   └─ Compass ID: ${progress.compassId}")
-                    Log.d("CompassCalVM", "   └─ Status: ${progress.calStatus.entry?.name ?: "UNKNOWN"}")
-                    Log.d("CompassCalVM", "   └─ Completion: ${progress.completionPct}%")
-                    Log.d("CompassCalVM", "   └─ Attempt: ${progress.attempt}")
-                    Log.d("CompassCalVM", "   └─ Direction: X=${progress.directionX}, Y=${progress.directionY}, Z=${progress.directionZ}")
                     _magCalProgress.emit(progress)
                 }
         }
@@ -1401,12 +1216,6 @@ class MavlinkTelemetryRepository(
                 .map { it.message }
                 .filterIsInstance<MagCalReport>()
                 .collect { report ->
-                    Log.d("CompassCalVM", "📊 MAG_CAL_REPORT received:")
-                    Log.d("CompassCalVM", "   └─ Compass ID: ${report.compassId}")
-                    Log.d("CompassCalVM", "   └─ Status: ${report.calStatus.entry?.name ?: "UNKNOWN"}")
-                    Log.d("CompassCalVM", "   └─ Fitness: ${report.fitness}")
-                    Log.d("CompassCalVM", "   └─ Offsets: X=${report.ofsX}, Y=${report.ofsY}, Z=${report.ofsZ}")
-                    Log.d("CompassCalVM", "   └─ Autosaved: ${report.autosaved}")
                     _magCalReport.emit(report)
                 }
         }
@@ -1418,13 +1227,11 @@ class MavlinkTelemetryRepository(
                 .map { it.message }
                 .filterIsInstance<RcChannels>()
                 .collect { rcChannelsData ->
-                    Log.d("RCCalVM", "📻 RC_CHANNELS received: ch1=${rcChannelsData.chan1Raw} ch2=${rcChannelsData.chan2Raw} ch3=${rcChannelsData.chan3Raw} ch4=${rcChannelsData.chan4Raw}")
 
                     // Monitor RC7 for spray system status
                     val rc7Value = rcChannelsData.chan7Raw.toInt()
                     val sprayEnabled = rc7Value > 1500 // PWM > 1500 = spray ON
 
-                    Log.d("Spray Telemetry", "🎮 RC7 channel: $rc7Value PWM, Spray ${if (sprayEnabled) "ENABLED" else "DISABLED"}")
 
                     // Check if spray status changed
                     val previousSprayEnabled = state.value.sprayTelemetry.sprayEnabled
@@ -1436,7 +1243,6 @@ class MavlinkTelemetryRepository(
                         sharedViewModel.addNotification(Notification(notificationMessage, notificationType))
                         sharedViewModel.showSprayStatusPopup(notificationMessage)
 
-                        Log.i("Spray Telemetry", "🚨 Spray status changed: $notificationMessage")
                     }
 
                     _state.update { state ->
@@ -1460,19 +1266,13 @@ class MavlinkTelemetryRepository(
                 .filterIsInstance<ParamValue>()
                 .collect { paramValue ->
                     val paramName = paramValue.paramId.toString().trim()
-                    Log.d("ParamVM", "📝 PARAM_VALUE received: $paramName = ${paramValue.paramValue}")
 
                     // Handle spray telemetry parameters
                     when (paramName) {
                         "BATT2_MONITOR" -> {
                             val monitorType = paramValue.paramValue.toInt()
-                            Log.i("Spray Telemetry", "📊 BATT2_MONITOR parameter read: $monitorType")
 
                             if (monitorType != 11) {
-                                Log.e("Spray Telemetry", "⚠️⚠️⚠️ CONFIGURATION ERROR ⚠️⚠️⚠️")
-                                Log.e("Spray Telemetry", "BATT2_MONITOR = $monitorType")
-                                Log.e("Spray Telemetry", "Expected: 11 (Fuel Flow sensor)")
-                                Log.e("Spray Telemetry", "Flow sensor will NOT work with current setting!")
 
                                 sharedViewModel.addNotification(
                                     Notification(
@@ -1481,7 +1281,6 @@ class MavlinkTelemetryRepository(
                                     )
                                 )
                             } else {
-                                Log.i("Spray Telemetry", "✅ BATT2_MONITOR correctly set to 11 (Fuel Flow)")
                             }
 
                             _state.update { state ->
@@ -1495,10 +1294,8 @@ class MavlinkTelemetryRepository(
 
                         "BATT2_CAPACITY" -> {
                             val capacityMah = paramValue.paramValue.toInt()
-                            Log.i("Spray Telemetry", "📊 BATT2_CAPACITY parameter read: $capacityMah mAh (${capacityMah/1000f} L)")
 
                             if (capacityMah == 0) {
-                                Log.e("Spray Telemetry", "⚠️ BATT2_CAPACITY is 0 - tank capacity not configured!")
                                 sharedViewModel.addNotification(
                                     Notification(
                                         "Flow sensor capacity not set! Configure BATT2_CAPACITY parameter",
@@ -1518,11 +1315,8 @@ class MavlinkTelemetryRepository(
 
                         "BATT2_AMP_PERVLT" -> {
                             val ampPerVolt = paramValue.paramValue
-                            Log.i("Spray Telemetry", "📊 BATT2_AMP_PERVLT parameter read: $ampPerVolt")
 
                             if (ampPerVolt == 0f) {
-                                Log.e("Spray Telemetry", "⚠️ BATT2_AMP_PERVLT is 0 - flow sensor NOT calibrated!")
-                                Log.e("Spray Telemetry", "This is why you're getting 0 flow rate even when spray is enabled!")
 
                                 sharedViewModel.addNotification(
                                     Notification(
@@ -1531,7 +1325,6 @@ class MavlinkTelemetryRepository(
                                     )
                                 )
                             } else {
-                                Log.i("Spray Telemetry", "✅ BATT2_AMP_PERVLT calibrated: $ampPerVolt")
                             }
 
                             _state.update { state ->
@@ -1545,10 +1338,8 @@ class MavlinkTelemetryRepository(
 
                         "BATT2_CURR_PIN" -> {
                             val currPin = paramValue.paramValue.toInt()
-                            Log.i("Spray Telemetry", "📊 BATT2_CURR_PIN parameter read: $currPin")
 
                             if (currPin == -1 || currPin == 0) {
-                                Log.e("Spray Telemetry", "⚠️ BATT2_CURR_PIN not configured ($currPin) - sensor not connected!")
                                 sharedViewModel.addNotification(
                                     Notification(
                                         "Flow sensor pin not configured! Set BATT2_CURR_PIN parameter",
@@ -1556,7 +1347,6 @@ class MavlinkTelemetryRepository(
                                     )
                                 )
                             } else {
-                                Log.i("Spray Telemetry", "✅ BATT2_CURR_PIN configured: pin $currPin")
                             }
 
                             _state.update { state ->
@@ -1570,10 +1360,8 @@ class MavlinkTelemetryRepository(
 
                         "BATT3_CAPACITY" -> {
                             val capacityMah = paramValue.paramValue.toInt()
-                            Log.i("Spray Telemetry", "📊 BATT3_CAPACITY parameter read: $capacityMah mAh (${capacityMah/1000f} L)")
 
                             if (capacityMah == 0) {
-                                Log.w("Spray Telemetry", "⚠️ BATT3_CAPACITY is 0 - level sensor capacity not configured")
                             }
 
                             _state.update { state ->
@@ -1587,18 +1375,14 @@ class MavlinkTelemetryRepository(
 
                         "BATT3_VOLT_PIN" -> {
                             val voltPin = paramValue.paramValue.toInt()
-                            Log.i("Spray Telemetry", "📊 BATT3_VOLT_PIN parameter read: $voltPin")
 
                             if (voltPin == -1 || voltPin == 0) {
-                                Log.w("Spray Telemetry", "⚠️ BATT3_VOLT_PIN not configured ($voltPin)")
                             } else {
-                                Log.i("Spray Telemetry", "✅ BATT3_VOLT_PIN configured: pin $voltPin")
                             }
                         }
 
                         "BATT3_VOLT_MULT" -> {
                             val voltMult = paramValue.paramValue
-                            Log.i("Spray Telemetry", "📊 BATT3_VOLT_MULT parameter read: $voltMult")
 
                             // Store the multiplier
                             _state.update { state ->
@@ -1611,11 +1395,6 @@ class MavlinkTelemetryRepository(
 
                             // Warn if multiplier is high (typical for battery monitoring, not level sensors)
                             if (voltMult > 2.0f) {
-                                Log.w("Spray Telemetry", "⚠️⚠️⚠️ HIGH VOLTAGE MULTIPLIER DETECTED ⚠️⚠️⚠️")
-                                Log.w("Spray Telemetry", "   BATT3_VOLT_MULT = $voltMult")
-                                Log.w("Spray Telemetry", "   This is typical for BATTERY monitoring with voltage divider")
-                                Log.w("Spray Telemetry", "   For a LEVEL SENSOR, consider setting BATT3_VOLT_MULT = 1.0")
-                                Log.w("Spray Telemetry", "   Current readings are being multiplied by ${voltMult}x!")
 
                                 sharedViewModel.addNotification(
                                     Notification(
@@ -1624,7 +1403,6 @@ class MavlinkTelemetryRepository(
                                     )
                                 )
                             } else {
-                                Log.i("Spray Telemetry", "✅ BATT3_VOLT_MULT looks reasonable for level sensor: $voltMult")
                             }
                         }
                     }
@@ -1672,17 +1450,8 @@ class MavlinkTelemetryRepository(
                         val fwType = fwVersion and 0xFFu
                         val formattedFirmware = "$major.$minor.$patch (type: $fwType)"
 
-                        Log.i("DroneID", "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-                        Log.i("DroneID", "✅ AUTOPILOT_VERSION received:")
-                        Log.i("DroneID", "  Primary UID: $primaryUid")
                         if (secondaryUid != null) {
-                            Log.i("DroneID", "  Secondary UID: $secondaryUid")
                         }
-                        Log.i("DroneID", "  Vendor ID: ${autopilotVersion.vendorId}")
-                        Log.i("DroneID", "  Product ID: ${autopilotVersion.productId}")
-                        Log.i("DroneID", "  Firmware: $formattedFirmware")
-                        Log.i("DroneID", "  Board Version: ${autopilotVersion.boardVersion}")
-                        Log.i("DroneID", "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 
                         _state.update { state ->
                             state.copy(
@@ -1702,7 +1471,6 @@ class MavlinkTelemetryRepository(
                         }
 
                     } catch (e: Exception) {
-                        Log.e("DroneID", "Error processing AUTOPILOT_VERSION", e)
                     }
                 }
         }
@@ -1765,9 +1533,7 @@ class MavlinkTelemetryRepository(
                 gcsSystemId,
                 gcsComponentId, commandLong
             )
-            Log.d("MavlinkRepo", "Sent COMMAND_LONG: cmd=${command} p1=$param1 p2=$param2 p3=$param3 p4=$param4 p5=$param5 p6=$param6 p7=$param7")
         } catch (e: Exception) {
-            Log.e("MavlinkRepo", "Failed to send command", e)
         }
     }
 
@@ -1793,9 +1559,7 @@ class MavlinkTelemetryRepository(
                 gcsSystemId,
                 gcsComponentId, commandLong
             )
-            Log.d("MavlinkRepo", "Sent COMMAND_LONG (raw): cmdId=$commandId p1=$param1 p2=$param2 p3=$param3 p4=$param4 p5=$param5 p6=$param6 p7=$param7")
         } catch (e: Exception) {
-            Log.e("MavlinkRepo", "Failed to send raw command", e)
         }
     }
 
@@ -1824,9 +1588,7 @@ class MavlinkTelemetryRepository(
                 gcsComponentId,
                 commandAck
             )
-            Log.d("MavlinkRepo", "Sent COMMAND_ACK: cmd=$commandId result=${result.name} progress=$progress")
         } catch (e: Exception) {
-            Log.e("MavlinkRepo", "Failed to send COMMAND_ACK", e)
         }
     }
 
@@ -1870,9 +1632,7 @@ class MavlinkTelemetryRepository(
                 gcsComponentId,
                 rcOverride
             )
-            Log.d("MavlinkRepo", "Sent RC_CHANNELS_OVERRIDE: ch$channel = $pwmValue PWM")
         } catch (e: Exception) {
-            Log.e("MavlinkRepo", "Failed to send RC_CHANNELS_OVERRIDE", e)
         }
     }
 
@@ -1894,7 +1654,6 @@ class MavlinkTelemetryRepository(
             param1 = servoNumber.toFloat(),
             param2 = pwmValue.toFloat()
         )
-        Log.i("MavlinkRepo", "Sent DO_SET_SERVO: servo=$servoNumber PWM=$pwmValue")
     }
 
     /**
@@ -1902,13 +1661,11 @@ class MavlinkTelemetryRepository(
      * Returns true if pre-arm checks pass, false otherwise
      */
     suspend fun sendPrearmChecks(): Boolean {
-        Log.i("MavlinkRepo", "[Pre-arm] Sending RUN_PREARM_CHECKS command...")
         try {
             sendCommand(
                 MavCmd.RUN_PREARM_CHECKS,
                 0f  // param1: not used
             )
-            Log.i("MavlinkRepo", "[Pre-arm] Command sent, waiting for status messages...")
             
             // Wait a bit for pre-arm status messages to arrive via STATUSTEXT
             // These will be automatically displayed via the existing STATUSTEXT handler
@@ -1916,10 +1673,8 @@ class MavlinkTelemetryRepository(
             
             // Check if vehicle became armable after pre-arm checks
             val armable = state.value.armable
-            Log.i("MavlinkRepo", "[Pre-arm] Vehicle armable status: $armable")
             return armable
         } catch (e: Exception) {
-            Log.e("MavlinkRepo", "[Pre-arm] Failed to send pre-arm checks", e)
             return false
         }
     }
@@ -1931,7 +1686,6 @@ class MavlinkTelemetryRepository(
      */
     suspend fun arm(forceArm: Boolean = false): Boolean {
         if (!state.value.armable && !forceArm) {
-            Log.w("MavlinkRepo", "[Arm] Vehicle not armable, skipping arm command")
             sharedViewModel.addNotification(
                 Notification("Vehicle not armable. Check pre-arm status.", NotificationType.ERROR)
             )
@@ -1946,7 +1700,6 @@ class MavlinkTelemetryRepository(
                 val param2 = if (forceArm || attempt == maxAttempts) ArmMagicValues.FORCE_ARM else 0f
                 val armType = if (param2 == ArmMagicValues.FORCE_ARM) "FORCE-ARM" else "ARM"
                 
-                Log.i("MavlinkRepo", "[Arm] Attempt $attempt/$maxAttempts - Sending $armType command...")
                 sendCommand(
                     MavCmd.COMPONENT_ARM_DISARM,
                     1f,      // param1: 1 = arm
@@ -1958,27 +1711,22 @@ class MavlinkTelemetryRepository(
                 
                 // Check if vehicle is now armed
                 if (state.value.armed) {
-                    Log.i("MavlinkRepo", "[Arm] ✅ Vehicle armed successfully on attempt $attempt")
                     sharedViewModel.addNotification(
                         Notification("Vehicle armed successfully", NotificationType.SUCCESS)
                     )
                     return true
                 } else {
-                    Log.w("MavlinkRepo", "[Arm] ⚠️ Attempt $attempt failed - vehicle not armed")
                     if (attempt < maxAttempts) {
-                        Log.i("MavlinkRepo", "[Arm] Retrying in ${retryDelays[attempt-1]}ms...")
                         delay(retryDelays[attempt-1])
                     }
                 }
             } catch (e: Exception) {
-                Log.e("MavlinkRepo", "[Arm] Exception on attempt $attempt", e)
                 if (attempt < maxAttempts) {
                     delay(retryDelays[attempt-1])
                 }
             }
         }
         
-        Log.e("MavlinkRepo", "[Arm] ❌ Failed to arm vehicle after $maxAttempts attempts")
         sharedViewModel.addNotification(
             Notification("Failed to arm vehicle. Check STATUSTEXT messages for details.", NotificationType.ERROR)
         )
@@ -1990,7 +1738,6 @@ class MavlinkTelemetryRepository(
             MavCmd.COMPONENT_ARM_DISARM,
             0f  // 0 = disarm
         )
-        Log.i("MavlinkRepo", "Disarm command sent")
     }
 
     /**
@@ -2018,12 +1765,10 @@ class MavlinkTelemetryRepository(
         }
         while (System.currentTimeMillis() - start < timeoutMs) {
             if (state.value.mode?.contains(expectedMode, ignoreCase = true) == true) {
-                Log.i("MavlinkRepo", "Mode changed to ${state.value.mode}")
                 return true
             }
             delay(200)
         }
-        Log.e("MavlinkRepo", "Mode change to ${customMode} not confirmed in Heartbeat")
         return false
     }
 
@@ -2038,18 +1783,15 @@ class MavlinkTelemetryRepository(
 
         try {
             if (!state.value.fcuDetected) {
-                Log.e("MissionUpload", "❌ FCU not detected")
                 throw IllegalStateException("FCU not detected")
             }
             if (missionItems.isEmpty()) {
-                Log.w("MissionUpload", "⚠️ No items to upload")
                 return false
             }
 
             // Validate sequence numbering
             val sequences = missionItems.map { it.seq.toInt() }.sorted()
             if (sequences != (0 until missionItems.size).toList()) {
-                Log.e("MissionUpload", "❌ Invalid sequence - Expected: 0-${missionItems.size-1}, Got: $sequences")
                 throw IllegalStateException("Invalid mission sequence")
             }
 
@@ -2059,28 +1801,19 @@ class MavlinkTelemetryRepository(
                     val lat = item.x / 1e7
                     val lon = item.y / 1e7
                     if (lat !in -90.0..90.0 || lon !in -180.0..180.0) {
-                        Log.e("MissionUpload", "❌ Invalid coords at seq=$idx: lat=$lat, lon=$lon")
                         throw IllegalArgumentException("Invalid coordinates at waypoint $idx")
                     }
                     if (item.z < 0f || item.z > 10000f) {
-                        Log.e("MissionUpload", "❌ Invalid altitude at seq=$idx: ${item.z}m")
                         throw IllegalArgumentException("Invalid altitude at waypoint $idx")
                     }
                 }
             }
 
-            Log.i("MissionUpload", "═══════════════════════════════════════")
-            Log.i("MissionUpload", "Starting upload: ${missionItems.size} items")
-            Log.i("MissionUpload", "FCU: sys=$fcuSystemId comp=$fcuComponentId")
-            Log.i("MissionUpload", "GCS: sys=$gcsSystemId comp=$gcsComponentId")
-            Log.i("MissionUpload", "═══════════════════════════════════════")
 
             // Phase 1: Clear existing mission
-            Log.i("MissionUpload", "Phase 1/2: Clearing existing mission...")
 
             var clearSuccess = false
             for (attempt in 1..2) {
-                Log.d("MissionUpload", "MISSION_CLEAR_ALL attempt $attempt/2")
 
                 // Use CompletableDeferred to avoid race condition
                 val clearAckDeferred = CompletableDeferred<Boolean>()
@@ -2091,7 +1824,6 @@ class MavlinkTelemetryRepository(
                         .map { it.message }
                         .filterIsInstance<MissionAck>()
                         .collect { ack ->
-                            Log.d("MissionUpload", "Clear phase ACK received: ${ack.type.entry?.name ?: ack.type.value}")
                             if (ack.type.value == MavMissionResult.MAV_MISSION_ACCEPTED.value) {
                                 if (!clearAckDeferred.isCompleted) {
                                     clearAckDeferred.complete(true)
@@ -2118,24 +1850,19 @@ class MavlinkTelemetryRepository(
 
                 if (ackReceived) {
                     clearSuccess = true
-                    Log.i("MissionUpload", "✅ Mission cleared on attempt $attempt")
                     break
                 } else if (attempt < 2) {
-                    Log.w("MissionUpload", "⚠️ Clear timeout, retrying...")
                     delay(500L)
                 }
             }
 
             if (!clearSuccess) {
-                Log.e("MissionUpload", "❌ Failed to clear mission after 2 attempts")
                 return false
             }
 
             delay(500L)
-            Log.d("MissionUpload", "Clear complete, proceeding to upload...")
 
             // Phase 2: Upload mission items
-            Log.i("MissionUpload", "Phase 2/2: Uploading ${missionItems.size} items...")
 
             val missionCount = MissionCount(
                 targetSystem = fcuSystemId,
@@ -2145,7 +1872,6 @@ class MavlinkTelemetryRepository(
             )
 
             connection.trySendUnsignedV2(gcsSystemId, gcsComponentId, missionCount)
-            Log.i("MissionUpload", "Sent MISSION_COUNT=${missionItems.size}, awaiting MISSION_REQUEST...")
 
             val finalAckDeferred = CompletableDeferred<Pair<Boolean, String>>()
             val sentSeqs = mutableSetOf<Int>()
@@ -2157,7 +1883,6 @@ class MavlinkTelemetryRepository(
                 delay(3000L)
                 if (!firstRequestReceived && !finalAckDeferred.isCompleted) {
                     connection.trySendUnsignedV2(gcsSystemId, gcsComponentId, missionCount)
-                    Log.w("MissionUpload", "⚠️ Resent MISSION_COUNT (no response after 3s)")
                 }
             }
 
@@ -2168,7 +1893,6 @@ class MavlinkTelemetryRepository(
                     if (firstRequestReceived) {
                         val timeSinceLastRequest = System.currentTimeMillis() - lastRequestTime
                         if (timeSinceLastRequest > 10000L) {
-                            Log.e("MissionUpload", "❌ Upload stalled - no FCU response for 10s (${sentSeqs.size}/${missionItems.size} sent)")
                             finalAckDeferred.complete(false to "Upload stalled - no FCU response")
                             break
                         }
@@ -2188,7 +1912,6 @@ class MavlinkTelemetryRepository(
                     when (val msg = frame.message) {
                         is MissionRequestInt, is MissionRequest -> {
                             if (!firstRequestReceived) {
-                                Log.i("MissionUpload", "✅ First MISSION_REQUEST received - upload starting")
                             }
                             firstRequestReceived = true
                             lastRequestTime = System.currentTimeMillis()
@@ -2196,7 +1919,6 @@ class MavlinkTelemetryRepository(
                             val seq = if (msg is MissionRequestInt) msg.seq.toInt() else (msg as MissionRequest).seq.toInt()
 
                             if (seq !in 0 until missionItems.size) {
-                                Log.e("MissionUpload", "❌ Invalid seq requested: $seq (valid: 0-${missionItems.size-1})")
                                 finalAckDeferred.complete(false to "Invalid sequence $seq")
                                 return@collect
                             }
@@ -2216,48 +1938,37 @@ class MavlinkTelemetryRepository(
                             // Log progress: first, last, and every 10 items for verification
                             if (seq == 0 || seq == missionItems.size - 1 || seq % 10 == 0) {
                                 val cmdName = item.command.entry?.name ?: "CMD_${item.command.value}"
-                                Log.i("MissionUpload", "→ Sent seq=$seq: $cmdName (${sentSeqs.size}/${missionItems.size})")
                             }
                         }
 
                         is MissionAck -> {
                             if (!firstRequestReceived) {
-                                Log.d("MissionUpload", "Ignoring ACK from clear phase")
                                 return@collect
                             }
 
                             val ackType = msg.type.entry?.name ?: msg.type.value.toString()
-                            Log.i("MissionUpload", "MISSION_ACK received: $ackType (${sentSeqs.size}/${missionItems.size} sent)")
 
                             when (msg.type.value) {
                                 MavMissionResult.MAV_MISSION_ACCEPTED.value -> {
                                     // Verify all items sent before accepting
                                     if (sentSeqs.size == missionItems.size) {
-                                        Log.i("MissionUpload", "✅ All items confirmed, accepting upload")
                                         finalAckDeferred.complete(true to "")
                                     } else {
-                                        Log.w("MissionUpload", "⚠️ Premature ACCEPTED ACK (${sentSeqs.size}/${missionItems.size}), waiting for more items...")
                                     }
                                 }
                                 MavMissionResult.MAV_MISSION_INVALID_SEQUENCE.value -> {
-                                    Log.e("MissionUpload", "❌ INVALID_SEQUENCE error")
-                                    Log.e("MissionUpload", "   Sent sequences: ${sentSeqs.sorted()}")
                                     finalAckDeferred.complete(false to "Invalid sequence error")
                                 }
                                 MavMissionResult.MAV_MISSION_DENIED.value -> {
-                                    Log.e("MissionUpload", "❌ DENIED by FCU")
                                     finalAckDeferred.complete(false to "Mission denied")
                                 }
                                 MavMissionResult.MAV_MISSION_ERROR.value -> {
-                                    Log.e("MissionUpload", "❌ ERROR from FCU")
                                     finalAckDeferred.complete(false to "Mission error")
                                 }
                                 MavMissionResult.MAV_MISSION_UNSUPPORTED_FRAME.value -> {
-                                    Log.e("MissionUpload", "❌ UNSUPPORTED_FRAME")
                                     finalAckDeferred.complete(false to "Unsupported frame type")
                                 }
                                 MavMissionResult.MAV_MISSION_NO_SPACE.value -> {
-                                    Log.e("MissionUpload", "❌ NO_SPACE on FCU")
                                     finalAckDeferred.complete(false to "Not enough space")
                                 }
                                 in listOf(
@@ -2269,15 +1980,12 @@ class MavlinkTelemetryRepository(
                                     MavMissionResult.MAV_MISSION_INVALID_PARAM6_Y.value,
                                     MavMissionResult.MAV_MISSION_INVALID_PARAM7.value
                                 ) -> {
-                                    Log.e("MissionUpload", "❌ INVALID_PARAM (error: ${msg.type.value})")
                                     finalAckDeferred.complete(false to "Invalid parameter")
                                 }
                                 MavMissionResult.MAV_MISSION_OPERATION_CANCELLED.value -> {
-                                    Log.w("MissionUpload", "⚠️ CANCELLED by FCU")
                                     finalAckDeferred.complete(false to "Upload cancelled")
                                 }
                                 else -> {
-                                    Log.w("MissionUpload", "⚠️ Unknown ACK type: ${msg.type.value}")
                                     finalAckDeferred.complete(false to "Unknown error")
                                 }
                             }
@@ -2294,11 +2002,6 @@ class MavlinkTelemetryRepository(
             }
 
             if (!firstRequestReceived && !finalAckDeferred.isCompleted) {
-                Log.e("MissionUpload", "❌ No MISSION_REQUEST from FCU after 10s")
-                Log.e("MissionUpload", "   This usually means:")
-                Log.e("MissionUpload", "   1. Invalid mission structure (check seq 0 is HOME)")
-                Log.e("MissionUpload", "   2. FCU rejected the MISSION_COUNT")
-                Log.e("MissionUpload", "   3. Communication issue with FCU")
                 finalAckDeferred.complete(false to "No response from FCU")
             }
 
@@ -2312,33 +2015,20 @@ class MavlinkTelemetryRepository(
             watchdogJob.cancel()
 
             if (success) {
-                Log.i("MissionUpload", "═══════════════════════════════════════")
-                Log.i("MissionUpload", "✅ SUCCESS - Mission uploaded!")
-                Log.i("MissionUpload", "Total items: ${missionItems.size}")
-                Log.i("MissionUpload", "All sequences confirmed: ${sentSeqs.sorted()}")
-                Log.i("MissionUpload", "═══════════════════════════════════════")
             } else {
-                Log.e("MissionUpload", "═══════════════════════════════════════")
-                Log.e("MissionUpload", "❌ FAILED - $errorMsg")
-                Log.e("MissionUpload", "Items sent: ${sentSeqs.size}/${missionItems.size}")
-                Log.e("MissionUpload", "Sequences sent: ${sentSeqs.sorted()}")
-                Log.e("MissionUpload", "═══════════════════════════════════════")
             }
 
             return success
         } catch (e: Exception) {
-            Log.e("MissionUpload", "❌ Upload exception: ${e.message}", e)
             return false
         } finally {
             // Always reset flag when upload completes (success or failure)
             isMissionUploadInProgress = false
-            Log.d("MissionUpload", "Upload process complete - re-enabling global ACK listener")
         }
     }
 
     suspend fun requestMissionAndLog(timeoutMs: Long = 5000) {
         if (!state.value.fcuDetected) {
-            Log.w("MavlinkRepo", "FCU not detected; cannot request mission")
             return
         }
         try {
@@ -2350,23 +2040,19 @@ class MavlinkTelemetryRepository(
                 connection.mavFrame.collect { frame ->
                     when (val msg = frame.message) {
                         is MissionCount -> {
-                            Log.i("MavlinkRepo", "Readback: MISSION_COUNT=${msg.count} from sys=${frame.systemId}")
                             expectedCountDeferred.complete(msg.count.toInt())
                         }
                         is MissionItemInt -> {
                             val lat = msg.x / 1e7
                             val lon = msg.y / 1e7
-                            Log.i("MavlinkRepo", "Readback: MISSION_ITEM_INT seq=${msg.seq} lat=$lat lon=$lon alt=${msg.z}")
                             received.add(msg.seq.toInt() to "INT: lat=$lat lon=$lon alt=${msg.z}")
                             perSeqMap[msg.seq.toInt()]?.let { d -> if (!d.isCompleted) d.complete(Unit) }
                         }
                         is MissionItem -> {
-                            Log.i("MavlinkRepo", "Readback: MISSION_ITEM seq=${msg.seq} x=${msg.x} y=${msg.y} z=${msg.z}")
                             received.add(msg.seq.toInt() to "FLT: x=${msg.x} y=${msg.y} z=${msg.z}")
                             perSeqMap[msg.seq.toInt()]?.let { d -> if (!d.isCompleted) d.complete(Unit) }
                         }
                         is MissionAck -> {
-                            Log.i("MavlinkRepo", "Readback: MISSION_ACK type=${msg.type}")
                         }
                         else -> {}
                     }
@@ -2376,18 +2062,14 @@ class MavlinkTelemetryRepository(
             try {
                 val req = MissionRequestList(targetSystem = fcuSystemId, targetComponent = fcuComponentId)
                 connection.trySendUnsignedV2(gcsSystemId, gcsComponentId, req)
-                Log.i("MavlinkRepo", "Sent MISSION_REQUEST_LIST to FCU")
             } catch (e: Exception) {
-                Log.e("MavlinkRepo", "Failed to send MISSION_REQUEST_LIST", e)
             }
 
             val expectedCount = withTimeoutOrNull(timeoutMs) { expectedCountDeferred.await() } ?: run {
-                Log.w("MavlinkRepo", "Did not receive MISSION_COUNT from FCU within timeout")
                 job.cancel()
                 return
             }
 
-            Log.i("MavlinkRepo", "Expecting $expectedCount mission items - requesting each item")
 
             for (seq in 0 until expectedCount) {
                 val seqDeferred = CompletableDeferred<Unit>()
@@ -2395,9 +2077,7 @@ class MavlinkTelemetryRepository(
                 try {
                     val reqItem = MissionRequestInt(targetSystem = fcuSystemId, targetComponent = fcuComponentId, seq = seq.toUShort())
                     connection.trySendUnsignedV2(gcsSystemId, gcsComponentId, reqItem)
-                    Log.d("MavlinkRepo", "Sent MISSION_REQUEST_INT for seq=$seq")
                 } catch (e: Exception) {
-                    Log.e("MavlinkRepo", "Failed to send MISSION_REQUEST_INT seq=$seq", e)
                 }
 
                 val got = withTimeoutOrNull(1500L) {
@@ -2406,7 +2086,6 @@ class MavlinkTelemetryRepository(
                 } ?: false
 
                 if (!got) {
-                    Log.w("MavlinkRepo", "Did not receive item for seq=$seq within timeout")
                 }
 
                 perSeqMap.remove(seq)
@@ -2415,10 +2094,7 @@ class MavlinkTelemetryRepository(
             delay(200)
             job.cancel()
 
-            Log.i("MavlinkRepo", "Mission readback complete: expected=$expectedCount items=${received.size}")
-            received.sortedBy { it.first }.forEach { (seq, desc) -> Log.i("MavlinkRepo", "Item #$seq -> $desc") }
         } catch (e: Exception) {
-            Log.e("MavlinkRepo", "Error during mission readback", e)
         }
     }
 
@@ -2428,7 +2104,6 @@ class MavlinkTelemetryRepository(
      */
     suspend fun getAllWaypoints(timeoutMs: Long = 10000): List<MissionItemInt>? {
         if (!state.value.fcuDetected) {
-            Log.w("ResumeMission", "FCU not detected; cannot retrieve mission")
             return null
         }
         
@@ -2441,16 +2116,13 @@ class MavlinkTelemetryRepository(
                 connection.mavFrame.collect { frame ->
                     when (val msg = frame.message) {
                         is MissionCount -> {
-                            Log.i("ResumeMission", "Received MISSION_COUNT=${msg.count} from FC")
                             expectedCountDeferred.complete(msg.count.toInt())
                         }
                         is MissionItemInt -> {
-                            Log.d("ResumeMission", "Received MISSION_ITEM_INT seq=${msg.seq} cmd=${msg.command.value}")
                             receivedItems.add(msg)
                             perSeqMap[msg.seq.toInt()]?.let { d -> if (!d.isCompleted) d.complete(Unit) }
                         }
                         is MissionAck -> {
-                            Log.d("ResumeMission", "Received MISSION_ACK type=${msg.type}")
                         }
                         else -> {}
                     }
@@ -2460,20 +2132,16 @@ class MavlinkTelemetryRepository(
             try {
                 val req = MissionRequestList(targetSystem = fcuSystemId, targetComponent = fcuComponentId)
                 connection.trySendUnsignedV2(gcsSystemId, gcsComponentId, req)
-                Log.i("ResumeMission", "Sent MISSION_REQUEST_LIST to FCU")
             } catch (e: Exception) {
-                Log.e("ResumeMission", "Failed to send MISSION_REQUEST_LIST", e)
                 job.cancel()
                 return null
             }
 
             val expectedCount = withTimeoutOrNull(timeoutMs) { expectedCountDeferred.await() } ?: run {
-                Log.w("ResumeMission", "Did not receive MISSION_COUNT from FCU within timeout")
                 job.cancel()
                 return null
             }
 
-            Log.i("ResumeMission", "Expecting $expectedCount mission items - requesting each item")
 
             for (seq in 0 until expectedCount) {
                 val seqDeferred = CompletableDeferred<Unit>()
@@ -2482,9 +2150,7 @@ class MavlinkTelemetryRepository(
                 try {
                     val reqItem = MissionRequestInt(targetSystem = fcuSystemId, targetComponent = fcuComponentId, seq = seq.toUShort())
                     connection.trySendUnsignedV2(gcsSystemId, gcsComponentId, reqItem)
-                    Log.d("ResumeMission", "Sent MISSION_REQUEST_INT for seq=$seq")
                 } catch (e: Exception) {
-                    Log.e("ResumeMission", "Failed to send MISSION_REQUEST_INT seq=$seq", e)
                 }
 
                 val got = withTimeoutOrNull(2000L) { // 2s timeout per item (allows for FC processing + network latency)
@@ -2493,7 +2159,6 @@ class MavlinkTelemetryRepository(
                 } ?: false
 
                 if (!got) {
-                    Log.w("ResumeMission", "Did not receive item for seq=$seq within timeout")
                 }
 
                 perSeqMap.remove(seq)
@@ -2506,16 +2171,13 @@ class MavlinkTelemetryRepository(
             // Sort items by sequence number
             val sortedItems = receivedItems.sortedBy { it.seq.toInt() }
             
-            Log.i("ResumeMission", "Mission retrieval complete: expected=$expectedCount received=${sortedItems.size}")
             
             if (sortedItems.size != expectedCount) {
-                Log.w("ResumeMission", "⚠️ Received ${sortedItems.size} items but expected $expectedCount")
             }
             
             return sortedItems
             
         } catch (e: Exception) {
-            Log.e("ResumeMission", "Error during mission retrieval", e)
             return null
         }
     }
@@ -2526,7 +2188,6 @@ class MavlinkTelemetryRepository(
      */
     suspend fun getMissionCount(timeoutMs: Long = 5000): Int? {
         if (!state.value.fcuDetected) {
-            Log.w("ResumeMission", "FCU not detected; cannot get mission count")
             return null
         }
         
@@ -2537,7 +2198,6 @@ class MavlinkTelemetryRepository(
                 connection.mavFrame.collect { frame ->
                     when (val msg = frame.message) {
                         is MissionCount -> {
-                            Log.d("ResumeMission", "Received MISSION_COUNT=${msg.count}")
                             expectedCountDeferred.complete(msg.count.toInt())
                         }
                         else -> {}
@@ -2548,9 +2208,7 @@ class MavlinkTelemetryRepository(
             try {
                 val req = MissionRequestList(targetSystem = fcuSystemId, targetComponent = fcuComponentId)
                 connection.trySendUnsignedV2(gcsSystemId, gcsComponentId, req)
-                Log.d("ResumeMission", "Sent MISSION_REQUEST_LIST to get count")
             } catch (e: Exception) {
-                Log.e("ResumeMission", "Failed to send MISSION_REQUEST_LIST", e)
                 job.cancel()
                 return null
             }
@@ -2561,7 +2219,6 @@ class MavlinkTelemetryRepository(
             return count
             
         } catch (e: Exception) {
-            Log.e("ResumeMission", "Error getting mission count", e)
             return null
         }
     }
@@ -2574,9 +2231,7 @@ class MavlinkTelemetryRepository(
      * 3. Set mode to AUTO
      */
     suspend fun startMission(): Boolean {
-        Log.i("MavlinkRepo", "[Mission Start] Initiating mission start workflow...")
         if (!state.value.fcuDetected) {
-            Log.w("MavlinkRepo", "[Mission Start] Cannot start mission - FCU not detected")
             sharedViewModel.addNotification(
                 Notification("Cannot start mission - FCU not detected", NotificationType.ERROR)
             )
@@ -2585,42 +2240,34 @@ class MavlinkTelemetryRepository(
 
         // Step 0: Run pre-arm checks
         try {
-            Log.i("MavlinkRepo", "[Mission Start] Running pre-arm checks...")
             sharedViewModel.addNotification(
                 Notification("Running pre-arm checks...", NotificationType.INFO)
             )
             val prearmOk = sendPrearmChecks()
             if (!prearmOk) {
-                Log.w("MavlinkRepo", "[Mission Start] Pre-arm checks failed")
                 sharedViewModel.addNotification(
                     Notification("Pre-arm checks failed. Check STATUSTEXT messages.", NotificationType.ERROR)
                 )
                 // Continue anyway - the arm() function will handle retries
             } else {
-                Log.i("MavlinkRepo", "[Mission Start] Pre-arm checks passed")
                 sharedViewModel.addNotification(
                     Notification("Pre-arm checks passed", NotificationType.SUCCESS)
                 )
             }
         } catch (e: Exception) {
-            Log.e("MavlinkRepo", "[Mission Start] Failed to run pre-arm checks", e)
             // Continue anyway - the arm() function will handle retries
         }
 
         // Step 1: Arm the vehicle with retry logic
         try {
-            Log.i("MavlinkRepo", "[Mission Start] Arming vehicle...")
             val armed = arm(forceArm = false)
             if (!armed) {
-                Log.e("MavlinkRepo", "[Mission Start] Failed to arm vehicle")
                 sharedViewModel.addNotification(
                     Notification("Failed to arm vehicle. Check pre-arm status.", NotificationType.ERROR)
                 )
                 return false
             }
-            Log.i("MavlinkRepo", "[Mission Start] Vehicle armed successfully")
         } catch (e: Exception) {
-            Log.e("MavlinkRepo", "[Mission Start] Exception while arming vehicle", e)
             sharedViewModel.addNotification(
                 Notification("Exception while arming: ${e.message}", NotificationType.ERROR)
             )
@@ -2629,34 +2276,26 @@ class MavlinkTelemetryRepository(
 
         // Step 2: Send MISSION_START as CommandLong
         try {
-            Log.i("MavlinkRepo", "[Mission Start] Sending MISSION_START command...")
             sendMissionStartCommand()
-            Log.i("MavlinkRepo", "[Mission Start] MISSION_START command sent")
             delay(500)
         } catch (e: Exception) {
-            Log.e("MavlinkRepo", "[Mission Start] Failed to send MISSION_START command", e)
             return false
         }
 
         // Step 3: Set mode to AUTO
         try {
-            Log.i("MavlinkRepo", "[Mission Start] Setting mode to AUTO...")
             val modeChanged = changeMode(MavMode.AUTO)
-            Log.i("MavlinkRepo", "[Mission Start] Set mode to AUTO, result=$modeChanged")
             delay(500)
             if (!modeChanged) {
-                Log.e("MavlinkRepo", "[Mission Start] Failed to switch to AUTO mode")
                 sharedViewModel.addNotification(
                     Notification("Failed to switch to AUTO mode. Check if mission has NAV_TAKEOFF.", NotificationType.ERROR)
                 )
                 return false
             }
         } catch (e: Exception) {
-            Log.e("MavlinkRepo", "[Mission Start] Failed to set AUTO mode", e)
             return false
         }
 
-        Log.i("MavlinkRepo", "[Mission Start] Mission start workflow complete. Vehicle should be in AUTO mode.")
         sharedViewModel.addNotification(
             Notification("Mission started successfully", NotificationType.SUCCESS)
         )
@@ -2687,11 +2326,9 @@ class MavlinkTelemetryRepository(
         try {
             // Mark this as an intentional disconnect to prevent auto-reconnect
             intentionalDisconnect = true
-            Log.i("MavlinkRepo", "User-initiated disconnect - auto-reconnect disabled")
             // Attempt to close the TCP connection gracefully
             connection.close()
         } catch (e: Exception) {
-            Log.e("MavlinkRepo", "Error closing TCP connection", e)
         }
     }
 
@@ -2739,9 +2376,7 @@ class MavlinkTelemetryRepository(
                 gcsComponentId,
                 command
             )
-            Log.d("MavlinkRepo", "Sent COMMAND_LONG (custom): $command")
         } catch (e: Exception) {
-            Log.e("MavlinkRepo", "Failed to send custom COMMAND_LONG", e)
         }
     }
 
@@ -2765,13 +2400,11 @@ class MavlinkTelemetryRepository(
                 param7 = 0f
             )
 
-            Log.i("MavlinkRepo", "Setting current waypoint to: $seq")
             connection.trySendUnsignedV2(gcsSystemId, gcsComponentId, cmd)
             delay(500)
 
             true
         } catch (e: Exception) {
-            Log.e("MavlinkRepo", "Failed to set current waypoint", e)
             false
         }
     }
@@ -2822,13 +2455,6 @@ class MavlinkTelemetryRepository(
         // Log final validation status
         if (parametersReceived) {
             if (configurationValid) {
-                Log.i("Spray Telemetry", "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-                Log.i("Spray Telemetry", "✅ SPRAY CONFIGURATION VALID")
-                Log.i("Spray Telemetry", "   Monitor Type: ${spray.batt2MonitorType} (Fuel Flow)")
-                Log.i("Spray Telemetry", "   Capacity: ${spray.batt2CapacityMah} mAh")
-                Log.i("Spray Telemetry", "   Calibration: ${spray.batt2AmpPerVolt}")
-                Log.i("Spray Telemetry", "   Pin: ${spray.batt2CurrPin}")
-                Log.i("Spray Telemetry", "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 
                 sharedViewModel.addNotification(
                     Notification(
@@ -2837,10 +2463,6 @@ class MavlinkTelemetryRepository(
                     )
                 )
             } else {
-                Log.e("Spray Telemetry", "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-                Log.e("Spray Telemetry", "❌ SPRAY CONFIGURATION INVALID")
-                Log.e("Spray Telemetry", "   Error: $configurationError")
-                Log.e("Spray Telemetry", "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
             }
         }
     }
@@ -2852,13 +2474,9 @@ class MavlinkTelemetryRepository(
      */
     private suspend fun requestSprayCapacityParameters() {
         if (!state.value.fcuDetected) {
-            Log.w("Spray Telemetry", "Cannot request parameters - FCU not detected")
             return
         }
 
-        Log.i("Spray Telemetry", "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-        Log.i("Spray Telemetry", "📤 Requesting spray system parameters from FCU...")
-        Log.i("Spray Telemetry", "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 
         try {
             val parametersToRequest = listOf(
@@ -2879,7 +2497,6 @@ class MavlinkTelemetryRepository(
                     paramIndex = -1
                 )
                 connection.trySendUnsignedV2(gcsSystemId, gcsComponentId, request)
-                Log.d("Spray Telemetry", "📤 Sent PARAM_REQUEST_READ for $paramId")
 
                 // Small delay between requests to avoid overwhelming FCU
                 if (index < parametersToRequest.size - 1) {
@@ -2887,9 +2504,7 @@ class MavlinkTelemetryRepository(
                 }
             }
 
-            Log.i("Spray Telemetry", "✅ All parameter requests sent - waiting for PARAM_VALUE responses")
         } catch (e: Exception) {
-            Log.e("Spray Telemetry", "❌ Failed to request spray capacity parameters", e)
         }
     }
 
@@ -2923,20 +2538,11 @@ class MavlinkTelemetryRepository(
     ): List<MissionItemInt> {
         val filtered = mutableListOf<MissionItemInt>()
 
-        Log.i("ResumeMission", "═══ Filtering Mission for Resume (Mid-Flight) ═══")
-        Log.i("ResumeMission", "Original mission: ${allWaypoints.size} waypoints")
-        Log.i("ResumeMission", "Resume from waypoint: $resumeWaypointSeq")
-        Log.i("ResumeMission", "Resume location: lat=$resumeLatitude, lon=$resumeLongitude, alt=$resumeAltitude")
-        Log.i("ResumeMission", "Structure: HOME (seq 0) + Resume Location WP (seq 1) + Remaining waypoints")
-        Log.i("ResumeMission", "NOTE: NO TAKEOFF - drone is already flying")
 
         // Log original mission for debugging
-        Log.i("ResumeMission", "--- Original Mission Items ---")
         allWaypoints.forEach { wp ->
             val cmdName = wp.command.entry?.name ?: "CMD_${wp.command.value}"
-            Log.i("ResumeMission", "  seq=${wp.seq}: $cmdName frame=${wp.frame.value} alt=${wp.z}")
         }
-        Log.i("ResumeMission", "------------------------------")
 
         // Find the target waypoint to get its altitude if resumeAltitude is not provided
         val targetWaypoint = allWaypoints.find { it.seq.toInt() == resumeWaypointSeq }
@@ -2949,7 +2555,6 @@ class MavlinkTelemetryRepository(
             // Always keep HOME (waypoint 0)
             if (seq == 0) {
                 val cmdName = waypoint.command.entry?.name ?: "CMD_$cmdId"
-                Log.i("ResumeMission", "✅ Keeping HOME (seq=$seq, cmd=$cmdName, frame=${waypoint.frame.value})")
                 filtered.add(waypoint)
 
                 // Insert resume location waypoint right after HOME if we have valid coordinates
@@ -2970,7 +2575,6 @@ class MavlinkTelemetryRepository(
                         y = (resumeLongitude * 1E7).toInt(),
                         z = effectiveAltitude
                     )
-                    Log.i("ResumeMission", "✅ INSERTING Resume Location WP: lat=$resumeLatitude, lon=$resumeLongitude, alt=$effectiveAltitude")
                     filtered.add(resumeWp)
                 }
                 continue
@@ -2980,23 +2584,17 @@ class MavlinkTelemetryRepository(
             // Drone is already flying, we don't need takeoff or any previous waypoints
             if (seq < resumeWaypointSeq) {
                 val cmdName = waypoint.command.entry?.name ?: "CMD_$cmdId"
-                Log.d("ResumeMission", "⏭️ Skipping pre-resume waypoint (seq=$seq, cmd=$cmdName)")
                 continue
             }
 
             // Keep ALL waypoints from resume point onward
             val cmdName = waypoint.command.entry?.name ?: "CMD_$cmdId"
-            Log.d("ResumeMission", "✅ Keeping waypoint (seq=$seq, cmd=$cmdName)")
             filtered.add(waypoint)
         }
 
-        Log.i("ResumeMission", "Filtered: ${allWaypoints.size} → ${filtered.size} waypoints")
         if (resumeLatitude != null && resumeLongitude != null) {
-            Log.i("ResumeMission", "Structure: HOME + Resume Location WP + ${filtered.size - 2} remaining waypoints")
         } else {
-            Log.i("ResumeMission", "Structure: HOME + ${filtered.size - 1} waypoints starting from target waypoint")
         }
-        Log.i("ResumeMission", "═══════════════════════════════════════════════════════")
 
         return filtered
     }
@@ -3011,11 +2609,9 @@ class MavlinkTelemetryRepository(
      */
     suspend fun resequenceWaypoints(waypoints: List<MissionItemInt>): List<MissionItemInt> {
         if (waypoints.isEmpty()) {
-            Log.w("ResumeMission", "No waypoints to resequence")
             return emptyList()
         }
 
-        Log.i("ResumeMission", "═══ Re-sequencing ${waypoints.size} waypoints ═══")
         
         val resequenced = waypoints.mapIndexed { index, waypoint ->
             // Set current=1 only for HOME (seq 0), all others current=0
@@ -3031,7 +2627,6 @@ class MavlinkTelemetryRepository(
                 val cmdName = it.command.entry?.name ?: "CMD_${it.command.value}"
                 val lat = it.x / 1e7
                 val lon = it.y / 1e7
-                Log.i("ResumeMission", "Resequenced: old_seq=${waypoint.seq} → new_seq=$index, cmd=$cmdName, frame=${it.frame.value}, alt=${it.z}m, lat=$lat, lon=$lon, current=$newCurrent")
             }
         }
         
@@ -3039,18 +2634,13 @@ class MavlinkTelemetryRepository(
         val sequences = resequenced.map { it.seq.toInt() }
         val expected = (0 until resequenced.size).toList()
         if (sequences != expected) {
-            Log.e("ResumeMission", "❌ Resequencing FAILED! Expected: $expected, Got: $sequences")
         } else {
-            Log.i("ResumeMission", "✅ Resequencing successful: ${resequenced.size} waypoints (0..${resequenced.size-1})")
         }
         
         // Log final mission structure
-        Log.i("ResumeMission", "═══ Final Resume Mission Structure ═══")
         resequenced.forEachIndexed { idx, wp ->
             val cmdName = wp.command.entry?.name ?: "CMD_${wp.command.value}"
-            Log.i("ResumeMission", "  [$idx] $cmdName frame=${wp.frame.value} target=${wp.targetSystem}:${wp.targetComponent}")
         }
-        Log.i("ResumeMission", "═════════════════════════════════════")
 
         return resequenced
     }

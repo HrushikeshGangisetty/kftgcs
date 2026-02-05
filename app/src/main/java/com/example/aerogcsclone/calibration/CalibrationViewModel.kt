@@ -1,6 +1,5 @@
 package com.example.aerogcsclone.calibration
 
-import android.util.Log
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.divpundir.mavlink.definitions.common.MavCmd
@@ -115,8 +114,6 @@ class CalibrationViewModel(private val sharedViewModel: SharedViewModel) : ViewM
             startMessageListeners()
 
             try {
-                Log.d("CalibrationVM", "Sending MAV_CMD_PREFLIGHT_CALIBRATION (param5=1)")
-
                 // Send PREFLIGHT_CALIBRATION command with param5=1 for accelerometer
                 sharedViewModel.sendCalibrationCommand(
                     command = MavCmd.PREFLIGHT_CALIBRATION,
@@ -129,8 +126,6 @@ class CalibrationViewModel(private val sharedViewModel: SharedViewModel) : ViewM
                     param7 = 0f  // Airspeed
                 )
 
-                Log.d("CalibrationVM", "✓ Calibration command sent, waiting for FC response...")
-
                 _uiState.update {
                     it.copy(
                         statusText = "Waiting for flight controller response...",
@@ -139,7 +134,6 @@ class CalibrationViewModel(private val sharedViewModel: SharedViewModel) : ViewM
                 }
 
             } catch (e: Exception) {
-                Log.e("CalibrationVM", "Failed to start calibration", e)
                 _uiState.update {
                     it.copy(
                         calibrationState = CalibrationState.Failed("Error: ${e.message}"),
@@ -159,7 +153,6 @@ class CalibrationViewModel(private val sharedViewModel: SharedViewModel) : ViewM
     private fun onPositionReady() {
         val position = currentPosition
         if (position == null) {
-            Log.w("CalibrationVM", "onPositionReady called but no current position set")
             return
         }
 
@@ -173,8 +166,6 @@ class CalibrationViewModel(private val sharedViewModel: SharedViewModel) : ViewM
             }
 
             try {
-                Log.d("CalibrationVM", "User confirmed ${position.name}, sending MAV_CMD_ACCELCAL_VEHICLE_POS with param1=${position.paramValue}")
-
                 // Send ACCELCAL_VEHICLE_POS command with param1 = position value
                 sharedViewModel.sendCalibrationCommandRaw(
                     commandId = MAV_CMD_ACCELCAL_VEHICLE_POS,
@@ -188,7 +179,6 @@ class CalibrationViewModel(private val sharedViewModel: SharedViewModel) : ViewM
                 )
 
                 count++
-                Log.d("CalibrationVM", "✓ Position command sent (count=$count/6), waiting for next instruction...")
 
                 _uiState.update {
                     it.copy(
@@ -199,7 +189,6 @@ class CalibrationViewModel(private val sharedViewModel: SharedViewModel) : ViewM
                 }
 
             } catch (e: Exception) {
-                Log.e("CalibrationVM", "Error processing position", e)
                 _uiState.update {
                     it.copy(
                         calibrationState = CalibrationState.Failed("Error: ${e.message}"),
@@ -217,13 +206,10 @@ class CalibrationViewModel(private val sharedViewModel: SharedViewModel) : ViewM
      * Start listening to STATUSTEXT and COMMAND_LONG messages
      */
     private fun startMessageListeners() {
-        Log.d("CalibrationVM", "Starting message listeners for calibration")
-
         // Listen to STATUSTEXT messages
         statusTextCollectorJob = viewModelScope.launch {
             sharedViewModel.calibrationStatus.collect { statusText ->
                 statusText?.let { text ->
-                    Log.d("CalibrationVM", "STATUSTEXT: $text")
                     handleStatusText(text)
                 }
             }
@@ -232,15 +218,12 @@ class CalibrationViewModel(private val sharedViewModel: SharedViewModel) : ViewM
         // Listen to COMMAND_LONG messages (for ACCELCAL_VEHICLE_POS)
         commandLongCollectorJob = viewModelScope.launch {
             sharedViewModel.commandLong.collect { cmdLong ->
-                Log.d("CalibrationVM", "COMMAND_LONG received: cmd=${cmdLong.command.value} param1=${cmdLong.param1}")
-
                 // Check if this is ACCELCAL_VEHICLE_POS command
                 if (cmdLong.command.value == MAV_CMD_ACCELCAL_VEHICLE_POS) {
                     val posValue = cmdLong.param1.toInt()
                     val position = AccelCalibrationPosition.fromParamValue(posValue)
 
                     if (position != null) {
-                        Log.d("CalibrationVM", "FC requests position: ${position.name}")
                         currentPosition = position
 
                         // Announce the IMU position via TTS
@@ -277,7 +260,6 @@ class CalibrationViewModel(private val sharedViewModel: SharedViewModel) : ViewM
         // Check for completion messages
         when {
             lower.contains("calibration successful") || lower.contains("calibration complete") -> {
-                Log.d("CalibrationVM", "✓ Calibration successful!")
                 // Announce calibration success via TTS
                 sharedViewModel.announceCalibrationFinished(isSuccess = true)
 
@@ -299,7 +281,6 @@ class CalibrationViewModel(private val sharedViewModel: SharedViewModel) : ViewM
             }
 
             lower.contains("calibration failed") -> {
-                Log.e("CalibrationVM", "Calibration failed")
                 // Announce calibration failure via TTS
                 sharedViewModel.announceCalibrationFinished(isSuccess = false)
 
@@ -319,7 +300,6 @@ class CalibrationViewModel(private val sharedViewModel: SharedViewModel) : ViewM
             // Try to parse position from STATUSTEXT (fallback if FC doesn't send COMMAND_LONG)
             else -> {
                 AccelCalibrationPosition.fromStatusText(text)?.let { position ->
-                    Log.d("CalibrationVM", "Parsed position from STATUSTEXT: ${position.name}")
                     currentPosition = position
 
                     // Announce the IMU position via TTS
@@ -349,7 +329,6 @@ class CalibrationViewModel(private val sharedViewModel: SharedViewModel) : ViewM
         statusTextCollectorJob = null
         commandLongCollectorJob?.cancel()
         commandLongCollectorJob = null
-        Log.d("CalibrationVM", "Stopped message listeners")
     }
 
     /**
@@ -407,7 +386,6 @@ class CalibrationViewModel(private val sharedViewModel: SharedViewModel) : ViewM
      */
     fun initiateReboot() {
         viewModelScope.launch {
-            Log.d("CalibrationVM", "User initiated reboot after calibration")
             sharedViewModel.rebootAutopilot()
             // Keep the dialog open so user knows reboot was sent
             // They can dismiss it manually after seeing the drone reboot

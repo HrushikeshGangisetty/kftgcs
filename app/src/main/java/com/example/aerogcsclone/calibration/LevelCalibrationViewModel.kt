@@ -1,6 +1,5 @@
 package com.example.aerogcsclone.calibration
 
-import android.util.Log
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.divpundir.mavlink.definitions.common.MavCmd
@@ -86,12 +85,10 @@ class LevelCalibrationViewModel(private val sharedViewModel: SharedViewModel) : 
             try {
                 // STEP 1: Send PREFLIGHT_CALIBRATION command with retry logic
                 var ackReceived = false
-                var lastAckResult: UInt? = null
                 var attempt = 0
 
                 while (attempt < MAX_RETRIES && !ackReceived) {
                     attempt++
-                    Log.d("LevelCalVM", "Sending MAV_CMD_PREFLIGHT_CALIBRATION (param5=2) - Attempt $attempt/$MAX_RETRIES")
 
                     // Send PREFLIGHT_CALIBRATION command with param5=2 for level horizon
                     sharedViewModel.sendCalibrationCommand(
@@ -106,28 +103,19 @@ class LevelCalibrationViewModel(private val sharedViewModel: SharedViewModel) : 
                     )
 
                     // STEP 2: Wait for COMMAND_ACK (as per MissionPlanner protocol)
-                    Log.d("LevelCalVM", "Waiting for COMMAND_ACK (timeout: ${ACK_TIMEOUT_MS}ms)...")
-
                     val ack = sharedViewModel.awaitCommandAck(241u, ACK_TIMEOUT_MS) // 241 = PREFLIGHT_CALIBRATION
 
                     if (ack != null) {
-                        lastAckResult = ack.result.value
-                        val resultName = ack.result.entry?.name ?: "UNKNOWN"
-                        Log.d("LevelCalVM", "Received COMMAND_ACK: $resultName (${ack.result.value})")
-
                         when (ack.result.value) {
                             0u -> { // MAV_RESULT_ACCEPTED
-                                Log.d("LevelCalVM", "✓ Command ACCEPTED by autopilot")
                                 ackReceived = true
                             }
                             1u -> { // MAV_RESULT_TEMPORARILY_REJECTED
-                                Log.w("LevelCalVM", "⚠ Command TEMPORARILY_REJECTED, retrying...")
                                 if (attempt < MAX_RETRIES) {
                                     delay(500) // Short delay before retry
                                 }
                             }
                             2u -> { // MAV_RESULT_DENIED
-                                Log.e("LevelCalVM", "✗ Command DENIED by autopilot")
                                 stopCalibration()
                                 _uiState.update {
                                     it.copy(
@@ -139,7 +127,6 @@ class LevelCalibrationViewModel(private val sharedViewModel: SharedViewModel) : 
                                 return@launch
                             }
                             3u -> { // MAV_RESULT_UNSUPPORTED
-                                Log.e("LevelCalVM", "✗ Command UNSUPPORTED by autopilot")
                                 stopCalibration()
                                 _uiState.update {
                                     it.copy(
@@ -151,15 +138,10 @@ class LevelCalibrationViewModel(private val sharedViewModel: SharedViewModel) : 
                                 return@launch
                             }
                             4u -> { // MAV_RESULT_IN_PROGRESS
-                                Log.d("LevelCalVM", "Command IN_PROGRESS")
                                 ackReceived = true
-                            }
-                            else -> {
-                                Log.w("LevelCalVM", "Unexpected ACK result: $resultName (${ack.result.value})")
                             }
                         }
                     } else {
-                        Log.w("LevelCalVM", "⏱ ACK timeout on attempt $attempt/$MAX_RETRIES")
                         if (attempt < MAX_RETRIES) {
                             delay(500) // Short delay before retry
                         }
@@ -168,7 +150,6 @@ class LevelCalibrationViewModel(private val sharedViewModel: SharedViewModel) : 
 
                 // Check if we got ACK after retries
                 if (!ackReceived) {
-                    Log.e("LevelCalVM", "✗ Failed to receive ACK after $MAX_RETRIES attempts")
                     stopCalibration()
                     _uiState.update {
                         it.copy(
@@ -181,8 +162,6 @@ class LevelCalibrationViewModel(private val sharedViewModel: SharedViewModel) : 
                 }
 
                 // STEP 3: ACK received successfully, now monitor STATUSTEXT for completion
-                Log.d("LevelCalVM", "Command accepted, monitoring STATUSTEXT for completion...")
-
                 _uiState.update {
                     it.copy(
                         calibrationState = LevelCalibrationState.InProgress,
@@ -197,7 +176,6 @@ class LevelCalibrationViewModel(private val sharedViewModel: SharedViewModel) : 
                 launch {
                     delay(STATUSTEXT_TIMEOUT_MS)
                     if (_inCalibration && _uiState.value.calibrationState is LevelCalibrationState.InProgress) {
-                        Log.w("LevelCalVM", "⏱ STATUSTEXT timeout - no completion message received")
                         stopCalibration()
                         _uiState.update {
                             it.copy(
@@ -210,7 +188,6 @@ class LevelCalibrationViewModel(private val sharedViewModel: SharedViewModel) : 
                 }
 
             } catch (e: Exception) {
-                Log.e("LevelCalVM", "Failed to send level calibration command", e)
                 stopCalibration()
                 _uiState.update {
                     it.copy(
@@ -228,7 +205,6 @@ class LevelCalibrationViewModel(private val sharedViewModel: SharedViewModel) : 
      */
     fun cancelCalibration() {
         viewModelScope.launch {
-            Log.d("LevelCalVM", "User cancelled calibration")
             stopCalibration()
             _uiState.update {
                 it.copy(
@@ -274,7 +250,6 @@ class LevelCalibrationViewModel(private val sharedViewModel: SharedViewModel) : 
                     if (!_inCalibration) return@collect
 
                     val text = statusText.lowercase()
-                    Log.d("LevelCalVM", "STATUSTEXT: $text")
 
                     _uiState.update { it.copy(statusText = statusText) }
 
@@ -283,7 +258,6 @@ class LevelCalibrationViewModel(private val sharedViewModel: SharedViewModel) : 
                         text.contains("calibration successful") ||
                         text.contains("level complete") ||
                         text.contains("calibration: success") -> {
-                            Log.d("LevelCalVM", "✓ Level calibration completed successfully")
                             stopCalibration()
                             _uiState.update {
                                 it.copy(
@@ -299,7 +273,6 @@ class LevelCalibrationViewModel(private val sharedViewModel: SharedViewModel) : 
                         text.contains("calibration failed") ||
                         text.contains("calibration: fail") ||
                         text.contains("failed") && text.contains("level") -> {
-                            Log.e("LevelCalVM", "✗ Level calibration failed: $text")
                             stopCalibration()
                             _uiState.update {
                                 it.copy(

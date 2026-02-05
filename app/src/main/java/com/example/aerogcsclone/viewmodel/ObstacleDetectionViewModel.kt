@@ -73,10 +73,6 @@ class ObstacleDetectionViewModel(
                     _resumeOptions.value = it
                 }
             }
-
-            android.util.Log.i("ObstacleDetectionVM", "✅ Obstacle detection system initialized")
-        } else {
-            android.util.Log.e("ObstacleDetectionVM", "❌ Failed to initialize obstacle detection system")
         }
     }
 
@@ -91,7 +87,6 @@ class ObstacleDetectionViewModel(
         speed: Float = 12f
     ) {
         if (!isInitialized) {
-            android.util.Log.e("ObstacleDetectionVM", "System not initialized")
             return
         }
 
@@ -125,12 +120,7 @@ class ObstacleDetectionViewModel(
         if (!isInitialized) return
 
         viewModelScope.launch {
-            val success = detectionManager?.resumeMissionFromWaypoint(selectedOption) ?: false
-            if (success) {
-                android.util.Log.i("ObstacleDetectionVM", "✅ Mission resume initiated")
-            } else {
-                android.util.Log.e("ObstacleDetectionVM", "❌ Mission resume failed")
-            }
+            detectionManager?.resumeMissionFromWaypoint(selectedOption)
         }
     }
 

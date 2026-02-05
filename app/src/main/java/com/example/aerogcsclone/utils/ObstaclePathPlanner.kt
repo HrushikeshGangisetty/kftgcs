@@ -1,6 +1,5 @@
 package com.example.aerogcsclone.utils
 
-import android.util.Log
 import com.google.android.gms.maps.model.LatLng
 import kotlin.math.*
 
@@ -39,10 +38,7 @@ object ObstaclePathPlanner {
         waypoints: List<LatLng>,
         obstacles: List<ObstacleZone>
     ): List<LatLng> {
-        Log.d(TAG, "Processing ${waypoints.size} waypoints against ${obstacles.size} obstacles")
-
         if (waypoints.isEmpty() || obstacles.isEmpty()) {
-            Log.d(TAG, "No waypoints or obstacles to process")
             return waypoints
         }
 
@@ -58,14 +54,10 @@ object ObstaclePathPlanner {
 
                 // Find avoidance path for this segment if it crosses any obstacle
                 val avoidancePoints = findAvoidancePathForSegment(currentPoint, nextPoint, obstacles)
-                if (avoidancePoints.isNotEmpty()) {
-                    Log.d(TAG, "Segment $i->$i+1: Added ${avoidancePoints.size} avoidance points")
-                }
                 processedWaypoints.addAll(avoidancePoints)
             }
         }
 
-        Log.d(TAG, "Result: ${processedWaypoints.size} waypoints (was ${waypoints.size})")
         return processedWaypoints
     }
 
@@ -81,17 +73,14 @@ object ObstaclePathPlanner {
 
         for (obstacle in obstacles) {
             if (obstacle.points.size < 3) {
-                Log.w(TAG, "Obstacle ${obstacle.name} has < 3 points, skipping")
                 continue
             }
 
             val intersects = lineIntersectsPolygon(start, end, obstacle.points)
-            Log.d(TAG, "Checking segment against ${obstacle.name}: intersects=$intersects")
 
             if (intersects) {
                 // Find the best route around this obstacle
                 val routeAroundObstacle = findRouteAroundObstacle(start, end, obstacle.points)
-                Log.d(TAG, "Route around ${obstacle.name}: ${routeAroundObstacle.size} points")
                 avoidancePoints.addAll(routeAroundObstacle)
             }
         }
@@ -105,13 +94,9 @@ object ObstaclePathPlanner {
     fun lineIntersectsPolygon(start: LatLng, end: LatLng, polygon: List<LatLng>): Boolean {
         if (polygon.size < 3) return false
 
-        Log.d(TAG, "Checking line (${start.latitude},${start.longitude}) -> (${end.latitude},${end.longitude})")
-        Log.d(TAG, "Against polygon with ${polygon.size} vertices")
-
         // Check if start or end point is inside the polygon
         val startInside = isPointInsidePolygon(start, polygon)
         val endInside = isPointInsidePolygon(end, polygon)
-        Log.d(TAG, "Start inside: $startInside, End inside: $endInside")
 
         if (startInside || endInside) {
             return true
@@ -124,12 +109,10 @@ object ObstaclePathPlanner {
 
             val intersects = lineSegmentsIntersect(start, end, p1, p2)
             if (intersects) {
-                Log.d(TAG, "Line intersects edge $i: (${p1.latitude},${p1.longitude}) -> (${p2.latitude},${p2.longitude})")
                 return true
             }
         }
 
-        Log.d(TAG, "No intersection found")
         return false
     }
 
@@ -212,8 +195,6 @@ object ObstaclePathPlanner {
     ): List<LatLng> {
         if (obstaclePolygon.size < 3) return emptyList()
 
-        Log.d(TAG, "Finding route around obstacle with ${obstaclePolygon.size} vertices")
-
         // Expand the obstacle polygon with buffer
         val expandedPolygon = expandPolygon(obstaclePolygon, OBSTACLE_BUFFER_METERS)
 
@@ -221,13 +202,10 @@ object ObstaclePathPlanner {
         val entryIndex = findClosestVertexOnSide(start, expandedPolygon, start, end)
         val exitIndex = findClosestVertexOnSide(end, expandedPolygon, start, end)
 
-        Log.d(TAG, "Entry vertex index: $entryIndex, Exit vertex index: $exitIndex")
-
         if (entryIndex == -1 || exitIndex == -1) {
             // Fallback: use closest vertices
             val fallbackEntry = findBestEntryVertex(start, expandedPolygon)
             val fallbackExit = findBestExitVertex(end, expandedPolygon)
-            Log.d(TAG, "Using fallback vertices: entry=$fallbackEntry, exit=$fallbackExit")
             return generatePathBetweenIndices(expandedPolygon, fallbackEntry, fallbackExit)
         }
 
@@ -239,11 +217,7 @@ object ObstaclePathPlanner {
         val clockwiseTotal = calculatePathDistance(listOf(start) + clockwisePath + listOf(end))
         val counterClockwiseTotal = calculatePathDistance(listOf(start) + counterClockwisePath + listOf(end))
 
-        Log.d(TAG, "Clockwise path: ${clockwisePath.size} points, distance: $clockwiseTotal")
-        Log.d(TAG, "Counter-clockwise path: ${counterClockwisePath.size} points, distance: $counterClockwiseTotal")
-
         val chosenPath = if (clockwiseTotal <= counterClockwiseTotal) clockwisePath else counterClockwisePath
-        Log.d(TAG, "Chosen path has ${chosenPath.size} waypoints")
 
         return chosenPath
     }

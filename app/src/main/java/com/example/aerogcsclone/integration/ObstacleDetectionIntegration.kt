@@ -1,7 +1,6 @@
 package com.example.aerogcsclone.integration
 
 import android.content.Context
-import android.util.Log
 import com.divpundir.mavlink.definitions.common.MissionItemInt
 import com.divpundir.mavlink.definitions.common.MavFrame
 import com.divpundir.mavlink.definitions.common.MavCmd
@@ -21,7 +20,6 @@ class ObstacleDetectionIntegrationExample(
     private val context: Context,
     private val sharedViewModel: SharedViewModel
 ) {
-    private val tag = "ObstacleIntegration"
 
     private lateinit var obstacleViewModel: ObstacleDetectionViewModel
     private lateinit var missionStateRepository: MissionStateRepository
@@ -31,8 +29,6 @@ class ObstacleDetectionIntegrationExample(
      * Call this when your app starts or when connecting to drone
      */
     fun initializeObstacleDetection(viewModel: ObstacleDetectionViewModel) {
-        Log.i(tag, "═══ Initializing Obstacle Detection System ═══")
-
         // Store the ViewModel instance
         obstacleViewModel = viewModel
 
@@ -61,8 +57,6 @@ class ObstacleDetectionIntegrationExample(
             missionStateRepository = missionStateRepository,
             config = config
         )
-
-        Log.i(tag, "✅ Obstacle detection initialized successfully")
     }
 
     /**
@@ -74,8 +68,6 @@ class ObstacleDetectionIntegrationExample(
         homeLocation: LatLng,
         surveyPolygon: List<LatLng> = emptyList()
     ) {
-        Log.i(tag, "═══ Starting Obstacle Monitoring ═══")
-
         // Extract mission parameters from waypoints
         val altitude = extractAltitudeFromWaypoints(missionWaypoints)
         val speed = 12f // Default speed, can be extracted from mission
@@ -88,10 +80,6 @@ class ObstacleDetectionIntegrationExample(
             altitude = altitude,
             speed = speed
         )
-
-        Log.i(tag, "✅ Monitoring ${missionWaypoints.size} waypoints")
-        Log.i(tag, "   Home: ${homeLocation.latitude}, ${homeLocation.longitude}")
-        Log.i(tag, "   Altitude: ${altitude}m, Speed: ${speed}m/s")
     }
 
     /**
@@ -110,9 +98,9 @@ class ObstacleDetectionIntegrationExample(
                 // Show "Monitoring Active" indicator
                 currentObstacle?.let { obstacle ->
                     when (obstacle.threatLevel) {
-                        ThreatLevel.LOW -> Log.i(tag, "🟢 Low threat: ${obstacle.distance}m")
-                        ThreatLevel.MEDIUM -> Log.w(tag, "🟡 Medium threat: ${obstacle.distance}m")
-                        ThreatLevel.HIGH -> Log.e(tag, "🔴 HIGH THREAT: ${obstacle.distance}m")
+                        ThreatLevel.LOW -> // Show green indicator
+                        ThreatLevel.MEDIUM -> // Show yellow indicator
+                        ThreatLevel.HIGH -> // Show red indicator
                         else -> {}
                     }
                 }
@@ -139,10 +127,6 @@ class ObstacleDetectionIntegrationExample(
      * Step 4: Handle mission resume when user selects option
      */
     fun handleMissionResume(selectedOption: ResumeOption) {
-        Log.i(tag, "═══ Resuming Mission ═══")
-        Log.i(tag, "Selected: Waypoint ${selectedOption.waypointIndex}")
-        Log.i(tag, "Distance from obstacle: ${selectedOption.distanceFromObstacle}m")
-        Log.i(tag, "Coverage: ${selectedOption.coveragePercentage}%")
 
         // Resume mission from selected waypoint
         obstacleViewModel.resumeMission(selectedOption)
@@ -158,14 +142,10 @@ class ObstacleDetectionIntegrationExample(
      * Step 5: Stop monitoring when mission completes
      */
     fun stopObstacleMonitoring(missionCompleted: Boolean = true) {
-        Log.i(tag, "═══ Stopping Obstacle Monitoring ═══")
-
         if (missionCompleted) {
             obstacleViewModel.completeMission()
-            Log.i(tag, "✅ Mission completed successfully")
         } else {
             obstacleViewModel.stopMonitoring()
-            Log.i(tag, "⚠️ Mission monitoring stopped (not completed)")
         }
     }
 
@@ -174,35 +154,27 @@ class ObstacleDetectionIntegrationExample(
      * Use this to test the system without real sensors
      */
     fun testObstacleDetection() {
-        Log.i(tag, "═══ Testing Obstacle Detection ═══")
-
         // Test LOW threat (20-50m)
         android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
-            Log.i(tag, "Injecting LOW threat obstacle (25m)...")
             obstacleViewModel.injectSimulatedObstacle(25f)
         }, 5000)
 
         // Test MEDIUM threat (10-20m)
         android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
-            Log.w(tag, "Injecting MEDIUM threat obstacle (15m)...")
             obstacleViewModel.injectSimulatedObstacle(15f)
         }, 10000)
 
         // Test HIGH threat (< 10m) - should trigger RTL after 3 consecutive
         android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
-            Log.e(tag, "Injecting HIGH threat obstacle #1 (8m)...")
             obstacleViewModel.injectSimulatedObstacle(8f)
         }, 15000)
 
         android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
-            Log.e(tag, "Injecting HIGH threat obstacle #2 (7m)...")
             obstacleViewModel.injectSimulatedObstacle(7f)
         }, 15200)
 
         android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
-            Log.e(tag, "Injecting HIGH threat obstacle #3 (6m)...")
             obstacleViewModel.injectSimulatedObstacle(6f)
-            Log.e(tag, "⚠️ This should trigger RTL!")
         }, 15400)
     }
 
@@ -214,15 +186,8 @@ class ObstacleDetectionIntegrationExample(
     }
 
     private fun showResumeOptionsDialog(options: List<ResumeOption>) {
-        Log.i(tag, "═══ Resume Options Available ═══")
-        options.forEachIndexed { index, option ->
-            val marker = if (option.isRecommended) "⭐" else "  "
-            Log.i(tag, "$marker Option ${index + 1}:")
-            Log.i(tag, "   Waypoint: ${option.waypointIndex}")
-            Log.i(tag, "   Distance from obstacle: ${option.distanceFromObstacle.toInt()}m")
-            Log.i(tag, "   Coverage: ${option.coveragePercentage.toInt()}%")
-            Log.i(tag, "   Skipped waypoints: ${option.skippedWaypoints.size}")
-        }
+        // Options available for resuming mission
+        // In production, display these in a UI dialog
     }
 }
 
@@ -244,10 +209,8 @@ class CompleteFlightExample(
         val sampleWaypoints = createSampleMission()
         val homeLocation = LatLng(37.7749, -122.4194) // San Francisco
 
-        sharedViewModel.uploadMission(sampleWaypoints) { success, error ->
+        sharedViewModel.uploadMission(sampleWaypoints) { success, _ ->
             if (success) {
-                Log.i("Example", "✅ Mission uploaded")
-
                 // Start obstacle monitoring
                 integration.startObstacleMonitoring(
                     missionWaypoints = sampleWaypoints,
@@ -259,12 +222,9 @@ class CompleteFlightExample(
                 // Note: takeoff is handled by mission waypoint
 
                 // PHASE 4: System now monitors for obstacles automatically
-                Log.i("Example", "✅ Mission in progress - monitoring active")
 
                 // For testing: inject simulated obstacle
                 integration.testObstacleDetection()
-            } else {
-                Log.e("Example", "❌ Mission upload failed: $error")
             }
         }
 

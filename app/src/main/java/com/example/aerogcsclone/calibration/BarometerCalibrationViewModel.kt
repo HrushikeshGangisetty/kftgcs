@@ -1,6 +1,5 @@
 package com.example.aerogcsclone.calibration
 
-import android.util.Log
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.divpundir.mavlink.definitions.common.MavCmd
@@ -116,7 +115,6 @@ class BarometerCalibrationViewModel(
                         param7 = 0f
                     )
 
-                    Log.d("BaroCalVM", "Sent PREFLIGHT_CALIBRATION (baro) attempt ${attempt + 1}")
 
                     val ack = sharedViewModel.awaitCommandAck(241u, ackTimeoutMs)
                     val result = ack?.result?.value

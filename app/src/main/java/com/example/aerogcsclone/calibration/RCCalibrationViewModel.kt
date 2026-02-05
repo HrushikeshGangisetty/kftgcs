@@ -1,6 +1,5 @@
 package com.example.aerogcsclone.calibration
 
-import android.util.Log
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.aerogcsclone.telemetry.SharedViewModel
@@ -80,7 +79,6 @@ class RCCalibrationViewModel(private val sharedViewModel: SharedViewModel) : Vie
      */
     private fun loadParameters() {
         viewModelScope.launch {
-            Log.d("RCCalVM", "========== LOADING RC PARAMETERS ==========")
             _uiState.update {
                 it.copy(
                     calibrationState = RCCalibrationState.LoadingParameters,
@@ -99,7 +97,6 @@ class RCCalibrationViewModel(private val sharedViewModel: SharedViewModel) : Vie
                         val paramName = paramValue.paramId
                         if (paramName in params) {
                             paramValues[paramName] = paramValue.paramValue.toInt()
-                            Log.d("RCCalVM", "✓ Received $paramName = ${paramValue.paramValue.toInt()}")
                         }
                     }
                 }
@@ -124,7 +121,6 @@ class RCCalibrationViewModel(private val sharedViewModel: SharedViewModel) : Vie
                 val throttleCh = paramValues["RCMAP_THROTTLE"] ?: 3
                 val yawCh = paramValues["RCMAP_YAW"] ?: 4
 
-                Log.d("RCCalVM", "✓ RC Mapping: Roll=$rollCh, Pitch=$pitchCh, Throttle=$throttleCh, Yaw=$yawCh")
 
                 // Update channel function assignments
                 val updatedChannels = _uiState.value.channels.mapIndexed { index, ch ->
@@ -156,10 +152,7 @@ class RCCalibrationViewModel(private val sharedViewModel: SharedViewModel) : Vie
                 sharedViewModel.requestRCChannels(10f)
                 startRCChannelsListener()
 
-                Log.d("RCCalVM", "========== RC PARAMETERS LOADED ==========")
-
             } catch (e: Exception) {
-                Log.e("RCCalVM", "Failed to load RC parameters", e)
                 _uiState.update {
                     it.copy(
                         calibrationState = RCCalibrationState.Failed("Failed to load RC parameters: ${e.message}"),
@@ -185,7 +178,6 @@ class RCCalibrationViewModel(private val sharedViewModel: SharedViewModel) : Vie
                     firstMessageReceived = true
                     // Speak in Telugu: "Remote is connected"
                     sharedViewModel.speak("రిమోట్ కనెక్ట్ అయింది")
-                    Log.d("RCCalVM", "✓ Remote controller connected - receiving RC_CHANNELS")
                 }
 
                 // Extract all 16 channels from RC_CHANNELS message
@@ -238,7 +230,6 @@ class RCCalibrationViewModel(private val sharedViewModel: SharedViewModel) : Vie
      */
     fun startCalibration() {
         if (!_uiState.value.isConnected) {
-            Log.e("RCCalVM", "❌ Cannot start calibration - Not connected to drone")
             _uiState.update {
                 it.copy(
                     calibrationState = RCCalibrationState.Failed("Not connected to drone"),
@@ -249,7 +240,6 @@ class RCCalibrationViewModel(private val sharedViewModel: SharedViewModel) : Vie
         }
 
         viewModelScope.launch {
-            Log.d("RCCalVM", "========== STARTING RC CALIBRATION ==========")
 
             // Announce calibration started
             sharedViewModel.announceCalibrationStarted()
@@ -272,8 +262,6 @@ class RCCalibrationViewModel(private val sharedViewModel: SharedViewModel) : Vie
             // Announce the instruction
             // Speak the same instruction in Telugu
             sharedViewModel.speak("అన్ని స్టిక్స్ మరియు స్విచ్‌లను వారి అత్యంత పరిమిత స్థితులకు కదిలించండి")
-
-            Log.d("RCCalVM", "✓ Capturing min/max values - move all controls to extremes")
         }
     }
 
@@ -282,8 +270,6 @@ class RCCalibrationViewModel(private val sharedViewModel: SharedViewModel) : Vie
      */
     fun captureCenter() {
         viewModelScope.launch {
-            Log.d("RCCalVM", "========== CAPTURING CENTER VALUES ==========")
-
             // Validate that we captured reasonable min/max values
             var validChannels = 0
             for (i in 0..15) {
@@ -293,7 +279,6 @@ class RCCalibrationViewModel(private val sharedViewModel: SharedViewModel) : Vie
             }
 
             if (validChannels < 4) {
-                Log.e("RCCalVM", "❌ Not enough valid channels captured (only $validChannels)")
 
                 // Announce calibration failure
                 sharedViewModel.announceCalibrationFinished(isSuccess = false)
@@ -325,8 +310,6 @@ class RCCalibrationViewModel(private val sharedViewModel: SharedViewModel) : Vie
 
             // Give user time to center sticks
             delay(500)
-
-            Log.d("RCCalVM", "✓ Ready to capture center values")
         }
     }
 
@@ -335,7 +318,6 @@ class RCCalibrationViewModel(private val sharedViewModel: SharedViewModel) : Vie
      */
     fun saveCalibration() {
         viewModelScope.launch {
-            Log.d("RCCalVM", "========== SAVING RC CALIBRATION ==========")
 
             // Capture current positions as trim/center
             val currentChannels = _uiState.value.channels
@@ -372,8 +354,6 @@ class RCCalibrationViewModel(private val sharedViewModel: SharedViewModel) : Vie
                     capturedMin[i] > 800 && capturedMax[i] < 2200 &&
                     capturedTrim[i] >= capturedMin[i] && capturedTrim[i] <= capturedMax[i]) {
 
-                    Log.d("RCCalVM", "Saving CH$channelNum: MIN=${capturedMin[i]} MAX=${capturedMax[i]} TRIM=${capturedTrim[i]}")
-
                     try {
                         // Save MIN
                         val minResult = sharedViewModel.setParameter("RC${channelNum}_MIN", capturedMin[i].toFloat())
@@ -391,11 +371,8 @@ class RCCalibrationViewModel(private val sharedViewModel: SharedViewModel) : Vie
                         delay(50)
 
                     } catch (e: Exception) {
-                        Log.e("RCCalVM", "Failed to save parameters for CH$channelNum", e)
                         failCount += 3
                     }
-                } else {
-                    Log.d("RCCalVM", "Skipping CH$channelNum - invalid or disconnected (${capturedMin[i]} | ${capturedMax[i]})")
                 }
             }
 
@@ -431,8 +408,6 @@ class RCCalibrationViewModel(private val sharedViewModel: SharedViewModel) : Vie
                 }
             }
 
-            Log.d("RCCalVM", summary)
-
             // Announce calibration success
             sharedViewModel.announceCalibrationFinished(isSuccess = true)
 
@@ -443,8 +418,6 @@ class RCCalibrationViewModel(private val sharedViewModel: SharedViewModel) : Vie
                     buttonText = "Done"
                 )
             }
-
-            Log.d("RCCalVM", "========== RC CALIBRATION COMPLETE ==========")
         }
     }
 

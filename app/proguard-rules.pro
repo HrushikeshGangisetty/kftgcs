@@ -19,3 +19,18 @@
 # If you keep the line number information, uncomment this to
 # hide the original source file name.
 #-renamesourcefileattribute SourceFile
+
+# ============================================
+# PRODUCTION BUILD: Remove all Android Log statements
+# This strips out all Log.d, Log.i, Log.v, Log.w, and Log.e calls
+# in release builds to improve performance and reduce log spam
+# ============================================
+-assumenosideeffects class android.util.Log {
+    public static *** d(...);
+    public static *** i(...);
+    public static *** v(...);
+    public static *** w(...);
+    public static *** e(...);
+    public static *** wtf(...);
+}
+

@@ -4,7 +4,6 @@ import android.content.Context
 import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyProperties
 import android.util.Base64
-import android.util.Log
 import java.security.KeyStore
 import javax.crypto.Cipher
 import javax.crypto.KeyGenerator
@@ -24,7 +23,6 @@ import javax.crypto.spec.GCMParameterSpec
  */
 object SecurePinManager {
 
-    private const val TAG = "SecurePinManager"
     private const val KEY_ALIAS = "aerogcs_pin_encryption_key"
     private const val ANDROID_KEYSTORE = "AndroidKeyStore"
     private const val TRANSFORMATION = "AES/GCM/NoPadding"
@@ -67,7 +65,6 @@ object SecurePinManager {
 
         keyGenerator.init(keyGenSpec)
 
-        Log.d(TAG, "🔐 Generated new encryption key in Android Keystore")
         return keyGenerator.generateKey()
     }
 
@@ -93,10 +90,7 @@ object SecurePinManager {
                 .putString(KEY_IV, Base64.encodeToString(iv, Base64.NO_WRAP))
                 .apply()
 
-            Log.d(TAG, "🔒 PIN encrypted and saved securely")
-
         } catch (e: Exception) {
-            Log.e(TAG, "❌ Failed to encrypt PIN: ${e.message}", e)
             throw SecurityException("Failed to save PIN securely", e)
         }
     }
@@ -125,11 +119,9 @@ object SecurePinManager {
             val decryptedBytes = cipher.doFinal(encryptedBytes)
             val pin = String(decryptedBytes, Charsets.UTF_8)
 
-            Log.d(TAG, "🔓 PIN decrypted successfully")
             return pin
 
         } catch (e: Exception) {
-            Log.e(TAG, "❌ Failed to decrypt PIN: ${e.message}", e)
             // If decryption fails (e.g., key was invalidated), clear the stored data
             clearPin(context)
             return null
@@ -169,10 +161,8 @@ object SecurePinManager {
                 .remove(KEY_IV)
                 .apply()
 
-            Log.d(TAG, "🗑️ PIN cleared")
-
         } catch (e: Exception) {
-            Log.e(TAG, "❌ Failed to clear PIN: ${e.message}", e)
+            // Failed to clear PIN - continue silently
         }
     }
 
@@ -188,18 +178,14 @@ object SecurePinManager {
             val plaintextPin = oldPrefs.getString("pin", null)
 
             if (plaintextPin != null) {
-                Log.d(TAG, "📦 Migrating plaintext PIN to secure storage...")
-
                 // Save using secure storage
                 savePin(context, plaintextPin)
 
                 // Remove old plaintext PIN
                 oldPrefs.edit().remove("pin").apply()
-
-                Log.d(TAG, "✅ PIN migration completed successfully")
             }
         } catch (e: Exception) {
-            Log.e(TAG, "❌ PIN migration failed: ${e.message}", e)
+            // Migration failed - continue silently
         }
     }
 }

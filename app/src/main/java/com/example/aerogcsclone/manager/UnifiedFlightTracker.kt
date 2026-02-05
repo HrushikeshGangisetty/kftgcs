@@ -1,7 +1,6 @@
 package com.example.aerogcsclone.manager
 
 import android.content.Context
-import android.util.Log
 import com.example.aerogcsclone.Telemetry.TelemetryState
 import com.example.aerogcsclone.database.tlog.EventType
 import com.example.aerogcsclone.database.tlog.EventSeverity
@@ -11,7 +10,6 @@ import com.example.aerogcsclone.telemetry.NotificationType
 import com.example.aerogcsclone.telemetry.SharedViewModel
 import com.example.aerogcsclone.viewmodel.TlogViewModel
 import kotlinx.coroutines.*
-import kotlinx.coroutines.flow.StateFlow
 import kotlin.math.sqrt
 
 /**
@@ -23,7 +21,6 @@ class UnifiedFlightTracker(
     private val tlogViewModel: TlogViewModel,
     private val sharedViewModel: SharedViewModel
 ) {
-    private val tag = "UnifiedFlightTracker"
 
     // Flight state
     private enum class FlightState {
@@ -83,7 +80,7 @@ class UnifiedFlightTracker(
                     handleBatteryWarnings(telemetry)
                     handleConnectionLoss(telemetry)
                 } catch (e: Exception) {
-                    Log.e(tag, "Error in flight state machine", e)
+                    // Error in flight state machine - continue monitoring
                 }
             }
         }
@@ -125,7 +122,6 @@ class UnifiedFlightTracker(
         // Capture ground level when armed
         if (telemetry.armed && !previousArmed) {
             groundLevelAltitude = telemetry.altitudeRelative ?: 0f
-            Log.i(tag, "Armed - captured ground level: ${groundLevelAltitude}m")
         }
 
         // Check mode-specific start predicate
@@ -135,14 +131,12 @@ class UnifiedFlightTracker(
             val now = System.currentTimeMillis()
             if (startConditionMetAt == 0L) {
                 startConditionMetAt = now
-                Log.d(tag, "Start conditions met, beginning debounce (mode=$detectedMode)")
             }
 
             // Check if debounce period passed
             if (now - startConditionMetAt >= START_DEBOUNCE_MS) {
                 missionMode = detectedMode
                 currentState = FlightState.STARTING
-                Log.i(tag, "✅ Start debounce complete, transitioning to STARTING")
             }
         } else {
             startConditionMetAt = 0
@@ -159,7 +153,6 @@ class UnifiedFlightTracker(
         val hdop = telemetry.hdop ?: 99f
         if (hdop > MIN_HDOP_THRESHOLD) {
             // GPS not good enough, but we can still track time (just not distance accurately)
-            Log.d(tag, "GPS HDOP too high: $hdop (threshold: $MIN_HDOP_THRESHOLD)")
         }
 
         // 3. System time available (always true in Android)
@@ -201,7 +194,6 @@ class UnifiedFlightTracker(
                        missionMode?.let { checkModeSpecificStart(telemetry, it) } == true
 
         if (!stillMet) {
-            Log.w(tag, "Start conditions no longer met during debounce, returning to IDLE")
             currentState = FlightState.IDLE
             startConditionMetAt = 0
             missionMode = null
@@ -215,10 +207,6 @@ class UnifiedFlightTracker(
     // ==================== ACTIVE FLIGHT ====================
 
     private suspend fun startFlight(telemetry: TelemetryState) {
-        Log.i(tag, "════════════════════════════════════════")
-        Log.i(tag, "🚁 FLIGHT STARTING (mode=${missionMode?.name})")
-        Log.i(tag, "════════════════════════════════════════")
-
         currentState = FlightState.ACTIVE
         flightStartTime = System.currentTimeMillis()
         totalDistanceMeters = 0f
@@ -239,10 +227,8 @@ class UnifiedFlightTracker(
                 severity = EventSeverity.INFO,
                 message = "Flight started - mode: ${missionMode?.name}"
             )
-
-            Log.i(tag, "✅ Flight logging started successfully")
         } catch (e: Exception) {
-            Log.e(tag, "❌ Error starting flight logging", e)
+            // Error starting flight logging - continue anyway
         }
 
         // Show notification
@@ -293,13 +279,11 @@ class UnifiedFlightTracker(
             val now = System.currentTimeMillis()
             if (stopConditionMetAt == 0L) {
                 stopConditionMetAt = now
-                Log.d(tag, "Stop conditions met: $stopReason, beginning debounce")
             }
 
             // Check if debounce period passed
             if (now - stopConditionMetAt >= STOP_DEBOUNCE_MS) {
                 currentState = FlightState.STOPPING
-                Log.i(tag, "✅ Stop debounce complete, transitioning to STOPPING (reason: $stopReason)")
             }
         } else {
             stopConditionMetAt = 0
@@ -355,7 +339,6 @@ class UnifiedFlightTracker(
         val stopReason = evaluateStopConditions(telemetry)
 
         if (stopReason == null) {
-            Log.w(tag, "Stop conditions no longer met during debounce, returning to ACTIVE")
             currentState = FlightState.ACTIVE
             stopConditionMetAt = 0
             return
@@ -366,11 +349,6 @@ class UnifiedFlightTracker(
     }
 
     private suspend fun stopFlight(reason: String) {
-        Log.i(tag, "════════════════════════════════════════")
-        Log.i(tag, "🛬 FLIGHT ENDING")
-        Log.i(tag, "Reason: $reason")
-        Log.i(tag, "════════════════════════════════════════")
-
         currentState = FlightState.FINALIZING
 
         val elapsedSeconds = (System.currentTimeMillis() - flightStartTime) / 1000L
@@ -381,12 +359,6 @@ class UnifiedFlightTracker(
 
         // Capture consumed litres from spray telemetry
         val finalConsumedLitres = sharedViewModel.telemetryState.value.sprayTelemetry.consumedLiters
-
-        Log.i(tag, "📊 Final flight metrics:")
-        Log.i(tag, "   Duration: ${formatTime(finalTime)}")
-        Log.i(tag, "   Distance: ${formatDistance(finalDistance)}")
-        Log.i(tag, "   Consumed: ${finalConsumedLitres?.let { "%.2f L".format(it) } ?: "N/A"}")
-        Log.i(tag, "   Mode: ${missionMode?.name}")
 
         // Stop telemetry logging
         loggingService?.stopLogging()
@@ -404,10 +376,8 @@ class UnifiedFlightTracker(
                 area = null,  // Calculate if needed
                 consumedLiquid = finalConsumedLitres
             )
-
-            Log.i(tag, "✅ Flight data saved to database")
         } catch (e: Exception) {
-            Log.e(tag, "❌ Error saving flight data", e)
+            // Error saving flight data
         }
 
         // Show completion notification with preserved values
@@ -435,7 +405,6 @@ class UnifiedFlightTracker(
             completed = true
         )
 
-        Log.i(tag, "✅ Updated SharedViewModel with final values - Time: ${finalTime}s, Distance: ${finalDistance}m, Litres: ${finalConsumedLitres}L")
 
         // Give UI time to capture the values before we reset
         delay(500)
@@ -454,8 +423,6 @@ class UnifiedFlightTracker(
         totalDistanceMeters = 0f
         lastLat = null
         lastLon = null
-
-        Log.i(tag, "State reset to IDLE, ready for next flight")
     }
 
     // ==================== EDGE CASES ====================
@@ -490,7 +457,6 @@ class UnifiedFlightTracker(
                 severity = EventSeverity.WARNING,
                 message = "Connection lost during flight"
             )
-            Log.w(tag, "⚠️ Connection lost during active flight - continuing local logging")
         }
     }
 
@@ -524,7 +490,6 @@ class UnifiedFlightTracker(
     fun destroy() {
         monitoringJob?.cancel()
         loggingService?.stopLogging()
-        Log.i(tag, "UnifiedFlightTracker destroyed")
     }
 
     // Public API for manual control (if needed)

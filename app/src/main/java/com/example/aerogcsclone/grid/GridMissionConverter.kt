@@ -1,6 +1,5 @@
 package com.example.aerogcsclone.grid
 
-import android.util.Log
 import com.divpundir.mavlink.api.MavEnumValue
 import com.divpundir.mavlink.definitions.common.*
 import com.google.android.gms.maps.model.LatLng
@@ -10,7 +9,6 @@ import com.google.android.gms.maps.model.LatLng
  */
 object GridMissionConverter {
 
-    private const val TAG = "GridMissionConverter"
 
     // MAV_CMD_DO_SPRAYER command ID (not available in library, using raw value)
     // param1: 0 = stop spraying, 1 = start spraying
@@ -36,13 +34,6 @@ object GridMissionConverter {
         fcuSystemId: UByte = 0u,
         fcuComponentId: UByte = 0u
     ): List<MissionItemInt> {
-        Log.i(TAG, "Converting ${gridResult.waypoints.size} waypoints, ${gridResult.numLines} lines to mission items")
-        Log.d(TAG, "Home: ${homePosition.latitude}, ${homePosition.longitude}")
-
-        // Log first few waypoints for debugging
-        gridResult.waypoints.take(6).forEachIndexed { idx, wp ->
-            Log.d(TAG, "Input WP[$idx]: lineIndex=${wp.lineIndex}, isStart=${wp.isLineStart}, isEnd=${wp.isLineEnd}")
-        }
 
         val missionItems = mutableListOf<MissionItemInt>()
 
@@ -338,7 +329,6 @@ object GridMissionConverter {
             )
         )
 
-        Log.i(TAG, "✓ Mission built: ${missionItems.size} total items (from ${gridResult.waypoints.size} waypoints)")
 
         return missionItems
     }

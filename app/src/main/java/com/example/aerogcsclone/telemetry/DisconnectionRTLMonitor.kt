@@ -1,6 +1,5 @@
 package com.example.aerogcsclone.telemetry
 
-import android.util.Log
 import com.example.aerogcsclone.GCSApplication
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.flow.StateFlow
@@ -44,7 +43,6 @@ class DisconnectionRTLMonitor(
                     // Reset RTL flag when connected
                     if (!wasConnected) {
                         rtlSentForCurrentDisconnection = false
-                        Log.i("DisconnectionRTL", "Connection established - monitoring active")
                     }
                 }
 
@@ -62,15 +60,8 @@ class DisconnectionRTLMonitor(
      * Handle disconnection event - trigger RTL if drone was in flight
      */
     private fun handleDisconnection() {
-        Log.w("DisconnectionRTL", "========== DISCONNECTION DETECTED ==========")
-        Log.w("DisconnectionRTL", "Was in flight: $wasInFlight")
-        Log.w("DisconnectionRTL", "Last altitude: ${lastKnownAltitude}m")
-        Log.w("DisconnectionRTL", "Was armed: $lastKnownArmed")
-
         // Check if we should trigger RTL
         if (wasInFlight && !rtlSentForCurrentDisconnection) {
-            Log.w("DisconnectionRTL", "🚨 DRONE WAS IN FLIGHT - ATTEMPTING EMERGENCY RTL 🚨")
-
             // Mark that we've sent RTL for this disconnection
             rtlSentForCurrentDisconnection = true
 
@@ -81,43 +72,24 @@ class DisconnectionRTLMonitor(
             scope.launch {
                 try {
                     // Try to reconnect briefly and send RTL
-                    val rtlSent = attemptEmergencyRTL()
-
-                    if (rtlSent) {
-                        Log.i("DisconnectionRTL", "✓ Emergency RTL command sent successfully")
-                    } else {
-                        Log.e("DisconnectionRTL", "❌ Failed to send emergency RTL command")
-                    }
+                    attemptEmergencyRTL()
                 } catch (e: Exception) {
-                    Log.e("DisconnectionRTL", "❌ Exception while sending RTL", e)
+                    // Exception while sending RTL - continue silently
                 }
             }
-        } else if (!wasInFlight) {
-            Log.i("DisconnectionRTL", "Drone was not in flight - no RTL needed")
-        } else {
-            Log.i("DisconnectionRTL", "RTL already sent for this disconnection")
         }
-
-        Log.w("DisconnectionRTL", "============================================")
     }
 
     /**
      * Attempt to send emergency RTL command
-     * Returns true if command was sent, false otherwise
      */
-    private suspend fun attemptEmergencyRTL(): Boolean {
-        return try {
-            Log.i("DisconnectionRTL", "Sending RTL mode command (mode 6)...")
-
+    private suspend fun attemptEmergencyRTL() {
+        try {
             // Send RTL command directly through repository
             // Mode 6 = RTL for ArduPilot
             repository.changeMode(6u)
-
-            Log.i("DisconnectionRTL", "RTL command sent")
-            true
         } catch (e: Exception) {
-            Log.e("DisconnectionRTL", "Failed to send RTL command", e)
-            false
+            // Failed to send RTL command - continue silently
         }
     }
 
@@ -125,7 +97,6 @@ class DisconnectionRTLMonitor(
      * Stop monitoring (cleanup)
      */
     fun stopMonitoring() {
-        Log.i("DisconnectionRTL", "Monitoring stopped")
         wasConnected = false
         wasInFlight = false
         rtlSentForCurrentDisconnection = false

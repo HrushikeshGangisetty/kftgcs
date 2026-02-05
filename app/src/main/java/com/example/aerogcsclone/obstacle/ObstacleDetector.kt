@@ -1,6 +1,5 @@
 package com.example.aerogcsclone.obstacle
 
-import android.util.Log
 import com.google.android.gms.maps.model.LatLng
 import kotlin.math.*
 
@@ -11,7 +10,6 @@ import kotlin.math.*
 class ObstacleDetector(
     private val config: ObstacleDetectionConfig
 ) {
-    private val tag = "ObstacleDetector"
 
     // Consecutive HIGH threat detection counter
     private var consecutiveHighDetections = 0

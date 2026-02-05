@@ -18,6 +18,7 @@ import com.google.android.gms.maps.model.BitmapDescriptorFactory
 import com.google.maps.android.compose.*
 import com.google.maps.android.SphericalUtil
 import java.util.Locale
+import kotlin.math.sqrt
 
 // Helper function to create larger marker icons for waypoints - easier to interact with
 private fun createMediumMarker(hue: Float): BitmapDescriptor {
@@ -296,38 +297,49 @@ private fun createDroneIconWithArrow(context: android.content.Context): BitmapDe
         val scaledDrone = Bitmap.createScaledBitmap(droneBmp, sizePx, sizePx, true)
         canvas.drawBitmap(scaledDrone, 0f, 0f, null)
 
-        // Draw a smaller arrow pointing upward (north/0°) to indicate the nose direction
+        // Draw a prominent arrow pointing upward (north/0°) to indicate the nose direction
         val arrowPaint = android.graphics.Paint().apply {
             isAntiAlias = true
-            color = android.graphics.Color.BLUE
+            color = android.graphics.Color.YELLOW
             style = android.graphics.Paint.Style.FILL_AND_STROKE
-            strokeWidth = 1f
+            strokeWidth = 2f
+            strokeJoin = android.graphics.Paint.Join.ROUND
+            strokeCap = android.graphics.Paint.Cap.ROUND
         }
 
-        // Calculate smaller arrow dimensions - reduced size and better centered
+        // Create an equilateral triangle arrow - all sides equal length
         val centerX = sizePx / 2f
-        val arrowHeight = sizePx * 0.18f  // Reduced from 0.35f to 0.18f
-        val arrowWidth = sizePx * 0.08f   // Reduced from 0.15f to 0.08f
+        val triangleSize = sizePx * 0.35f  // Size of triangle sides
 
-        // Define arrow path pointing upward (triangular arrow centered on drone)
+        // Calculate equilateral triangle dimensions
+        // Height = side * sqrt(3)/2, but we'll position it for visual balance
+        val height = triangleSize * (sqrt(4.0) / 2.0).toFloat()
+
+        // Position triangle in upper portion of icon for clear direction indication
+        val topY = sizePx * 0.15f  // Top vertex position
+        val bottomY = topY + height * 0.8f  // Bottom edge (slightly compressed for better look)
+        val leftX = centerX - triangleSize / 2f  // Left vertex
+        val rightX = centerX + triangleSize / 2f  // Right vertex
+
+        // Define arrow path - equilateral triangle pointing upward
         val arrowPath = android.graphics.Path().apply {
-            // Arrow tip positioned closer to center for better centering
-            moveTo(centerX, sizePx * 0.25f)  // Changed from 0.05f to 0.25f
-            // Arrow left side
-            lineTo(centerX - arrowWidth / 2, sizePx * 0.25f + arrowHeight)
-            // Arrow right side
-            lineTo(centerX + arrowWidth / 2, sizePx * 0.25f + arrowHeight)
-            // Close the path
+            // Top vertex (nose pointing up/north)
+            moveTo(centerX, topY)
+            // Bottom left vertex
+            lineTo(leftX, bottomY)
+            // Bottom right vertex
+            lineTo(rightX, bottomY)
+            // Close the path back to top vertex
             close()
         }
 
-        // Draw the arrow
+        // Draw the arrow fill
         canvas.drawPath(arrowPath, arrowPaint)
 
-        // Add white border to arrow for better visibility with thinner stroke
+        // Add white border to arrow for better visibility and definition
         arrowPaint.style = android.graphics.Paint.Style.STROKE
         arrowPaint.color = android.graphics.Color.WHITE
-        arrowPaint.strokeWidth = 1.5f  // Reduced from 2f to 1.5f
+        arrowPaint.strokeWidth = 2.5f
         canvas.drawPath(arrowPath, arrowPaint)
 
         BitmapDescriptorFactory.fromBitmap(resultBitmap)
@@ -450,14 +462,14 @@ fun GcsMap(
                 Polyline(
                     points = closedPolygon,
                     width = 4f,
-                    color = Color.Red
+                    color = Color.Yellow
                 )
 
                 // Fill the polygon area with semi-transparent red
                 Polygon(
                     points = geofencePolygon,
-                    fillColor = Color.Red.copy(alpha = 0.2f),
-                    strokeColor = Color.Red,
+                    fillColor = Color.Red.copy(alpha = 0.05f),
+                    strokeColor = Color.Yellow,
                     strokeWidth = 4f
                 )
 
@@ -524,8 +536,8 @@ fun GcsMap(
                 // Fill the outer fence area with semi-transparent yellow
                 Polygon(
                     points = outerFencePolygon,
-                    fillColor = Color.Yellow.copy(alpha = 0.2f),
-                    strokeColor = Color.Yellow,
+                    fillColor = Color.Yellow.copy(alpha = 0.05f),
+                    strokeColor = Color.Red,
                     strokeWidth = 3f
                 )
 
@@ -534,7 +546,7 @@ fun GcsMap(
                 Polyline(
                     points = closedOuterFence,
                     width = 3f,
-                    color = Color.Yellow
+                    color = Color.Red
                 )
             }
         }
@@ -866,13 +878,13 @@ fun GcsMap(
             }
         }
 
-        // Grid lines (green for original, or gray when in split mode)
+        // Grid lines (red when drawing survey plan, or gray when in split mode)
         gridLines.forEach { line ->
             if (line.size >= 2) {
                 Polyline(
                     points = line,
                     width = 4f, // Thicker for better visibility
-                    color = if (splitPlanMode) Color.Gray.copy(alpha = 0.5f) else Color.Green
+                    color = if (splitPlanMode) Color.Gray.copy(alpha = 0.5f) else Color.Red
                 )
             }
         }
@@ -930,7 +942,7 @@ fun GcsMap(
                         Polyline(
                             points = listOf(start, end),
                             width = 3f,
-                            color = Color.Green.copy(alpha = 0.7f)
+                            color = Color.Red.copy(alpha = 0.7f)
                         )
                     }
                     // If it crosses an obstacle, don't draw the line (drone will fly around)
@@ -1039,9 +1051,9 @@ fun GcsMap(
             }
         }
 
-        // Red polyline showing the drone's traveled path
+        // Green polyline showing the drone's traveled path
         if (visitedPositions.size > 1) {
-            Polyline(points = visitedPositions.toList(), width = 6f, color = Color.Red)
+            Polyline(points = visitedPositions.toList(), width = 6f, color = Color.Green)
         }
 
         // ===== RESUME POINT MARKER =====

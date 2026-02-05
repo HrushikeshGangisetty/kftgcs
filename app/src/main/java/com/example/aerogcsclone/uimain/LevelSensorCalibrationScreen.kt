@@ -346,26 +346,23 @@ fun LevelSensorCalibrationScreen(
                             val fullMv = fullVoltageMv.toIntOrNull()
 
                             if (emptyMv == null || fullMv == null) {
-                                Log.e("LevelCal", "Invalid voltage values")
                                 return@launch
                             }
 
                             if (emptyMv >= fullMv) {
-                                Log.e("LevelCal", "Empty voltage must be less than full voltage")
                                 return@launch
                             }
 
                             // Update the calibration values in the state
                             sharedViewModel.updateLevelSensorCalibration(emptyMv, fullMv)
 
-                            Log.i("LevelCal", "Calibration saved: empty=$emptyMv mV, full=$fullMv mV")
                             showSaveSuccess = true
 
                             // Hide success message after 3 seconds
                             kotlinx.coroutines.delay(3000)
                             showSaveSuccess = false
                         } catch (e: Exception) {
-                            Log.e("LevelCal", "Error saving calibration", e)
+                            // Error saving calibration
                         }
                     }
                 },

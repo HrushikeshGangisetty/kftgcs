@@ -1,6 +1,5 @@
 package com.example.aerogcsclone.telemetry
 
-import android.util.Log
 import com.example.aerogcsclone.GCSApplication
 import com.example.aerogcsclone.Telemetry.TelemetryState
 import kotlinx.coroutines.CoroutineScope
@@ -30,12 +29,10 @@ object DisconnectionRTLHandler {
         scope: CoroutineScope
     ) {
         if (isMonitoring) {
-            Log.w("DisconnectionRTL", "Already monitoring")
             return
         }
 
         isMonitoring = true
-        Log.i("DisconnectionRTL", "✓ Disconnection RTL monitoring started")
 
         scope.launch {
             telemetryState.collect { state ->
@@ -63,7 +60,6 @@ object DisconnectionRTLHandler {
             // Reset RTL flag when reconnected
             if (!wasConnected) {
                 rtlSentForCurrentDisconnection = false
-                Log.d("DisconnectionRTL", "Connection established - monitoring active")
             }
         }
 
@@ -79,14 +75,8 @@ object DisconnectionRTLHandler {
      * Handle disconnection event
      */
     private suspend fun handleDisconnection(repository: MavlinkTelemetryRepository) {
-        Log.w("DisconnectionRTL", "========== DISCONNECTION DETECTED ==========")
-        Log.w("DisconnectionRTL", "Was in flight: $wasInFlight")
-        Log.w("DisconnectionRTL", "Last altitude: ${lastKnownAltitude}m")
-
         // Only trigger RTL if drone was in flight
         if (wasInFlight && !rtlSentForCurrentDisconnection) {
-            Log.w("DisconnectionRTL", "🚨 DRONE WAS IN FLIGHT - TRIGGERING EMERGENCY RTL 🚨")
-
             // Mark RTL as sent for this disconnection
             rtlSentForCurrentDisconnection = true
 
@@ -95,19 +85,11 @@ object DisconnectionRTLHandler {
 
             // Attempt to send RTL command
             try {
-                Log.i("DisconnectionRTL", "Sending RTL mode command (mode 6)...")
                 repository.changeMode(6u) // RTL mode
-                Log.i("DisconnectionRTL", "✓ Emergency RTL command sent")
             } catch (e: Exception) {
-                Log.e("DisconnectionRTL", "❌ Failed to send RTL command", e)
+                // Failed to send RTL command - continue silently
             }
-        } else if (!wasInFlight) {
-            Log.i("DisconnectionRTL", "Drone was not in flight - no RTL needed")
-        } else {
-            Log.i("DisconnectionRTL", "RTL already sent for this disconnection")
         }
-
-        Log.w("DisconnectionRTL", "=============================================")
     }
 
     /**
@@ -118,7 +100,6 @@ object DisconnectionRTLHandler {
         wasConnected = false
         wasInFlight = false
         rtlSentForCurrentDisconnection = false
-        Log.i("DisconnectionRTL", "Monitoring stopped")
     }
 
     /**

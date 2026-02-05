@@ -1,6 +1,5 @@
 package com.example.aerogcsclone.utils
 
-import android.util.Log
 import android.util.Xml
 import com.google.android.gms.maps.model.LatLng
 import org.xmlpull.v1.XmlPullParser
@@ -59,24 +58,20 @@ class KmlBoundaryParser {
                         errorMessage = "No valid polygons found in KML file"
                     )
                 } else {
-                    Log.i(TAG, "Successfully parsed ${polygons.size} polygon(s) from KML")
                     KmlParseResult(polygons = polygons)
                 }
             }
         } catch (e: XmlPullParserException) {
-            Log.e(TAG, "XML parsing error: ${e.message}", e)
             KmlParseResult(
                 polygons = emptyList(),
                 errorMessage = "Invalid KML format: ${e.message}"
             )
         } catch (e: IOException) {
-            Log.e(TAG, "IO error reading KML: ${e.message}", e)
             KmlParseResult(
                 polygons = emptyList(),
                 errorMessage = "Error reading file: ${e.message}"
             )
         } catch (e: Exception) {
-            Log.e(TAG, "Unexpected error parsing KML: ${e.message}", e)
             KmlParseResult(
                 polygons = emptyList(),
                 errorMessage = "Unexpected error: ${e.message}"
@@ -149,7 +144,6 @@ class KmlBoundaryParser {
 
         // Only return if we found a valid polygon with at least 3 points
         return if (points != null && points.size >= 3) {
-            Log.d(TAG, "Parsed polygon: '$name' with ${points.size} points")
             KmlPolygon(name = name, points = points)
         } else {
             null
@@ -222,7 +216,7 @@ class KmlBoundaryParser {
                     // Android Map Spec: lat, lon (latitude comes first!)
                     latLngList.add(LatLng(lat, lon))
                 } catch (_: NumberFormatException) {
-                    Log.w(TAG, "Skipping malformed coordinate tuple: $tuple")
+                    // Skipping malformed coordinate tuple
                 }
             }
         }
@@ -240,7 +234,6 @@ class KmlBoundaryParser {
             }
         }
 
-        Log.d(TAG, "Parsed ${latLngList.size} coordinates from LinearRing")
         return latLngList
     }
 

@@ -13,14 +13,11 @@ import androidx.compose.material3.Icon
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Speed
 import androidx.compose.material.icons.filled.Explore
-import androidx.compose.material.icons.filled.Flight
 import androidx.compose.material.icons.filled.Gamepad
 import androidx.compose.material.icons.filled.Opacity
-import androidx.compose.material.icons.filled.GpsFixed
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.Thermostat
 import androidx.compose.material.icons.filled.Home
-import androidx.compose.material.icons.filled.Security
 import androidx.compose.material3.IconButton
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
@@ -144,47 +141,15 @@ fun SettingsScreen(navController: NavHostController) {
 
             Spacer(modifier = Modifier.height(buttonSpacing))
 
-            // 6. Aircraft
+            // 6. About App
             NumberedButton(
                 number = 6,
-                icon = Icons.Filled.Flight,
-                title = "Aircraft",
-                onClick = { navController.navigate("aircraft") },
-                height = buttonHeight
-            )
-
-            Spacer(modifier = Modifier.height(buttonSpacing))
-
-            // 7. RangeFinder Settings
-            NumberedButton(
-                number = 7,
-                icon = Icons.Filled.GpsFixed,
-                title = "RangeFinder Settings",
-                onClick = { navController.navigate("rangefinder_settings") },
-                height = buttonHeight
-            )
-
-            Spacer(modifier = Modifier.height(buttonSpacing))
-
-            // 8. About App
-            NumberedButton(
-                number = 8,
                 icon = Icons.Filled.Info,
                 title = "About App",
                 onClick = { navController.navigate("about_app") },
                 height = buttonHeight
             )
 
-            Spacer(modifier = Modifier.height(buttonSpacing))
-
-            // 9. Security
-            NumberedButton(
-                number = 9,
-                icon = Icons.Filled.Security,
-                title = "Security",
-                onClick = { navController.navigate("security") },
-                height = buttonHeight
-            )
         }
     }
 }

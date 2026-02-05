@@ -2,7 +2,6 @@ package com.example.aerogcsclone.utils
 
 import android.content.Context
 import android.speech.tts.TextToSpeech
-import android.util.Log
 import java.util.*
 
 /**
@@ -40,7 +39,7 @@ class TextToSpeechManager(private val context: Context) : TextToSpeech.OnInitLis
         try {
             textToSpeech = TextToSpeech(context, this)
         } catch (e: Exception) {
-            Log.e(TAG, "Failed to initialize TextToSpeech", e)
+            // Failed to initialize TextToSpeech
         }
     }
 
@@ -59,11 +58,8 @@ class TextToSpeechManager(private val context: Context) : TextToSpeech.OnInitLis
 
             val result = tts.setLanguage(locale)
             if (result == TextToSpeech.LANG_MISSING_DATA || result == TextToSpeech.LANG_NOT_SUPPORTED) {
-                Log.w(TAG, "Language $languageCode not supported, falling back to English")
                 tts.setLanguage(Locale.US)
                 currentLanguage = "en"
-            } else {
-                Log.d(TAG, "Language set to: $languageCode")
             }
         }
     }
@@ -75,17 +71,14 @@ class TextToSpeechManager(private val context: Context) : TextToSpeech.OnInitLis
                 val telugu = Locale.forLanguageTag("te-IN")
                 var result = tts.setLanguage(telugu)
                 if (result == TextToSpeech.LANG_MISSING_DATA || result == TextToSpeech.LANG_NOT_SUPPORTED) {
-                    Log.w(TAG, "Telugu not supported on this device, falling back to US English")
                     result = tts.setLanguage(Locale.US)
                     currentLanguage = "en"
                     if (result == TextToSpeech.LANG_MISSING_DATA || result == TextToSpeech.LANG_NOT_SUPPORTED) {
-                        Log.e(TAG, "Fallback language (en-US) not supported")
                         isReady = false
                         return
                     }
                 }
 
-                Log.d(TAG, "TextToSpeech initialized successfully")
                 isReady = true
 
                 // Configure TTS settings
@@ -93,7 +86,6 @@ class TextToSpeechManager(private val context: Context) : TextToSpeech.OnInitLis
                 tts.setPitch(1.0f)
             }
         } else {
-            Log.e(TAG, "TextToSpeech initialization failed")
             isReady = false
         }
     }
@@ -104,7 +96,6 @@ class TextToSpeechManager(private val context: Context) : TextToSpeech.OnInitLis
     fun speak(text: String) {
         // Quick ready check
         if (!isReady || textToSpeech == null) {
-            Log.w(TAG, "TTS not ready or not initialized. Cannot speak: $text")
             return
         }
 
@@ -112,7 +103,6 @@ class TextToSpeechManager(private val context: Context) : TextToSpeech.OnInitLis
         synchronized(dedupeLock) {
             if (text == lastSpokenText && (now - lastSpokenAt) < dedupeWindowMillis) {
                 // Ignore repeated request within cooldown
-                Log.d(TAG, "Ignoring repeated TTS for: $text")
                 return
             }
 
@@ -120,7 +110,6 @@ class TextToSpeechManager(private val context: Context) : TextToSpeech.OnInitLis
             lastSpokenAt = now
         }
 
-        Log.d(TAG, "Speaking: $text")
         textToSpeech?.speak(text, TextToSpeech.QUEUE_FLUSH, null, System.currentTimeMillis().toString())
     }
 
@@ -130,13 +119,11 @@ class TextToSpeechManager(private val context: Context) : TextToSpeech.OnInitLis
      */
     fun speakOnce(key: String, text: String) {
         if (!isReady || textToSpeech == null) {
-            Log.w(TAG, "TTS not ready or not initialized. Cannot speak: $text")
             return
         }
 
         synchronized(dedupeLock) {
             if (spokenKeys.contains(key)) {
-                Log.d(TAG, "speakOnce: already spoken for key=$key")
                 return
             }
             spokenKeys.add(key)
@@ -365,7 +352,6 @@ class TextToSpeechManager(private val context: Context) : TextToSpeech.OnInitLis
         textToSpeech?.shutdown()
         textToSpeech = null
         isReady = false
-        Log.d(TAG, "TextToSpeech shutdown")
     }
 
     /**
@@ -380,7 +366,6 @@ class TextToSpeechManager(private val context: Context) : TextToSpeech.OnInitLis
      */
     fun speakImmediate(text: String) {
         if (!isReady || textToSpeech == null) {
-            Log.w(TAG, "TTS not ready or not initialized. Cannot speak immediate: $text")
             return
         }
 
@@ -396,7 +381,6 @@ class TextToSpeechManager(private val context: Context) : TextToSpeech.OnInitLis
             }
         }
 
-        Log.d(TAG, "Speaking immediately: $text")
         textToSpeech?.speak(text, TextToSpeech.QUEUE_FLUSH, null, System.currentTimeMillis().toString())
     }
 

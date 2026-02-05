@@ -1,6 +1,5 @@
 package com.example.aerogcsclone.repository
 
-import android.util.Log
 import com.example.aerogcsclone.database.MissionTemplateDatabase
 import com.example.aerogcsclone.database.tlog.*
 import kotlinx.coroutines.flow.Flow
@@ -14,7 +13,6 @@ import javax.inject.Singleton
 class TlogRepository @Inject constructor(
     private val database: MissionTemplateDatabase
 ) {
-    private val TAG = "TlogRepository"
     private val flightDao = database.flightDao()
     private val telemetryDao = database.telemetryDao()
     private val eventDao = database.eventDao()
@@ -28,32 +26,25 @@ class TlogRepository @Inject constructor(
     suspend fun getActiveFlightOrNull(): FlightEntity? = flightDao.getActiveFlightOrNull()
 
     suspend fun startFlight(droneUid: String? = null): Long {
-        Log.d(TAG, "📝 Creating new flight entry... (droneUid: $droneUid)")
         val flight = FlightEntity(
             startTime = System.currentTimeMillis(),
             isCompleted = false,
             droneUid = droneUid
         )
         val flightId = flightDao.insertFlight(flight)
-        Log.i(TAG, "✅ Flight entry created in database - ID: $flightId, DroneUID: $droneUid")
         return flightId
     }
 
     suspend fun completeFlight(flightId: Long, area: Float? = null, consumedLiquid: Float? = null) {
-        Log.d(TAG, "📝 Completing flight $flightId...")
         val endTime = System.currentTimeMillis()
         val flight = flightDao.getFlightById(flightId)
         flight?.let {
             val duration = endTime - it.startTime
             flightDao.completeFlight(flightId, endTime, duration, area, consumedLiquid)
-            Log.i(TAG, "✅ Flight $flightId completed - Duration: ${duration/1000}s")
-        } ?: run {
-            Log.e(TAG, "❌ Flight $flightId not found in database!")
         }
     }
 
     suspend fun deleteFlight(flightId: Long) {
-        Log.d(TAG, "🗑️ Deleting flight $flightId")
         flightDao.deleteFlightById(flightId)
     }
 
@@ -100,12 +91,8 @@ class TlogRepository @Inject constructor(
 
             )
             telemetryDao.insertTelemetry(telemetry)
-            // Only log occasionally to avoid spam
-            if (System.currentTimeMillis() % 30000 < 5000) {
-                Log.v(TAG, "📊 Telemetry saved for flight $flightId (alt=$altitude, speed=$speed)")
-            }
         } catch (e: Exception) {
-            Log.e(TAG, "❌ Failed to save telemetry for flight $flightId", e)
+            // Telemetry save failed - continue operation
         }
     }
 
@@ -124,7 +111,6 @@ class TlogRepository @Inject constructor(
         altitude: Float? = null
     ) {
         try {
-            Log.d(TAG, "📝 Logging event for flight $flightId: $message")
             val event = EventEntity(
                 flightId = flightId,
                 timestamp = System.currentTimeMillis(),
@@ -137,9 +123,8 @@ class TlogRepository @Inject constructor(
                 altitude = altitude
             )
             eventDao.insertEvent(event)
-            Log.i(TAG, "✅ Event saved: $message")
         } catch (e: Exception) {
-            Log.e(TAG, "❌ Failed to save event for flight $flightId: $message", e)
+            // Event save failed - continue operation
         }
     }
 
@@ -166,12 +151,8 @@ class TlogRepository @Inject constructor(
                 speed = speed
             )
             mapDataDao.insertMapData(mapData)
-            // Only log occasionally
-            if (System.currentTimeMillis() % 30000 < 5000) {
-                Log.v(TAG, "🗺️ Map position saved for flight $flightId")
-            }
         } catch (e: Exception) {
-            Log.e(TAG, "❌ Failed to save map data for flight $flightId", e)
+            // Map data save failed - continue operation
         }
     }
 

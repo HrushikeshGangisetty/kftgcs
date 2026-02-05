@@ -69,9 +69,9 @@ fun TopNavBar(
     }
 
     // Set nav bar color based on connection status - solid colors
-    // Dark green when connected, Red when disconnected
+    // Light green when connected, Red when disconnected
     val navBarColor = if (telemetryState.connected) {
-        Color(0xFF2E7D32) // Dark green color for connected state (Material Green 800)
+        Color(0xFF4CAF50) // Light green color for connected state (Material Green 500)
     } else {
         Color(0xFFE53935) // Red color for disconnected state
     }
@@ -223,10 +223,6 @@ fun TopNavBar(
                         fontSize = 9.sp
                     )
                 }
-                DividerBlock()
-                InfoBlock(Icons.Default.BatteryFull, "${telemetryState.batteryPercent ?: "N/A"}%")
-                DividerBlock()
-                InfoBlock(Icons.Default.Gamepad, telemetryState.rcBatteryPercent?.let { "$it%" } ?: "--%")
                 DividerBlock()
                 InfoBlockGroup(
                     Icons.Default.Bolt,
@@ -588,26 +584,28 @@ fun DividerBlock() {
 
 @Composable
 fun InfoBlock(icon: ImageVector, value: String) {
-    Column(
+    Row(
         modifier = Modifier.padding(horizontal = 4.dp), // slightly less padding
-        horizontalAlignment = Alignment.CenterHorizontally
+        verticalAlignment = Alignment.CenterVertically
     ) {
         Icon(icon, contentDescription = null, tint = Color.White, modifier = Modifier.size(13.dp)) // just a little smaller
-        Spacer(modifier = Modifier.height(1.dp))
+        Spacer(modifier = Modifier.width(3.dp))
         Text(value, color = Color.White, fontSize = 9.sp) // just a little smaller
     }
 }
 
 @Composable
 fun InfoBlockGroup(icon: ImageVector, values: List<String>) {
-    Column(
+    Row(
         modifier = Modifier.padding(horizontal = 4.dp), // slightly less padding
-        horizontalAlignment = Alignment.CenterHorizontally
+        verticalAlignment = Alignment.CenterVertically
     ) {
         Icon(icon, contentDescription = null, tint = Color.White, modifier = Modifier.size(13.dp)) // just a little smaller
-        Spacer(modifier = Modifier.height(1.dp))
-        values.forEach { value ->
-            Text(value, color = Color.White, fontSize = 9.sp) // just a little smaller
+        Spacer(modifier = Modifier.width(3.dp))
+        Column(horizontalAlignment = Alignment.Start) {
+            values.forEach { value ->
+                Text(value, color = Color.White, fontSize = 9.sp) // just a little smaller
+            }
         }
     }
 }

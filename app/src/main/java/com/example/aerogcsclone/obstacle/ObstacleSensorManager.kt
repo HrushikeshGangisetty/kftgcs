@@ -5,7 +5,6 @@ import android.hardware.Sensor
 import android.hardware.SensorEvent
 import android.hardware.SensorEventListener
 import android.hardware.SensorManager
-import android.util.Log
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -44,27 +43,22 @@ class ObstacleSensorManager(
     private fun initializeProximitySensor(): Boolean {
         proximitySensor = sensorManager.getDefaultSensor(Sensor.TYPE_PROXIMITY)
         if (proximitySensor == null) {
-            Log.e(tag, "Proximity sensor not available")
             return false
         }
-        Log.i(tag, "Proximity sensor initialized")
         return true
     }
 
     private fun initializeLidarSensor(): Boolean {
         // TODO: Initialize LIDAR sensor via USB/serial
-        Log.w(tag, "LIDAR sensor not yet implemented, falling back to simulated")
         return initializeSimulatedSensor()
     }
 
     private fun initializeUltrasonicSensor(): Boolean {
         // TODO: Initialize ultrasonic sensor
-        Log.w(tag, "Ultrasonic sensor not yet implemented, falling back to simulated")
         return initializeSimulatedSensor()
     }
 
     private fun initializeSimulatedSensor(): Boolean {
-        Log.i(tag, "Simulated sensor initialized")
         return true
     }
 
@@ -131,13 +125,11 @@ class ObstacleSensorManager(
             SensorType.PROXIMITY -> startProximityMonitoring()
             SensorType.SIMULATED -> startSimulatedMonitoring()
             else -> {
-                Log.w(tag, "Sensor type not fully implemented, using simulated")
                 startSimulatedMonitoring()
             }
         }
 
         isMonitoring = true
-        Log.i(tag, "Sensor monitoring started")
     }
 
     private fun startProximityMonitoring() {
@@ -172,7 +164,6 @@ class ObstacleSensorManager(
 
         isMonitoring = false
         _sensorReading.value = null
-        Log.i(tag, "Sensor monitoring stopped")
     }
 
     /**

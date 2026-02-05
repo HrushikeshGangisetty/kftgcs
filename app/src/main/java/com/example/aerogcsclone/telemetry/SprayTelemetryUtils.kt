@@ -1,6 +1,5 @@
 package com.example.aerogcsclone.telemetry
 
-import android.util.Log
 import kotlin.math.abs
 
 /**
@@ -134,7 +133,6 @@ data class CalibrationPoint(
  */
 object FlowRateValidator {
     private const val MAX_FLOW_RATE_CA = 60000  // Max ~600 L/h in centi-Amps
-    private const val TAG = "Spray Telemetry"
 
     /**
      * Validate and convert flow rate from centi-Amps to L/h
@@ -144,15 +142,12 @@ object FlowRateValidator {
     fun validateAndConvert(currentBattery: Short): Float? {
         return when {
             currentBattery.toInt() == -1 -> {
-                Log.w(TAG, "Flow rate is -1 (invalid/not configured)")
                 null
             }
             currentBattery < 0 -> {
-                Log.w(TAG, "Negative flow rate detected: $currentBattery - treating as invalid")
                 null
             }
             currentBattery > MAX_FLOW_RATE_CA -> {
-                Log.w(TAG, "Flow rate exceeds maximum: $currentBattery cA (>${MAX_FLOW_RATE_CA/100} L/h) - likely sensor fault")
                 null
             }
             currentBattery == 0.toShort() -> {
@@ -171,7 +166,6 @@ object FlowRateValidator {
  * Handles non-linear tank shapes and sensor drift
  */
 object TankLevelCalculator {
-    private const val TAG = "Spray Telemetry"
 
     /**
      * Calculate tank level using piecewise linear interpolation
@@ -186,12 +180,10 @@ object TankLevelCalculator {
         calibrationPoints: List<CalibrationPoint>
     ): Int? {
         if (calibrationPoints.isEmpty()) {
-            Log.e(TAG, "No calibration points provided")
             return null
         }
 
         if (voltageMv < 0) {
-            Log.w(TAG, "Invalid voltage: $voltageMv mV")
             return null
         }
 
@@ -203,7 +195,6 @@ object TankLevelCalculator {
 
         // If both points are the same, return that level
         if (lower == upper) {
-            Log.d(TAG, "Exact calibration match: ${lower.levelPercent}%")
             return lower.levelPercent
         }
 
@@ -218,7 +209,6 @@ object TankLevelCalculator {
             .toInt()
             .coerceIn(0, 100)
 
-        Log.d(TAG, "Interpolated level: $level% (voltage: $voltageMv mV between ${lower.voltageMv}-${upper.voltageMv} mV)")
         return level
     }
 
@@ -235,22 +225,18 @@ object TankLevelCalculator {
         fullVoltageMv: Int
     ): Int? {
         if (voltageMv < 0) {
-            Log.w(TAG, "Invalid voltage: $voltageMv mV")
             return null
         }
 
         if (fullVoltageMv <= emptyVoltageMv) {
-            Log.e(TAG, "Invalid calibration: full ($fullVoltageMv mV) <= empty ($emptyVoltageMv mV)")
             return null
         }
 
         return when {
             voltageMv <= emptyVoltageMv -> {
-                Log.d(TAG, "Voltage at or below empty threshold: $voltageMv <= $emptyVoltageMv mV")
                 0
             }
             voltageMv >= fullVoltageMv -> {
-                Log.d(TAG, "Voltage at or above full threshold: $voltageMv >= $fullVoltageMv mV")
                 100
             }
             else -> {
@@ -258,7 +244,6 @@ object TankLevelCalculator {
                         (fullVoltageMv - emptyVoltageMv) * 100)
                     .toInt()
                     .coerceIn(0, 100)
-                Log.d(TAG, "Calculated tank level: $level% (from $voltageMv mV)")
                 level
             }
         }

@@ -1,6 +1,5 @@
 package com.example.aerogcsclone.obstacle
 
-import android.util.Log
 import com.divpundir.mavlink.definitions.common.MissionItemInt
 import com.example.aerogcsclone.database.obstacle.SavedMissionStateDao
 import com.example.aerogcsclone.database.obstacle.SavedMissionStateEntity
@@ -15,7 +14,6 @@ import com.google.gson.reflect.TypeToken
 class MissionStateRepository(
     private val dao: SavedMissionStateDao
 ) {
-    private val tag = "MissionStateRepo"
     private val gson = Gson()
 
     /**
@@ -49,10 +47,8 @@ class MissionStateRepository(
             )
 
             dao.insertMissionState(entity)
-            Log.i(tag, "✅ Mission state saved: ${state.missionId}")
             true
         } catch (e: Exception) {
-            Log.e(tag, "❌ Failed to save mission state", e)
             false
         }
     }
@@ -65,7 +61,6 @@ class MissionStateRepository(
             val entity = dao.getLatestUnresolvedMission()
             entity?.let { toSavedMissionState(it) }
         } catch (e: Exception) {
-            Log.e(tag, "Failed to retrieve mission state", e)
             null
         }
     }
@@ -78,7 +73,6 @@ class MissionStateRepository(
             val entity = dao.getMissionState(missionId)
             entity?.let { toSavedMissionState(it) }
         } catch (e: Exception) {
-            Log.e(tag, "Failed to retrieve mission state $missionId", e)
             null
         }
     }
@@ -89,10 +83,8 @@ class MissionStateRepository(
     suspend fun markAsResolved(missionId: String): Boolean {
         return try {
             dao.markAsResolved(missionId, System.currentTimeMillis())
-            Log.i(tag, "✅ Mission marked as resolved: $missionId")
             true
         } catch (e: Exception) {
-            Log.e(tag, "Failed to mark mission as resolved", e)
             false
         }
     }
@@ -104,7 +96,6 @@ class MissionStateRepository(
         return try {
             dao.getUnresolvedMissions().mapNotNull { toSavedMissionState(it) }
         } catch (e: Exception) {
-            Log.e(tag, "Failed to retrieve unresolved missions", e)
             emptyList()
         }
     }
@@ -115,10 +106,8 @@ class MissionStateRepository(
     suspend fun cleanupOldMissions(olderThanMs: Long): Boolean {
         return try {
             dao.deleteOldMissions(olderThanMs)
-            Log.i(tag, "✅ Old missions cleaned up")
             true
         } catch (e: Exception) {
-            Log.e(tag, "Failed to cleanup old missions", e)
             false
         }
     }
@@ -130,7 +119,6 @@ class MissionStateRepository(
         return try {
             gson.toJson(waypoints)
         } catch (e: Exception) {
-            Log.e(tag, "Failed to serialize waypoints", e)
             "[]"
         }
     }
@@ -143,7 +131,6 @@ class MissionStateRepository(
             val type = object : TypeToken<List<MissionItemInt>>() {}.type
             gson.fromJson(json, type) ?: emptyList()
         } catch (e: Exception) {
-            Log.e(tag, "Failed to deserialize waypoints", e)
             emptyList()
         }
     }
@@ -155,7 +142,6 @@ class MissionStateRepository(
         return try {
             polygon?.let { gson.toJson(it) }
         } catch (e: Exception) {
-            Log.e(tag, "Failed to serialize survey polygon", e)
             null
         }
     }
@@ -170,7 +156,6 @@ class MissionStateRepository(
                 gson.fromJson(it, type) ?: emptyList()
             } ?: emptyList()
         } catch (e: Exception) {
-            Log.e(tag, "Failed to deserialize survey polygon", e)
             emptyList()
         }
     }
