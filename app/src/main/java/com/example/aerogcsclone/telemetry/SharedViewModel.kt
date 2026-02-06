@@ -1922,16 +1922,6 @@ class SharedViewModel : ViewModel() {
 
     fun pauseMission(onResult: (Boolean, String?) -> Unit = { _, _ -> }) {
         viewModelScope.launch {
-            try {
-                val currentMode = _telemetryState.value.mode
-                if (currentMode?.contains("Auto", ignoreCase = true) != true) {
-                    onResult(false, "Mission not running")
-                    return@launch
-                }
-
-                // Use lastAutoWaypoint (tracked during AUTO mode) for accurate pause tracking
-                // Falls back to currentWaypoint if lastAutoWaypoint is not set (-1)
-                val lastAutoWp = _telemetryState.value.lastAutoWaypoint
                 val currentWp = _telemetryState.value.currentWaypoint
                 val waypointToStore = if (lastAutoWp > 0) lastAutoWp else currentWp
 
