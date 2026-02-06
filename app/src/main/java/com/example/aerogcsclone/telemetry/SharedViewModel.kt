@@ -652,14 +652,30 @@ class SharedViewModel : ViewModel() {
 
             viewModelScope.launch {
                 newRepo.state.collect { repoState ->
-                    // Preserve SharedViewModel-managed fields (pause state) while updating from repository
+                    // Preserve SharedViewModel-managed fields (pause state, mission active state) while updating from repository
                     _telemetryState.update { currentState ->
                         // DEBUG LOG: Track state synchronization
                         Log.i("DEBUG_STATE", "Before sync - repoLastAuto: ${repoState.lastAutoWaypoint}, currentLastAuto: ${currentState.lastAutoWaypoint}, repoCurrent: ${repoState.currentWaypoint}, currentCurrent: ${currentState.currentWaypoint}")
 
+                        // IMPORTANT: Preserve isMissionActive if it's currently true (managed by UnifiedFlightTracker)
+                        // This ensures manual missions aren't overwritten by TelemetryRepository's AUTO-only logic
+                        // The UnifiedFlightTracker is the single source of truth for flight state
+                        val preserveMissionActive = currentState.isMissionActive
+                        val preserveMissionElapsedSec = if (preserveMissionActive) currentState.missionElapsedSec else repoState.missionElapsedSec
+                        val preserveTotalDistanceMeters = if (preserveMissionActive) currentState.totalDistanceMeters else repoState.totalDistanceMeters
+                        val preserveMissionCompleted = currentState.missionCompleted
+                        val preserveLastMissionElapsedSec = currentState.lastMissionElapsedSec ?: repoState.lastMissionElapsedSec
+                        val preserveMissionCompletedHandled = currentState.missionCompletedHandled
+
                         repoState.copy(
                             missionPaused = currentState.missionPaused,
-                            pausedAtWaypoint = currentState.pausedAtWaypoint
+                            pausedAtWaypoint = currentState.pausedAtWaypoint,
+                            isMissionActive = preserveMissionActive || repoState.isMissionActive,
+                            missionElapsedSec = preserveMissionElapsedSec,
+                            totalDistanceMeters = preserveTotalDistanceMeters,
+                            missionCompleted = preserveMissionCompleted || repoState.missionCompleted,
+                            lastMissionElapsedSec = preserveLastMissionElapsedSec,
+                            missionCompletedHandled = preserveMissionCompletedHandled
                         )
                     }
                 }
