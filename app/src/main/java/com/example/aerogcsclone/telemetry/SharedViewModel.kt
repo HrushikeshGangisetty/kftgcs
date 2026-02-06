@@ -150,6 +150,40 @@ class SharedViewModel : ViewModel() {
     private val _userSelectedFlightMode = MutableStateFlow(UserFlightMode.AUTOMATIC)
     val userSelectedFlightMode: StateFlow<UserFlightMode> = _userSelectedFlightMode.asStateFlow()
 
+    // ========== MISSION TYPE (Grid vs Waypoint) ==========
+    // This tracks the type of mission being executed
+    enum class MissionType {
+        NONE,       // No mission type selected
+        GRID,       // Grid/survey mission
+        WAYPOINT    // Waypoint mission
+    }
+
+    private val _selectedMissionType = MutableStateFlow(MissionType.NONE)
+    val selectedMissionType: StateFlow<MissionType> = _selectedMissionType.asStateFlow()
+
+    fun setMissionType(type: MissionType) {
+        _selectedMissionType.value = type
+        Log.i("SharedVM", "📋 Mission type set to: ${type.name}")
+    }
+
+    // ========== GRID SETUP SOURCE (How the grid boundary was created) ==========
+    // This tracks how the user created the grid boundary
+    enum class GridSetupSource {
+        NONE,           // No grid setup source selected
+        KML_IMPORT,     // Grid boundary imported from KML file
+        MAP_DRAW,       // Grid boundary drawn on map
+        DRONE_POSITION, // Grid boundary based on drone position
+        RC_CONTROL      // Grid boundary controlled by RC
+    }
+
+    private val _gridSetupSource = MutableStateFlow(GridSetupSource.NONE)
+    val gridSetupSource: StateFlow<GridSetupSource> = _gridSetupSource.asStateFlow()
+
+    fun setGridSetupSource(source: GridSetupSource) {
+        _gridSetupSource.value = source
+        Log.i("SharedVM", "📋 Grid setup source set to: ${source.name}")
+    }
+
     /**
      * Check if pause/resume functionality should be enabled
      * Returns true only if user selected Automatic mode
@@ -1850,6 +1884,19 @@ class SharedViewModel : ViewModel() {
                             // 🔥 Set plot name before connecting
                             wsManager.selectedPlotName = _currentPlotName.value
                             Log.i("SharedVM", "📋 Plot name set for WebSocket: ${_currentPlotName.value}")
+
+                            // 🔥 Set flight mode (Automatic or Manual)
+                            wsManager.selectedFlightMode = _userSelectedFlightMode.value.name
+                            Log.i("SharedVM", "📋 Flight mode set for WebSocket: ${_userSelectedFlightMode.value.name}")
+
+                            // 🔥 Set mission type (Grid or Waypoint)
+                            wsManager.selectedMissionType = _selectedMissionType.value.name
+                            Log.i("SharedVM", "📋 Mission type set for WebSocket: ${_selectedMissionType.value.name}")
+
+                            // 🔥 Set grid setup source (KML_IMPORT, MAP_DRAW, DRONE_POSITION, RC_CONTROL)
+                            wsManager.gridSetupSource = _gridSetupSource.value.name
+                            Log.i("SharedVM", "📋 Grid setup source set for WebSocket: ${_gridSetupSource.value.name}")
+
                             wsManager.connect()
 
                             // 🔥 Wait for WebSocket to connect and receive session_ack before sending status
@@ -1922,7 +1969,9 @@ class SharedViewModel : ViewModel() {
 
     fun pauseMission(onResult: (Boolean, String?) -> Unit = { _, _ -> }) {
         viewModelScope.launch {
+            try {
                 val currentWp = _telemetryState.value.currentWaypoint
+                val lastAutoWp = _telemetryState.value.lastAutoWaypoint
                 val waypointToStore = if (lastAutoWp > 0) lastAutoWp else currentWp
 
                 // DEBUG LOGS

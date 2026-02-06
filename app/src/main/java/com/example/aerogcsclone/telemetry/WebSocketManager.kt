@@ -164,6 +164,18 @@ class WebSocketManager {
     // 🔥 Plot name - Selected plot/field name from UI
     var selectedPlotName: String = ""  // Set from UI when mission starts
 
+    // 🔥 Flight mode - Automatic or Manual
+    var selectedFlightMode: String = "AUTOMATIC"  // Set from UI
+
+    // 🔥 Mission type - Grid or Waypoint
+    var selectedMissionType: String = "NONE"  // Set from UI
+
+    // 🔥 Grid setup source - How grid boundary was created
+    var gridSetupSource: String = "NONE"  // KML_IMPORT, MAP_DRAW, DRONE_POSITION, RC_CONTROL
+
+    // 🔥 Mission active flag - controls whether telemetry is sent
+    var isMissionActive: Boolean = false
+
     /**
      * Resolves the drone UID, providing a fallback for SITL testing
      * @return Real drone UID if available, otherwise "SITL_DRONE_001" as fallback
@@ -305,6 +317,12 @@ class WebSocketManager {
                     put("drone_uid", resolveDroneUid())
                     // 🔥 Plot name from UI
                     put("plot_name", selectedPlotName)
+                    // 🔥 Flight mode - Automatic or Manual
+                    put("flight_mode", selectedFlightMode)
+                    // 🔥 Mission type - Grid or Waypoint
+                    put("mission_type", selectedMissionType)
+                    // 🔥 Grid setup source - How grid boundary was created
+                    put("grid_setup_source", gridSetupSource)
                 }
 
                 val payload = sessionStart.toString()

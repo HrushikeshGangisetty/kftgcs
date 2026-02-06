@@ -2430,12 +2430,16 @@ fun PlanScreen(
                     onSelectGrid = {
                         showMissionTypeDialog = false
                         showGridSourceDialog = true
+                        // 🔥 Set mission type to GRID for backend telemetry
+                        telemetryViewModel.setMissionType(SharedViewModel.MissionType.GRID)
                     },
                     onSelectWaypoint = {
                         showMissionTypeDialog = false
                         isGridSurveyMode = false
                         showGridControls = false
                         hasStartedPlanning = true
+                        // 🔥 Set mission type to WAYPOINT for backend telemetry
+                        telemetryViewModel.setMissionType(SharedViewModel.MissionType.WAYPOINT)
                     }
                 )
             }
@@ -2449,6 +2453,8 @@ fun PlanScreen(
                     },
                     onImportKml = {
                         // Launch file picker for KML/KMZ files
+                        // 🔥 Set grid setup source to KML_IMPORT for backend telemetry
+                        telemetryViewModel.setGridSetupSource(SharedViewModel.GridSetupSource.KML_IMPORT)
                         kmlFileLauncher.launch(arrayOf(
                             "application/vnd.google-earth.kml+xml",
                             "application/vnd.google-earth.kmz",
@@ -2465,6 +2471,8 @@ fun PlanScreen(
                         isGridGenerated = false
                         showGridControls = false // Don't show grid controls until plot is generated
                         hasStartedPlanning = true
+                        // 🔥 Set grid setup source to MAP_DRAW for backend telemetry
+                        telemetryViewModel.setGridSetupSource(SharedViewModel.GridSetupSource.MAP_DRAW)
                     },
                     onPlaceWithDrone = {
                         // Place with drone - use drone position to mark corners
@@ -2474,6 +2482,8 @@ fun PlanScreen(
                         isGridGenerated = false
                         showGridControls = false // Don't show grid controls until plot is generated
                         hasStartedPlanning = true
+                        // 🔥 Set grid setup source to DRONE_POSITION for backend telemetry
+                        telemetryViewModel.setGridSetupSource(SharedViewModel.GridSetupSource.DRONE_POSITION)
                         Toast.makeText(context, "Tap 'Add Point' to use drone position as boundary point", Toast.LENGTH_SHORT).show()
                     },
                     onUseRC = {
@@ -2485,6 +2495,8 @@ fun PlanScreen(
                         showGridControls = false
                         hasStartedPlanning = true
                         isRCMode = true // Enable RC mode for phone GPS tracking
+                        // 🔥 Set grid setup source to RC_CONTROL for backend telemetry
+                        telemetryViewModel.setGridSetupSource(SharedViewModel.GridSetupSource.RC_CONTROL)
                         Toast.makeText(context, "RC Mode: Walk to corners and tap 'Add RC Point' to mark boundary", Toast.LENGTH_LONG).show()
                     },
                     onBack = {

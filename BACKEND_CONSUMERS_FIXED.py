@@ -89,8 +89,17 @@ class TelemetryConsumer(AsyncWebsocketConsumer):
                 admin_id = data.get("admin_id")
                 plot_name = data.get("plot_name")
 
+                # 🔥 New fields for mission configuration
+                flight_mode = data.get("flight_mode", "AUTOMATIC")  # AUTOMATIC or MANUAL
+                mission_type = data.get("mission_type", "NONE")      # GRID or WAYPOINT
+                grid_setup_source = data.get("grid_setup_source", "NONE")  # KML_IMPORT, MAP_DRAW, DRONE_POSITION, RC_CONTROL
+
                 print(
                     f"📋 vehicle={vehicle_id}, pilot={pilot_id}, admin={admin_id}, plot={plot_name}",
+                    flush=True
+                )
+                print(
+                    f"📋 flight_mode={flight_mode}, mission_type={mission_type}, grid_setup_source={grid_setup_source}",
                     flush=True
                 )
 
@@ -186,6 +195,10 @@ class TelemetryConsumer(AsyncWebsocketConsumer):
                         start_time=now(),
                         status=Mission.STATUS_CREATED,
                         plot_name=plot_name,
+                        # 🔥 New mission configuration fields
+                        flight_mode=flight_mode,
+                        mission_type=mission_type,
+                        grid_setup_source=grid_setup_source,
                     )
                     print(f"✅ Mission created: {mission.mission_id}", flush=True)
                 except Exception as e:
