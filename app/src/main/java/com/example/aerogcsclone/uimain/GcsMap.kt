@@ -297,54 +297,7 @@ private fun createDroneIconWithArrow(context: android.content.Context): BitmapDe
         val scaledDrone = Bitmap.createScaledBitmap(droneBmp, sizePx, sizePx, true)
         canvas.drawBitmap(scaledDrone, 0f, 0f, null)
 
-        // Draw a prominent arrow pointing upward (north/0°) to indicate the nose direction
-        val arrowPaint = android.graphics.Paint().apply {
-            isAntiAlias = true
-            color = android.graphics.Color.rgb(255, 69, 0) // Orange-red for better visibility
-            style = android.graphics.Paint.Style.FILL
-            strokeJoin = android.graphics.Paint.Join.ROUND
-            strokeCap = android.graphics.Paint.Cap.ROUND
-        }
-
-        // Create an isosceles triangle arrow - pointed and sleek for clear nose direction
-        val centerX = sizePx / 2f
-
-        // Make it more pointed and sleek looking
-        val arrowLength = sizePx * 0.45f  // Longer for better direction indication
-        val arrowWidth = sizePx * 0.22f   // Narrower base for sleek look
-
-        // Position triangle for optimal visibility
-        val topY = sizePx * 0.12f  // Sharp nose point at top
-        val bottomY = topY + arrowLength  // Extended length
-        val leftX = centerX - arrowWidth / 2f  // Left base corner
-        val rightX = centerX + arrowWidth / 2f  // Right base corner
-
-        // Define arrow path - sleek isosceles triangle pointing upward
-        val arrowPath = android.graphics.Path().apply {
-            // Sharp nose point at top
-            moveTo(centerX, topY)
-            // Left base corner
-            lineTo(leftX, bottomY)
-            // Right base corner
-            lineTo(rightX, bottomY)
-            // Close back to nose point
-            close()
-        }
-
-        // Draw the arrow fill
-        canvas.drawPath(arrowPath, arrowPaint)
-
-        // Add dark outline for definition
-        arrowPaint.style = android.graphics.Paint.Style.STROKE
-        arrowPaint.color = android.graphics.Color.BLACK
-        arrowPaint.strokeWidth = 2f
-        canvas.drawPath(arrowPath, arrowPaint)
-
-        // Add white inner border for better contrast
-        arrowPaint.color = android.graphics.Color.WHITE
-        arrowPaint.strokeWidth = 1f
-        canvas.drawPath(arrowPath, arrowPaint)
-
+        // No arrow - just return the drone icon
         BitmapDescriptorFactory.fromBitmap(resultBitmap)
     }.getOrNull()
 }
@@ -426,8 +379,8 @@ fun GcsMap(
     // Markers with text labels for grid waypoints
     val startMarker = remember { createMarkerWithText("S", android.graphics.Color.GREEN) }
     val endMarker = remember { createMarkerWithText("E", android.graphics.Color.RED) }
-    val resumeMarker = remember { createSmallResumeMarker() } // Small green "R" for resume point
-    val rcMarker = remember { createRCMarker() } // RC marker for phone GPS location
+    val resumeMarker = remember { createSmallResumeMarker() }
+    val rcMarker = remember { createRCMarker() }
 
     val lat = telemetryState.latitude
     val lon = telemetryState.longitude
@@ -1274,4 +1227,3 @@ private fun createObstacleDistanceLabel(text: String): BitmapDescriptor {
 
     return BitmapDescriptorFactory.fromBitmap(bitmap)
 }
-
