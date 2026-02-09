@@ -57,6 +57,7 @@ import com.example.aerogcsclone.utils.KmlBoundaryParser
 import com.example.aerogcsclone.utils.KmlPolygon
 import java.util.Locale
 import com.example.aerogcsclone.utils.AppStrings
+import com.example.aerogcsclone.BuildConfig
 
 @Suppress("UnusedMaterial3ScaffoldPaddingParameter", "UNUSED_PARAMETER")
 @Composable
@@ -212,7 +213,9 @@ fun PlanScreen(
                         Looper.getMainLooper()
                     )
                 } catch (e: SecurityException) {
-                    android.util.Log.e("PlanScreen", "Location permission denied: ${e.message}")
+                    if (BuildConfig.DEBUG) {
+                        android.util.Log.e("PlanScreen", "Location permission denied: ${e.message}")
+                    }
                 }
             } else {
                 Toast.makeText(context, "Location permission required for RC mode", Toast.LENGTH_SHORT).show()
@@ -283,7 +286,9 @@ fun PlanScreen(
                     }
                 } catch (e: Exception) {
                     Toast.makeText(context, "Error reading KML: ${e.message}", Toast.LENGTH_LONG).show()
-                    android.util.Log.e("PlanScreen", "KML import error", e)
+                    if (BuildConfig.DEBUG) {
+                        android.util.Log.e("PlanScreen", "KML import error", e)
+                    }
                 }
             }
         }
@@ -302,9 +307,11 @@ fun PlanScreen(
 
     // Debug: Track surveyPolygon changes
     LaunchedEffect(surveyPolygon) {
-        android.util.Log.d("PlanScreen", "surveyPolygon changed: ${surveyPolygon.size} points, isGridSurveyMode=$isGridSurveyMode")
-        if (surveyPolygon.isNotEmpty()) {
-            android.util.Log.d("PlanScreen", "First point: ${surveyPolygon.first().latitude}, ${surveyPolygon.first().longitude}")
+        if (BuildConfig.DEBUG) {
+            android.util.Log.d("PlanScreen", "surveyPolygon changed: ${surveyPolygon.size} points, isGridSurveyMode=$isGridSurveyMode")
+            if (surveyPolygon.isNotEmpty()) {
+                android.util.Log.d("PlanScreen", "First point: ${surveyPolygon.first().latitude}, ${surveyPolygon.first().longitude}")
+            }
         }
     }
 
@@ -377,13 +384,17 @@ fun PlanScreen(
         endPercent: Float
     ): GridSurveyResult {
         if (sourceGrid.gridLines.isEmpty() || sourceGrid.waypoints.isEmpty()) {
-            android.util.Log.w("SplitPlan", "Empty source grid - returning as-is")
+            if (BuildConfig.DEBUG) {
+                android.util.Log.w("SplitPlan", "Empty source grid - returning as-is")
+            }
             return sourceGrid
         }
 
         val totalLines = sourceGrid.numLines
         if (totalLines == 0) {
-            android.util.Log.w("SplitPlan", "Zero total lines - returning source grid")
+            if (BuildConfig.DEBUG) {
+                android.util.Log.w("SplitPlan", "Zero total lines - returning source grid")
+            }
             return sourceGrid
         }
 
@@ -393,12 +404,16 @@ fun PlanScreen(
         val startLineIndex = (startPercent * (totalLines - 1)).toInt().coerceIn(0, totalLines - 1)
         val endLineIndex = (endPercent * (totalLines - 1)).toInt().coerceIn(0, totalLines - 1)
 
-        android.util.Log.d("SplitPlan", "Split calculation: totalLines=$totalLines, startPercent=$startPercent, endPercent=$endPercent")
-        android.util.Log.d("SplitPlan", "Line indices: startLineIndex=$startLineIndex, endLineIndex=$endLineIndex")
+        if (BuildConfig.DEBUG) {
+            android.util.Log.d("SplitPlan", "Split calculation: totalLines=$totalLines, startPercent=$startPercent, endPercent=$endPercent")
+            android.util.Log.d("SplitPlan", "Line indices: startLineIndex=$startLineIndex, endLineIndex=$endLineIndex")
+        }
 
         // Ensure valid range
         if (startLineIndex > endLineIndex) {
-            android.util.Log.w("SplitPlan", "Invalid range: startLineIndex > endLineIndex")
+            if (BuildConfig.DEBUG) {
+                android.util.Log.w("SplitPlan", "Invalid range: startLineIndex > endLineIndex")
+            }
             return GridSurveyResult(
                 waypoints = emptyList(),
                 gridLines = emptyList(),
@@ -420,7 +435,9 @@ fun PlanScreen(
             wp.lineIndex in startLineIndex..endLineIndex
         }
 
-        android.util.Log.d("SplitPlan", "Filtered: ${selectedGridLines.size} lines, ${filteredWaypoints.size} waypoints")
+        if (BuildConfig.DEBUG) {
+            android.util.Log.d("SplitPlan", "Filtered: ${selectedGridLines.size} lines, ${filteredWaypoints.size} waypoints")
+        }
 
         // CRITICAL: Re-index waypoints so lineIndex starts from 0
         // This ensures proper mission upload with correct line start/end detection
@@ -430,8 +447,10 @@ fun PlanScreen(
         }
 
         // Log first few reindexed waypoints for debugging
-        reindexedWaypoints.take(6).forEachIndexed { idx, wp ->
-            android.util.Log.d("SplitPlan", "WP[$idx]: lineIndex=${wp.lineIndex}, isStart=${wp.isLineStart}, isEnd=${wp.isLineEnd}")
+        if (BuildConfig.DEBUG) {
+            reindexedWaypoints.take(6).forEachIndexed { idx, wp ->
+                android.util.Log.d("SplitPlan", "WP[$idx]: lineIndex=${wp.lineIndex}, isStart=${wp.isLineStart}, isEnd=${wp.isLineEnd}")
+            }
         }
 
         // Recalculate total distance for selected waypoints
@@ -446,7 +465,9 @@ fun PlanScreen(
         // Calculate estimated time based on speed
         val estimatedTime = if (surveySpeed > 0) totalDistance / surveySpeed else 0.0
 
-        android.util.Log.i("SplitPlan", "✓ Generated split: ${reindexedWaypoints.size} waypoints, ${selectedGridLines.size} lines, ${String.format("%.1f", totalDistance)}m")
+        if (BuildConfig.DEBUG) {
+            android.util.Log.i("SplitPlan", "✓ Generated split: ${reindexedWaypoints.size} waypoints, ${selectedGridLines.size} lines, ${String.format("%.1f", totalDistance)}m")
+        }
 
         return GridSurveyResult(
             waypoints = reindexedWaypoints,
@@ -2469,7 +2490,7 @@ fun PlanScreen(
                         isGridSurveyMode = true
                         isPlotDefinitionMode = true
                         isGridGenerated = false
-                        showGridControls = false // Don't show grid controls until plot is generated
+                        showGridControls = false // Don't show until grid is generated
                         hasStartedPlanning = true
                         // 🔥 Set grid setup source to MAP_DRAW for backend telemetry
                         telemetryViewModel.setGridSetupSource(SharedViewModel.GridSetupSource.MAP_DRAW)

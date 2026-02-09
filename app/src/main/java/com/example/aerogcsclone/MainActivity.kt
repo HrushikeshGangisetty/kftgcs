@@ -19,6 +19,7 @@ import androidx.core.splashscreen.SplashScreen.Companion.installSplashScreen
 import androidx.navigation.compose.rememberNavController
 import com.example.aerogcsclone.navigation.AppNavGraph
 import com.example.aerogcsclone.integration.TlogIntegration
+import android.util.Log
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.google.android.gms.maps.MapsInitializer
 import com.google.accompanist.systemuicontroller.rememberSystemUiController
@@ -67,7 +68,9 @@ class MainActivity : ComponentActivity() {
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
-        android.util.Log.e("MAIN_ACTIVITY", "🔥 MainActivity onCreate CALLED")
+        if (BuildConfig.DEBUG) {
+            android.util.Log.e("MAIN_ACTIVITY", "🔥 MainActivity onCreate CALLED")
+        }
 
         // Handle the splash screen transition.
         installSplashScreen()
@@ -82,13 +85,17 @@ class MainActivity : ComponentActivity() {
         // ✅ WebSocket connection is now managed by mission lifecycle
         // - Opens when mission starts (SharedViewModel.startMission)
         // - Closes when mission ends (TelemetryRepository)
-        android.util.Log.i("MAIN_ACTIVITY", "📋 WebSocket will connect when mission starts")
+        if (BuildConfig.DEBUG) {
+            android.util.Log.i("MAIN_ACTIVITY", "📋 WebSocket will connect when mission starts")
+        }
 
         // ✅ Get pilotId and adminId from SessionManager (values from database after login)
         val pilotId = SessionManager.getPilotId(this)
         val adminId = SessionManager.getAdminId(this)
 
-        android.util.Log.e("MAIN_ACTIVITY", "📋 SessionManager values: pilotId=$pilotId, adminId=$adminId")
+        if (BuildConfig.DEBUG) {
+            android.util.Log.e("MAIN_ACTIVITY", "📋 SessionManager values: pilotId=$pilotId, adminId=$adminId")
+        }
 
         // ✅ Pre-set the values on WebSocketManager (connection happens on mission start)
         wsManager.pilotId = pilotId
