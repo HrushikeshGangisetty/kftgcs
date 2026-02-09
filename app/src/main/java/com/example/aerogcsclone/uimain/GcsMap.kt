@@ -286,8 +286,8 @@ private fun createDroneIconWithArrow(context: android.content.Context): BitmapDe
     return runCatching {
         // Load the original drone image
         val droneBmp = BitmapFactory.decodeResource(context.resources, R.drawable.d_image_prev_ui)
-        val sizeDp = 64f
-        val sizePx = (sizeDp * context.resources.displayMetrics.density).toInt().coerceAtLeast(24)
+        val sizeDp = 24f // Reduced from 64f to make drone smaller
+        val sizePx = (sizeDp * context.resources.displayMetrics.density).toInt().coerceAtLeast(16)
 
         // Create a mutable bitmap to draw on
         val resultBitmap = Bitmap.createBitmap(sizePx, sizePx, Bitmap.Config.ARGB_8888)

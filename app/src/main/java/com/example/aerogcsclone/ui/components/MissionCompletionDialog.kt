@@ -77,7 +77,7 @@ fun MissionCompletionDialog(
                     imageVector = Icons.Default.CheckCircle,
                     contentDescription = "Mission Completed",
                     tint = Color(0xFF4CAF50),
-                    modifier = Modifier.size(64.dp)
+                    modifier = Modifier.size(40.dp)
                 )
 
                 Spacer(modifier = Modifier.height(16.dp))
