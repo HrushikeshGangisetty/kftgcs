@@ -54,6 +54,7 @@ class UnifiedFlightTracker(
     private var lastLat: Double? = null
     private var lastLon: Double? = null
     private var totalDistanceMeters: Float = 0f
+    private var totalSprayedDistanceMeters: Float = 0f  // Distance traveled while pump ON and flow > 0
 
     // Telemetry logging
     private var loggingService: FlightLoggingService? = null
@@ -257,6 +258,13 @@ class UnifiedFlightTracker(
             val distance = haversine(lastLat!!, lastLon!!, lat, lon)
             if (distance > 0.1f && distance < 100f) {  // Sanity check: 0.1m to 100m per update
                 totalDistanceMeters += distance
+
+                // Track sprayed distance - only when pump is ON and flow rate > 0
+                val isPumpOn = telemetry.sprayTelemetry.sprayEnabled
+                val flowRate = telemetry.sprayTelemetry.flowRateLiterPerMin ?: 0f
+                if (isPumpOn && flowRate > 0f) {
+                    totalSprayedDistanceMeters += distance
+                }
             }
             lastLat = lat
             lastLon = lon
@@ -266,7 +274,8 @@ class UnifiedFlightTracker(
         sharedViewModel.updateFlightState(
             isActive = true,
             elapsedSeconds = elapsedSeconds,
-            distanceMeters = totalDistanceMeters
+            distanceMeters = totalDistanceMeters,
+            sprayedDistanceMeters = totalSprayedDistanceMeters
         )
     }
 
@@ -355,6 +364,7 @@ class UnifiedFlightTracker(
 
         // CRITICAL: Preserve final values BEFORE any cleanup
         val finalDistance = totalDistanceMeters
+        val finalSprayedDistance = totalSprayedDistanceMeters
         val finalTime = elapsedSeconds
 
         // Capture consumed litres from spray telemetry
@@ -388,11 +398,12 @@ class UnifiedFlightTracker(
             )
         )
 
-        // Show mission completion dialog with time, acres (converted from distance), and consumed litres
+        // Show mission completion dialog with time, acres (converted from distance), sprayed acres, and consumed litres
         val consumedLitresStr = finalConsumedLitres?.let { "%.2f L".format(it) } ?: "N/A"
         sharedViewModel.showMissionCompletionDialog(
             totalTime = formatTime(finalTime),
             totalAcres = formatAcres(finalDistance),
+            sprayedAcres = formatAcres(finalSprayedDistance),
             consumedLitres = consumedLitresStr
         )
 
@@ -402,6 +413,7 @@ class UnifiedFlightTracker(
             isActive = false,
             elapsedSeconds = finalTime,
             distanceMeters = finalDistance,
+            sprayedDistanceMeters = finalSprayedDistance,
             completed = true
         )
 
@@ -421,6 +433,7 @@ class UnifiedFlightTracker(
         flightStartTime = 0
         groundLevelAltitude = 0f
         totalDistanceMeters = 0f
+        totalSprayedDistanceMeters = 0f
         lastLat = null
         lastLon = null
     }

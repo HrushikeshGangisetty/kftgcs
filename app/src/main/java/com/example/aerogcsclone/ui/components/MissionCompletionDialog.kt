@@ -27,6 +27,7 @@ import com.example.aerogcsclone.utils.AppStrings
 fun MissionCompletionDialog(
     totalTime: String,
     totalAcres: String,
+    sprayedAcres: String,
     consumedLitres: String,
     initialProjectName: String = "",
     initialPlotName: String = "",
@@ -125,7 +126,7 @@ fun MissionCompletionDialog(
                                     color = MaterialTheme.colorScheme.onSurface
                                 )
                             }
-                            // Total Acres
+                            // Total Acres (flown distance)
                             Column(modifier = Modifier.weight(1f)) {
                                 Text(
                                     text = "Total Acres",
@@ -141,19 +142,37 @@ fun MissionCompletionDialog(
                             }
                         }
 
-                        // Consumed Litres (full width, if available)
-                        if (consumedLitres.isNotEmpty() && consumedLitres != "N/A") {
-                            Column(modifier = Modifier.fillMaxWidth()) {
+                        // Row 2: Sprayed Acres and Consumed Litres side by side
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(16.dp)
+                        ) {
+                            // Sprayed Acres (only while pump ON and flow > 0)
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    text = "Sprayed Acres",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                                Text(
+                                    text = sprayedAcres,
+                                    style = MaterialTheme.typography.titleMedium,
+                                    fontWeight = FontWeight.Bold,
+                                    color = Color(0xFF4CAF50)  // Green to highlight spray data
+                                )
+                            }
+                            // Consumed Litres
+                            Column(modifier = Modifier.weight(1f)) {
                                 Text(
                                     text = AppStrings.consumed,
                                     style = MaterialTheme.typography.bodySmall,
                                     color = MaterialTheme.colorScheme.onSurfaceVariant
                                 )
                                 Text(
-                                    text = consumedLitres,
+                                    text = if (consumedLitres.isNotEmpty() && consumedLitres != "N/A") consumedLitres else "N/A",
                                     style = MaterialTheme.typography.titleMedium,
                                     fontWeight = FontWeight.Bold,
-                                    color = MaterialTheme.colorScheme.onSurface
+                                    color = if (consumedLitres.isNotEmpty() && consumedLitres != "N/A") Color(0xFF2196F3) else MaterialTheme.colorScheme.onSurface
                                 )
                             }
                         }

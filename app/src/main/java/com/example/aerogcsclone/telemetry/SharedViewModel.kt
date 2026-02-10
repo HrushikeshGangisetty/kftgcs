@@ -388,12 +388,21 @@ class SharedViewModel : ViewModel() {
         isActive: Boolean,
         elapsedSeconds: Long,
         distanceMeters: Float,
+        sprayedDistanceMeters: Float = 0f,
         completed: Boolean = false
     ) {
+        // Calculate sprayed acres from sprayed distance
+        // Formula: (sprayed_distance_m * spray_width_m) / 4046.86 (sq meters per acre)
+        val sprayWidthMeters = 5.0f  // Default spray width
+        val sprayedAreaSqMeters = sprayedDistanceMeters * sprayWidthMeters
+        val sprayedAcres = sprayedAreaSqMeters / 4046.86f
+
         _telemetryState.value = _telemetryState.value.copy(
             isMissionActive = isActive,
             missionElapsedSec = if (isActive) elapsedSeconds else null,
             totalDistanceMeters = if (isActive || completed) distanceMeters else null,
+            totalSprayedDistanceMeters = if (isActive || completed) sprayedDistanceMeters else null,
+            totalSprayedAcres = if (isActive || completed) sprayedAcres else null,
             missionCompleted = completed,
             lastMissionElapsedSec = if (completed) elapsedSeconds else _telemetryState.value.lastMissionElapsedSec
         )
@@ -726,6 +735,7 @@ class SharedViewModel : ViewModel() {
     data class MissionCompletionData(
         val totalTime: String = "",
         val totalAcres: String = "",
+        val sprayedAcres: String = "",
         val consumedLitres: String = ""
     )
 
@@ -746,10 +756,10 @@ class SharedViewModel : ViewModel() {
      * Show the mission completion dialog with the given data
      * WebSocket stays connected until user clicks OK
      */
-    fun showMissionCompletionDialog(totalTime: String, totalAcres: String, consumedLitres: String) {
-        _missionCompletionData.value = MissionCompletionData(totalTime, totalAcres, consumedLitres)
+    fun showMissionCompletionDialog(totalTime: String, totalAcres: String, sprayedAcres: String, consumedLitres: String) {
+        _missionCompletionData.value = MissionCompletionData(totalTime, totalAcres, sprayedAcres, consumedLitres)
         _showMissionCompletionDialog.value = true
-        Log.i("SharedVM", "Mission completion dialog triggered - Time: $totalTime, Acres: $totalAcres, Litres: $consumedLitres")
+        Log.i("SharedVM", "Mission completion dialog triggered - Time: $totalTime, Acres: $totalAcres, Sprayed: $sprayedAcres, Litres: $consumedLitres")
         // 🔌 WebSocket stays connected - will be disconnected when user clicks OK
     }
 

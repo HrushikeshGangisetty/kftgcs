@@ -83,6 +83,11 @@ data class TelemetryState(
     val missionCompletedHandled: Boolean = false, // Tracks if the completion popup was already shown
     val totalDistanceMeters: Float? = null,
 
+    // Sprayed distance tracking (distance traveled while pump ON and flow > 0)
+    val totalSprayedDistanceMeters: Float? = null,
+    // Sprayed acres calculated from sprayed distance: (distance * spray_width) / 4046.86
+    val totalSprayedAcres: Float? = null,
+
     // Crop type for agricultural missions
     val cropType: String? = null,
     // Formatted speed values for UI

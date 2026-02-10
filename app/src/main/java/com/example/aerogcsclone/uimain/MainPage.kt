@@ -253,6 +253,7 @@ fun MainPage(
             MissionCompletionDialog(
                 totalTime = missionCompletionData.totalTime,
                 totalAcres = missionCompletionData.totalAcres,
+                sprayedAcres = missionCompletionData.sprayedAcres,
                 consumedLitres = missionCompletionData.consumedLitres,
                 initialProjectName = currentProjectName,
                 initialPlotName = currentPlotName,
