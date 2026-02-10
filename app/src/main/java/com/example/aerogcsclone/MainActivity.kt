@@ -21,6 +21,7 @@ import com.example.aerogcsclone.navigation.AppNavGraph
 import com.example.aerogcsclone.integration.TlogIntegration
 import android.util.Log
 import androidx.lifecycle.viewmodel.compose.viewModel
+import androidx.viewbinding.BuildConfig
 import com.google.android.gms.maps.MapsInitializer
 import com.google.accompanist.systemuicontroller.rememberSystemUiController
 import com.example.aerogcsclone.telemetry.SharedViewModel
