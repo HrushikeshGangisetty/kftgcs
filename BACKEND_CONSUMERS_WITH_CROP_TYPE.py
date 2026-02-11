@@ -344,6 +344,7 @@ class TelemetryConsumer(AsyncWebsocketConsumer):
                         "admin": self.session["admin"],
                         "pilot": self.session["pilot"],
                         "total_acres": data.get("total_acres"),
+                        "total_sprayed_acres": data.get("total_sprayed_acres"),
                         "total_spray_used_liters": data.get("total_spray_used"),
                         "flying_time_sec": data.get("flying_time_minutes", 0) * 60 if data.get("flying_time_minutes") else None,
                         "battery_start": data.get("battery_start"),

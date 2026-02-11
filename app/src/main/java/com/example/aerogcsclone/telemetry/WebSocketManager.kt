@@ -723,6 +723,7 @@ class WebSocketManager {
      * @param projectName Project name entered by user
      * @param plotName Plot name entered by user
      * @param cropType Crop type entered by user (optional)
+     * @param totalSprayedAcres Total acres sprayed (distance with spray ON)
      */
     fun sendMissionSummary(
         totalAcres: Double,
@@ -735,7 +736,8 @@ class WebSocketManager {
         status: String,  // "COMPLETED" or "FAILED"
         projectName: String = "",
         plotName: String = "",
-        cropType: String = ""
+        cropType: String = "",
+        totalSprayedAcres: Double = 0.0
     ) {
         if (!isConnected || missionId == null) {
             Log.e(TAG, "⛔ Cannot send mission summary — socket not ready (connected=$isConnected, missionId=$missionId)")
@@ -769,12 +771,13 @@ class WebSocketManager {
                 put("project_name", projectName)
                 put("plot_name", plotName)
                 put("crop_type", cropType)
+                put("total_sprayed_acres", totalSprayedAcres)
             }
 
             webSocket.send(msg.toString())
             Log.d(TAG, "📤 Mission summary sent: acres=$totalAcres, spray=$totalSprayUsed, time=$flyingTimeMinutes min, " +
                 "speed=$averageSpeed, battery=$batteryStart%→$batteryEnd%, alerts=$alertsCount, status=$status, " +
-                "project=$projectName, plot=$plotName, crop=$cropType")
+                "project=$projectName, plot=$plotName, crop=$cropType, sprayedAcres=$totalSprayedAcres")
 
         } catch (e: Exception) {
             Log.e(TAG, "❌ Failed to send mission summary", e)

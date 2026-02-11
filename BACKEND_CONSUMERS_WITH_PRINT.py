@@ -397,6 +397,8 @@ class TelemetryConsumer(AsyncWebsocketConsumer):
 
             try:
                 total_area = data.get("total_area")
+
+                total_sprayed_acres = data.get("total_sprayed_acres")
                 total_spray_used = data.get("total_spray_used")
                 flying_time_minutes = data.get("flying_time_minutes")
                 average_speed = data.get("average_speed")
@@ -414,11 +416,12 @@ class TelemetryConsumer(AsyncWebsocketConsumer):
                         await conn.execute("""
                             INSERT INTO pavaman_gcs_app_mission_summary
                             (mission_id, vehicle_id, pilot_id, admin_id, total_area,
-                             total_spray_used, flying_time_minutes, average_speed,
+                             total_sprayed_acres, total_spray_used, flying_time_minutes, average_speed,
                              battery_start, battery_end, alerts_count, status, created_at)
-                            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
+                            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
                             ON CONFLICT (mission_id) DO UPDATE SET
                                 total_area = EXCLUDED.total_area,
+                                total_sprayed_acres = EXCLUDED.total_sprayed_acres,
                                 total_spray_used = EXCLUDED.total_spray_used,
                                 flying_time_minutes = EXCLUDED.flying_time_minutes,
                                 average_speed = EXCLUDED.average_speed,
@@ -428,7 +431,7 @@ class TelemetryConsumer(AsyncWebsocketConsumer):
                                 status = EXCLUDED.status
                         """, self.session["mission_id"], self.session["vehicle_id"],
                         self.session["pilot_id"], self.session["admin_id"], total_area,
-                        total_spray_used, flying_time_minutes, average_speed,
+                        total_sprayed_acres, total_spray_used, flying_time_minutes, average_speed,
                         battery_start, battery_end, alerts_count, status, now())
 
                         print(f"✅ Mission summary saved", flush=True)
