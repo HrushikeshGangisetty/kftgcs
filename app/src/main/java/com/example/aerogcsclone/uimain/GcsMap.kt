@@ -362,7 +362,14 @@ fun GcsMap(
     val context = LocalContext.current
     val cameraState = cameraPositionState ?: rememberCameraPositionState()
 
-    val visitedPositions = remember { mutableStateListOf<LatLng>() }
+    // Data class to track position with spray status
+    data class DronePathPoint(
+        val position: LatLng,
+        val isSpraying: Boolean
+    )
+
+    // Track drone path with spray status
+    val visitedPathPoints = remember { mutableStateListOf<DronePathPoint>() }
 
     // Load quadcopter drawable with directional arrow indicator
     val droneIcon = remember {
@@ -388,15 +395,34 @@ fun GcsMap(
         cameraState.move(CameraUpdateFactory.newLatLngZoom(LatLng(lat, lon), 16f))
     }
 
-    LaunchedEffect(lat, lon) {
+    LaunchedEffect(lat, lon, telemetryState.sprayTelemetry.sprayEnabled, telemetryState.sprayTelemetry.flowRateLiterPerMin) {
         if (lat != null && lon != null) {
             val pos = LatLng(lat, lon)
-            if (visitedPositions.isEmpty() || visitedPositions.last() != pos) {
-                visitedPositions.add(pos)
+
+            // Determine if drone is actively spraying
+            // Spraying = spray system enabled AND flow rate > 0
+            val sprayEnabled = telemetryState.sprayTelemetry.sprayEnabled
+            val flowRate = telemetryState.sprayTelemetry.flowRateLiterPerMin ?: 0f
+            val isSpraying = sprayEnabled && flowRate > 0f
+
+            val newPoint = DronePathPoint(pos, isSpraying)
+
+            // Add new point if position changed or spray status changed
+            if (visitedPathPoints.isEmpty() ||
+                visitedPathPoints.last().position != pos ||
+                visitedPathPoints.last().isSpraying != isSpraying) {
+
+                // Log spray status changes for debugging
+                if (visitedPathPoints.isNotEmpty() && visitedPathPoints.last().isSpraying != isSpraying) {
+                    android.util.Log.i("GcsMap", "🚁 Spray status changed: ${if (isSpraying) "SPRAYING" else "NOT_SPRAYING"} (enabled=$sprayEnabled, flow=$flowRate L/min)")
+                }
+
+                visitedPathPoints.add(newPoint)
+
                 val maxLen = 2000
-                if (visitedPositions.size > maxLen) {
-                    val removeCount = visitedPositions.size - maxLen
-                    repeat(removeCount) { visitedPositions.removeAt(0) }
+                if (visitedPathPoints.size > maxLen) {
+                    val removeCount = visitedPathPoints.size - maxLen
+                    repeat(removeCount) { visitedPathPoints.removeAt(0) }
                 }
             }
         }
@@ -478,6 +504,70 @@ fun GcsMap(
                                 }
                             )
                         }
+                    }
+                }
+
+                // ===== GEOFENCE MEASUREMENTS =====
+                // Add distance labels along geofence edges and area in the center
+                if (geofencePolygon.size >= 3) {
+                    // Calculate and display area in the center of the geofence
+                    val areaInSqMeters = SphericalUtil.computeArea(geofencePolygon)
+                    val areaInSqFeet = areaInSqMeters * 10.7639
+                    val areaInAcres = areaInSqFeet / 43560.0
+                    val areaText = when {
+                        areaInAcres >= 1.0 -> String.format(Locale.US, "%.2f acres", areaInAcres)
+                        areaInSqMeters >= 10000 -> String.format(Locale.US, "%.2f ha", areaInSqMeters / 10000.0)
+                        else -> String.format(Locale.US, "%.0f m²", areaInSqMeters)
+                    }
+
+                    // Calculate centroid of the geofence polygon for area label
+                    val centroidLat = geofencePolygon.map { it.latitude }.average()
+                    val centroidLon = geofencePolygon.map { it.longitude }.average()
+                    val centroid = LatLng(centroidLat, centroidLon)
+
+                    // Create area label marker with yellow background to match geofence color
+                    val areaLabelIcon = remember(areaText) {
+                        createSmallLabelMarker(areaText, android.graphics.Color.rgb(255, 235, 59)) // Yellow background
+                    }
+
+                    Marker(
+                        state = MarkerState(position = centroid),
+                        title = "Geofence Area: $areaText",
+                        icon = areaLabelIcon,
+                        anchor = Offset(0.5f, 0.5f),
+                        zIndex = 8f // Below geofence markers but above other elements
+                    )
+
+                    // Display distance measurements for each edge of the geofence
+                    geofencePolygon.forEachIndexed { index, point ->
+                        val nextIndex = (index + 1) % geofencePolygon.size
+                        val nextPoint = geofencePolygon[nextIndex]
+
+                        // Calculate distance between consecutive points
+                        val distanceMeters = SphericalUtil.computeDistanceBetween(point, nextPoint)
+                        val distanceText = if (distanceMeters >= 1000) {
+                            String.format(Locale.US, "%.1f km", distanceMeters / 1000)
+                        } else {
+                            String.format(Locale.US, "%.0f m", distanceMeters)
+                        }
+
+                        // Position the label at the midpoint of the edge
+                        val midLat = (point.latitude + nextPoint.latitude) / 2
+                        val midLon = (point.longitude + nextPoint.longitude) / 2
+                        val midPoint = LatLng(midLat, midLon)
+
+                        // Create distance label marker with white background for contrast
+                        val distanceLabelIcon = remember(distanceText, index) {
+                            createSmallLabelMarker(distanceText, android.graphics.Color.WHITE)
+                        }
+
+                        Marker(
+                            state = MarkerState(position = midPoint),
+                            title = "Edge ${index + 1}: $distanceText",
+                            icon = distanceLabelIcon,
+                            anchor = Offset(0.5f, 0.5f),
+                            zIndex = 7f // Below area marker and geofence markers
+                        )
                     }
                 }
             }
@@ -1007,9 +1097,46 @@ fun GcsMap(
             }
         }
 
-        // Green polyline showing the drone's traveled path
-        if (visitedPositions.size > 1) {
-            Polyline(points = visitedPositions.toList(), width = 6f, color = Color.Green)
+        // Spray-aware polylines showing the drone's traveled path
+        // Green for sprayed areas, Red for non-sprayed areas
+        if (visitedPathPoints.size > 1) {
+            // Group consecutive points by spray status to create segments
+            val segments = mutableListOf<Pair<List<LatLng>, Boolean>>() // (points, isSpraying)
+            var currentSegment = mutableListOf<LatLng>()
+            var currentSprayStatus: Boolean? = null
+
+            visitedPathPoints.forEach { pathPoint ->
+                if (currentSprayStatus == null || currentSprayStatus != pathPoint.isSpraying) {
+                    // Start a new segment
+                    if (currentSegment.isNotEmpty() && currentSprayStatus != null) {
+                        // Add the previous segment
+                        segments.add(Pair(currentSegment.toList(), currentSprayStatus!!))
+                    }
+                    // Start new segment with current point
+                    currentSegment = mutableListOf(pathPoint.position)
+                    currentSprayStatus = pathPoint.isSpraying
+                } else {
+                    // Continue current segment
+                    currentSegment.add(pathPoint.position)
+                }
+            }
+
+            // Add the final segment
+            if (currentSegment.isNotEmpty() && currentSprayStatus != null) {
+                segments.add(Pair(currentSegment.toList(), currentSprayStatus!!))
+            }
+
+            // Draw polylines for each segment
+            segments.forEach { (points, isSpraying) ->
+                if (points.size > 1) {
+                    android.util.Log.d("GcsMap", "🎨 Drawing ${if (isSpraying) "GREEN" else "RED"} polyline segment with ${points.size} points")
+                    Polyline(
+                        points = points,
+                        width = 6f,
+                        color = if (isSpraying) Color.Green else Color.Red
+                    )
+                }
+            }
         }
 
         // ===== RESUME POINT MARKER =====

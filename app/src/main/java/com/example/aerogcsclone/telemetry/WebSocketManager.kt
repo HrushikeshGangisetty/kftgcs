@@ -163,8 +163,17 @@ class WebSocketManager {
         set(value) {
             val oldValue = field
             field = value
+
+            // 🔥 LOG ALL DRONE UID UPDATES
+            Log.e("WS_DRONE_UID", "🔥 DRONE UID UPDATED:")
+            Log.e("WS_DRONE_UID", "   Old: '$oldValue'")
+            Log.e("WS_DRONE_UID", "   New: '$value'")
+            Log.e("WS_DRONE_UID", "   IsConnected: $isConnected")
+            Log.e("WS_DRONE_UID", "   MissionId: $missionId")
+
             // 🔥 If droneUid was updated while connected, send update to backend
             if (value.isNotBlank() && oldValue != value && isConnected && missionId != null) {
+                Log.e("WS_DRONE_UID", "   📤 Sending drone_uid_update to backend")
                 sendDroneUidUpdate(value)
             }
         }
@@ -264,6 +273,15 @@ class WebSocketManager {
         Log.e("WS_DEBUG", "📋 pilotId=$pilotId, adminId=$adminId, droneUid='$droneUid'")
         Log.d(TAG, "📋 Connecting with pilotId=$pilotId, adminId=$adminId")
 
+        // 🔥 IMMEDIATE DRONE UID STATUS CHECK
+        val currentDroneUid = resolveDroneUid()
+        val isRealDrone = droneUid.isNotBlank()
+        Log.e("WS_DRONE_UID", "🔥 DRONE UID STATUS ON CONNECT:")
+        Log.e("WS_DRONE_UID", "   Raw droneUid: '$droneUid'")
+        Log.e("WS_DRONE_UID", "   Resolved droneUid: '$currentDroneUid'")
+        Log.e("WS_DRONE_UID", "   Is Real Drone: $isRealDrone")
+        Log.e("WS_DRONE_UID", "   ${if (isRealDrone) "✅ USING REAL DRONE UID" else "⚠️ USING FALLBACK (SITL_DRONE_001)"}")
+
         // Log security status
         if (isSecureConnectionEnabled()) {
             Log.d(TAG, "🔒 Using SECURE WebSocket connection (WSS)")
@@ -349,7 +367,14 @@ class WebSocketManager {
                 // 🔥 CRITICAL: Log BEFORE sending
                 Log.e("WS_DEBUG", "📤 About to send session_start payload: $payload")
 
-                val sent = webSocket.send(payload)
+                // 🔥 EXTRA DRONE UID VERIFICATION
+                Log.e("WS_DRONE_UID", "🔥 SESSION_START DRONE UID VERIFICATION:")
+                Log.e("WS_DRONE_UID", "   Raw droneUid field: '$droneUid'")
+                Log.e("WS_DRONE_UID", "   droneUidToSend: '$droneUidToSend'")
+                Log.e("WS_DRONE_UID", "   Is fallback: $isFallback")
+                Log.e("WS_DRONE_UID", "   Final payload drone_uid: '${sessionStart.getString("drone_uid")}'")
+
+                val sent = webSocket?.send(payload) == true
 
                 // 🔥 CRITICAL DEBUG LOG - Check if send() succeeded
                 Log.e("WS_DEBUG", "📤📤📤 session_start send result = $sent 📤📤📤")

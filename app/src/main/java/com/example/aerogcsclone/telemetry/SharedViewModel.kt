@@ -3522,6 +3522,9 @@ class SharedViewModel : ViewModel() {
                     Log.e("Geofence", "🚨🚨🚨 CONFIRMED BREACH! Outside fence - EMERGENCY BRAKE + RTL! 🚨🚨🚨")
                     Log.e("Geofence", "Position: $droneLat, $droneLon")
 
+                    // 🔊 TTS Announcement for critical geofence violation
+                    speak("Critical geofence breach! Emergency RTL activated!")
+
                     // Send BRAKE then RTL - this will set rtlInitiated = true
                     sendEmergencyBrakeAndRTLBurst()
                 }
@@ -3559,6 +3562,9 @@ class SharedViewModel : ViewModel() {
                         type = NotificationType.WARNING
                     )
                 )
+
+                // 🔊 TTS Announcement for geofence warning
+                speak("Geofence Breached, brake enabled")
             }
             // DO NOT send BRAKE or RTL - drone is still inside the fence
             // This is just a warning to the pilot

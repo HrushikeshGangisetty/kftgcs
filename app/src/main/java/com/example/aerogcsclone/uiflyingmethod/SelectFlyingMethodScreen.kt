@@ -127,7 +127,7 @@ fun SelectFlyingMethodScreen(navController: NavController, sharedViewModel: Shar
                         label = AppStrings.automatic,
                         onClick = {
                             sharedViewModel.announceSelectedAutomatic()
-                            navController.navigate(Screen.Main.route)
+                            navController.navigate(Screen.Plan.route)
                         }
                     )
 

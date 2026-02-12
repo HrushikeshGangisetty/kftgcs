@@ -52,6 +52,9 @@ fun TopNavBar(
     val geofenceEnabled by telemetryViewModel.geofenceEnabled.collectAsState()
     val fenceRadius by telemetryViewModel.fenceRadius.collectAsState()
 
+    // Collect user selected flight mode to conditionally show Plan Mission menu item
+    val userFlightMode by telemetryViewModel.userSelectedFlightMode.collectAsState()
+
     // Collect spray rate from viewmodel (spray enabled status comes from RC7 in telemetryState)
     val sprayRate by telemetryViewModel.sprayRate.collectAsState()
 
@@ -110,36 +113,39 @@ fun TopNavBar(
                             .width(140.dp)
                             .background(Color(0xFF23232B).copy(alpha = 0.85f))
                     ) {
-                        DropdownMenuItem(
-                            text = { Text(AppStrings.planMission, color = Color.White) },
-                            leadingIcon = {
-                                Icon(
-                                    imageVector = Icons.Default.Map,
-                                    contentDescription = AppStrings.planMission,
-                                    tint = Color.White,
-                                    modifier = Modifier.size(18.dp)
-                                )
-                            },
-                            onClick = {
-                                menuExpanded = false
-                                navController.navigate(Screen.Plan.route)
-                            }
-                        )
-                        DropdownMenuItem(
-                            text = { Text(AppStrings.plotTemplates, color = Color.White) },
-                            leadingIcon = {
-                                Icon(
-                                    imageVector = Icons.Default.FileCopy,
-                                    contentDescription = AppStrings.plotTemplates,
-                                    tint = Color.White,
-                                    modifier = Modifier.size(18.dp)
-                                )
-                            },
-                            onClick = {
-                                menuExpanded = false
-                                navController.navigate(Screen.PlotTemplates.route)
-                            }
-                        )
+                        // Only show Plan Mission menu item when user selected Automatic mode
+                        if (userFlightMode == SharedViewModel.UserFlightMode.AUTOMATIC) {
+                            DropdownMenuItem(
+                                text = { Text(AppStrings.planMission, color = Color.White) },
+                                leadingIcon = {
+                                    Icon(
+                                        imageVector = Icons.Default.Map,
+                                        contentDescription = AppStrings.planMission,
+                                        tint = Color.White,
+                                        modifier = Modifier.size(18.dp)
+                                    )
+                                },
+                                onClick = {
+                                    menuExpanded = false
+                                    navController.navigate(Screen.Plan.route)
+                                }
+                            )
+                            DropdownMenuItem(
+                                text = { Text(AppStrings.plotTemplates, color = Color.White) },
+                                leadingIcon = {
+                                    Icon(
+                                        imageVector = Icons.Default.FileCopy,
+                                        contentDescription = AppStrings.plotTemplates,
+                                        tint = Color.White,
+                                        modifier = Modifier.size(18.dp)
+                                    )
+                                },
+                                onClick = {
+                                    menuExpanded = false
+                                    navController.navigate(Screen.PlotTemplates.route)
+                                }
+                            )
+                        }
                         DropdownMenuItem(
                             text = { Text(AppStrings.reconnect, color = Color.White) },
                             leadingIcon = {

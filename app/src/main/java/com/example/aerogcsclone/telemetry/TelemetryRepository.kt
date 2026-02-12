@@ -1477,6 +1477,15 @@ class MavlinkTelemetryRepository(
                                 )
                             }
 
+                            // 🔥 CRITICAL FIX: Update WebSocketManager with real drone UID
+                            try {
+                                val wsManager = WebSocketManager.getInstance()
+                                wsManager.droneUid = droneIdentifier.serialNumber
+                                Log.i("TelemetryRepo", "✅ Updated WebSocketManager with droneUid: '${droneIdentifier.serialNumber}'")
+                            } catch (e: Exception) {
+                                Log.e("TelemetryRepo", "❌ Failed to update WebSocketManager droneUid", e)
+                            }
+
                             // Announce drone ID via TTS
                             val shortUid = droneIdentifier.serialNumber.takeLast(8) // Last 8 characters for brevity
                             sharedViewModel.speak("Drone identified. Serial number ending in $shortUid")
