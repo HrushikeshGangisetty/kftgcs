@@ -3440,9 +3440,9 @@ class SharedViewModel : ViewModel() {
         // ═══════════════════════════════════════════════════════════════════════════
 
         // Minimum buffer distance - triggers even when stationary
-        // INCREASED from 3.0m to 8.0m for much better safety margin
+        // INCREASED from 3.0m to 9.0m for much better safety margin
         // This ensures drone stops well before the physical fence boundary
-        private const val MIN_BUFFER_METERS = 8.0  // Minimum buffer when stationary
+        private const val MIN_BUFFER_METERS = 9.0  // Minimum buffer when stationary
 
         // Maximum buffer distance - caps the dynamic buffer at high speeds
         // INCREASED from 15m to 25m for high-speed scenarios
@@ -3643,8 +3643,8 @@ class SharedViewModel : ViewModel() {
      * - Also checks corner distances (important when perpendicular doesn't hit any segment)
      * - Dynamic buffer based on current speed to ensure drone can stop in time
      * - Returns 0 if outside fence (BREACH), otherwise returns distance to nearest edge
-     * - Triggers BRAKE + POSHOLD (Hover) if BREACH or within dynamic buffer distance at high speed
-     * - POSHOLD (Hover) keeps drone stationary precisely and prevents user from flying outside fence
+     * - Triggers BRAKE + LOITER if BREACH or within dynamic buffer distance at high speed
+     * - LOITER holds drone at current position to prevent further fence violations
      */
     private fun checkGeofenceNow() {
         // Skip if geofence not enabled
@@ -3684,8 +3684,8 @@ class SharedViewModel : ViewModel() {
         }
 
         // ═══ MISSION PLANNER / ARDUPILOT STYLE FENCE LOGIC WITH BREACH CONFIRMATION ═══
-        // 🔥 FIX: Only trigger BRAKE/RTL for CONFIRMED breach (drone outside fence for sustained period)
-        // Being close to the edge (within buffer) should only WARN, not trigger RTL
+        // 🔥 FIX: Only trigger BRAKE/LOITER for CONFIRMED breach (drone outside fence for sustained period)
+        // Being close to the edge (within buffer) should only WARN, not trigger LOITER
         // This prevents false positives from GPS glitches and instantaneous readings
         val isOutsideFence = distanceToFence == 0.0
         val isWithinBuffer = isInsideFence && distanceToFence <= dynamicBuffer
@@ -3712,31 +3712,31 @@ class SharedViewModel : ViewModel() {
                 }
             }
 
-            // Only trigger RTL if breach is CONFIRMED (multiple consecutive detections)
+            // Only trigger LOITER if breach is CONFIRMED (multiple consecutive detections)
             if (breachConfirmationCount >= BREACH_CONFIRMATION_SAMPLES) {
                 Log.e("Geofence", "🔴 HARD BREACH CONFIRMED! DRONE IS OUTSIDE FENCE!")
 
                 _geofenceWarningTriggered.value = true
                 _geofenceViolationDetected.value = true
 
-                // FIRST TIME: Send BRAKE then RTL
+                // FIRST TIME: Send BRAKE then LOITER
                 if (!geofenceActionTaken) {
                     geofenceActionTaken = true
-                    rtlInitiated = false // Will be set to true once RTL process starts
+                    rtlInitiated = false // Will be set to true once LOITER process starts
                     lastBrakeCommandTime = now
 
                     Log.e("Geofence", "🚨🚨🚨 CONFIRMED BREACH! Outside fence - EMERGENCY BRAKE + LOITER! 🚨🚨🚨")
                     Log.e("Geofence", "Position: $droneLat, $droneLon")
 
                     // 🔊 TTS Announcement for critical geofence violation
-                    speak("Critical geofence breach! Emergency HOVER activated!")
+                    speak("Critical geofence breach! Drone stopping!")
 
-                    // Send BRAKE then LOITER - this will set rtlInitiated = true
-                    sendEmergencyBrakeAndLoiterBurst()
+                    // Send BRAKE then LOITER - this will set rtlInitiated = true (loiter initiated)
+                    sendEmergencyBrakeAndLoiter()
                 }
 
-                // CONTINUOUS ENFORCEMENT: Only send BRAKE if RTL hasn't been initiated yet
-                // Once RTL process starts, we don't want to interfere with it
+                // CONTINUOUS ENFORCEMENT: Only send BRAKE if LOITER hasn't been initiated yet
+                // Once LOITER process starts, we don't want to interfere with it
                 if (!rtlInitiated && now - lastBrakeCommandTime > BRAKE_COMMAND_INTERVAL_MS) {
                     lastBrakeCommandTime = now
                     sendBrakeCommandImmediate()
@@ -3796,7 +3796,7 @@ class SharedViewModel : ViewModel() {
         // 2. Reset warning flags only when further inside to prevent UI oscillation
 
         // Stage 1: Reset action taken when back inside fence beyond the dynamic buffer
-        // This ensures geofence can re-trigger RTL if drone goes out again
+        // This ensures geofence can re-trigger LOITER if drone goes out again
         // Use 2x dynamic buffer as hysteresis to prevent oscillation at boundary
         val rearmThreshold = dynamicBuffer * 2.0
         if (isInsideFence && distanceToFence > rearmThreshold && geofenceActionTaken) {
@@ -3820,7 +3820,7 @@ class SharedViewModel : ViewModel() {
     /**
      * Send BRAKE command immediately - FIRE AND FORGET, no waiting!
      * Uses fire-and-forget pattern for maximum speed.
-     * Falls back to POSHOLD (Hover mode) if BRAKE fails, then LOITER as last resort.
+     * Falls back to LOITER if BRAKE fails.
      */
     private fun sendBrakeCommandImmediate() {
         viewModelScope.launch {
@@ -3828,25 +3828,17 @@ class SharedViewModel : ViewModel() {
                 geofenceTriggeringModeChange = true  // Mark that geofence is triggering mode change
                 val brakeSuccess = repo?.changeMode(MavMode.BRAKE) ?: false
                 if (!brakeSuccess) {
-                    // Fallback to POSHOLD (Hover) which holds position precisely
-                    Log.w("Geofence", "BRAKE failed, trying POSHOLD (Hover)...")
-                    val posholdSuccess = repo?.changeMode(MavMode.POSHOLD) ?: false
-                    if (!posholdSuccess) {
-                        // Final fallback to LOITER
-                        Log.w("Geofence", "POSHOLD failed, trying LOITER...")
-                        repo?.changeMode(MavMode.LOITER)
-                    }
+                    // Fallback to LOITER which holds position
+                    Log.w("Geofence", "BRAKE failed, trying LOITER...")
+                    repo?.changeMode(MavMode.LOITER)
                 }
             } catch (e: Exception) {
                 Log.e("Geofence", "BRAKE command error: ${e.message}")
-                // Try POSHOLD then LOITER as fallback
+                // Try LOITER as fallback
                 try {
-                    val posholdSuccess = repo?.changeMode(MavMode.POSHOLD) ?: false
-                    if (!posholdSuccess) {
-                        repo?.changeMode(MavMode.LOITER)
-                    }
+                    repo?.changeMode(MavMode.LOITER)
                 } catch (e2: Exception) {
-                    Log.e("Geofence", "All fallback modes failed: ${e2.message}")
+                    Log.e("Geofence", "LOITER fallback failed: ${e2.message}")
                 }
             }
         }
@@ -3855,7 +3847,7 @@ class SharedViewModel : ViewModel() {
     /**
      * Send PREEMPTIVE BRAKE when approaching fence at high speed.
      * This triggers BEFORE actual breach to slow the drone down and prevent crossing.
-     * After brake, transitions to POSHOLD (Hover) to hold position precisely.
+     * After brake, transitions to LOITER to hold position.
      */
     private fun sendPreemptiveBrake() {
         viewModelScope.launch {
@@ -3868,23 +3860,14 @@ class SharedViewModel : ViewModel() {
                 Log.i("Geofence", "🛑 Preemptive BRAKE result: $brakeSuccess")
 
                 if (!brakeSuccess) {
-                    // Fallback to POSHOLD (Hover) which holds position precisely
-                    Log.w("Geofence", "⚠️ Preemptive BRAKE failed, trying POSHOLD (Hover)...")
-                    val posholdSuccess = repo?.changeMode(MavMode.POSHOLD) ?: false
-                    if (!posholdSuccess) {
-                        Log.w("Geofence", "⚠️ POSHOLD failed, trying LOITER...")
-                        repo?.changeMode(MavMode.LOITER)
-                    }
+                    // Fallback to LOITER which holds position
+                    Log.w("Geofence", "⚠️ Preemptive BRAKE failed, trying LOITER...")
+                    repo?.changeMode(MavMode.LOITER)
                 } else {
-                    // Wait briefly then switch to POSHOLD (Hover) to hold position precisely
+                    // Wait briefly then switch to LOITER to hold position
                     delay(300)
-                    Log.i("Geofence", "🔒 Switching to POSHOLD (Hover) to hold position...")
-                    val posholdSuccess = repo?.changeMode(MavMode.POSHOLD) ?: false
-                    if (!posholdSuccess) {
-                        // Fallback to LOITER if POSHOLD not available
-                        Log.w("Geofence", "⚠️ POSHOLD failed, using LOITER...")
-                        repo?.changeMode(MavMode.LOITER)
-                    }
+                    Log.i("Geofence", "🔒 Switching to LOITER to hold position...")
+                    repo?.changeMode(MavMode.LOITER)
                 }
 
                 // Notify user
@@ -3898,14 +3881,11 @@ class SharedViewModel : ViewModel() {
 
             } catch (e: Exception) {
                 Log.e("Geofence", "Preemptive BRAKE error: ${e.message}")
-                // Try POSHOLD then LOITER as fallback
+                // Try LOITER as fallback
                 try {
-                    val posholdSuccess = repo?.changeMode(MavMode.POSHOLD) ?: false
-                    if (!posholdSuccess) {
-                        repo?.changeMode(MavMode.LOITER)
-                    }
+                    repo?.changeMode(MavMode.LOITER)
                 } catch (e2: Exception) {
-                    Log.e("Geofence", "All fallback modes failed: ${e2.message}")
+                    Log.e("Geofence", "LOITER fallback failed: ${e2.message}")
                 }
             } finally {
                 // Reset flag after a short delay
@@ -3916,16 +3896,14 @@ class SharedViewModel : ViewModel() {
     }
 
     /**
-     * EMERGENCY BURST: Send BRAKE to stop, then immediately try POSHOLD (Hover).
-     * OPTIMIZED: Minimal delay between BRAKE and POSHOLD for fast response.
+     * EMERGENCY BURST: Send BRAKE to stop, then LOITER to hold position.
+     * OPTIMIZED: Minimal delay between BRAKE and LOITER for fast response.
      * The BRAKE command just needs to be sent - drone starts decelerating immediately.
-     * We don't need to wait for full stop before sending POSHOLD.
      *
-     * POSHOLD (Hover mode) keeps the drone stationary at its current position precisely,
-     * preventing the user from flying further outside the fence boundary.
-     * Falls back to LOITER if POSHOLD is not available on the drone.
+     * LOITER holds the drone at its current position, preventing it from crossing the fence.
+     * This ensures the pilot CANNOT push forward through the fence even if they try.
      */
-    private fun sendEmergencyBrakeAndLoiterBurst() {
+    private fun sendEmergencyBrakeAndLoiter() {
         viewModelScope.launch {
             repo?.let { repository ->
                 Log.i("Geofence", "═══════════════════════════════════════════════════")
@@ -3942,74 +3920,64 @@ class SharedViewModel : ViewModel() {
                     Log.i("Geofence", "🛑 BRAKE result: $brakeSuccess")
 
                     if (!brakeSuccess) {
-                        // Try POSHOLD (Hover) as fallback (holds position)
-                        Log.w("Geofence", "⚠️ BRAKE failed, trying POSHOLD (Hover)...")
-                        val posholdSuccess = repository.changeMode(MavMode.POSHOLD)
-                        if (!posholdSuccess) {
-                            Log.w("Geofence", "⚠️ POSHOLD failed, trying LOITER...")
-                            repository.changeMode(MavMode.LOITER)
-                        }
+                        // Try LOITER as fallback
+                        Log.w("Geofence", "⚠️ BRAKE failed, trying LOITER...")
+                        repository.changeMode(MavMode.LOITER)
                     }
                 } catch (e: Exception) {
                     Log.e("Geofence", "BRAKE error: ${e.message}")
                 }
 
                 // STEP 2: Minimal delay - just enough for command to register (200ms)
-                // Drone starts braking immediately, we don't need to wait for full stop
-                Log.i("Geofence", "⏳ Brief pause before POSHOLD (200ms)...")
+                Log.i("Geofence", "⏳ Brief pause before LOITER (200ms)...")
                 delay(200)
 
-                // STEP 3: Mark POSHOLD as initiated - this stops continuous BRAKE commands
-                rtlInitiated = true
-                Log.i("Geofence", "🔒 POSHOLD process initiated - stopping BRAKE enforcement")
+                // STEP 3: Mark loiter as initiated - this stops continuous BRAKE commands
+                rtlInitiated = true  // Note: Variable name kept for compatibility, but this means LOITER initiated
+                Log.i("Geofence", "🔒 LOITER process initiated - stopping BRAKE enforcement")
 
-                // STEP 4: Now send POSHOLD (Hover) and KEEP TRYING until it works
-                // POSHOLD keeps drone stationary precisely, preventing further fence crossing
-                Log.i("Geofence", "🔒 Now sending POSHOLD (Hover) command...")
-                var holdSuccess = false
+                // STEP 4: Now send LOITER and KEEP TRYING until it works
+                Log.i("Geofence", "🔒 Now sending LOITER command...")
+                var loiterSuccess = false
                 var attempts = 0
                 val maxAttempts = 10
 
-                while (!holdSuccess && attempts < maxAttempts) {
+                while (!loiterSuccess && attempts < maxAttempts) {
                     attempts++
                     try {
-                        // Try POSHOLD first (better position hold)
-                        Log.i("Geofence", "🔒 POSHOLD attempt #$attempts...")
-                        holdSuccess = repository.changeMode(MavMode.POSHOLD)
-                        Log.i("Geofence", "🔒 POSHOLD attempt #$attempts result: $holdSuccess")
+                        Log.i("Geofence", "🔒 LOITER attempt #$attempts...")
+                        loiterSuccess = repository.changeMode(MavMode.LOITER)
+                        Log.i("Geofence", "🔒 LOITER attempt #$attempts result: $loiterSuccess")
 
-                        if (holdSuccess) {
-                            Log.i("Geofence", "✓✓✓ POSHOLD (HOVER) MODE ACTIVATED SUCCESSFULLY! ✓✓✓")
+                        if (loiterSuccess) {
+                            Log.i("Geofence", "✓✓✓ LOITER MODE ACTIVATED SUCCESSFULLY! ✓✓✓")
                             break
-                        } else {
-                            // Try LOITER as fallback
-                            Log.w("Geofence", "POSHOLD failed, trying LOITER...")
-                            holdSuccess = repository.changeMode(MavMode.LOITER)
-                            if (holdSuccess) {
-                                Log.i("Geofence", "✓✓✓ LOITER MODE ACTIVATED AS FALLBACK! ✓✓✓")
-                                break
-                            }
                         }
                     } catch (e: Exception) {
-                        Log.e("Geofence", "Hold mode attempt #$attempts error: ${e.message}")
+                        Log.e("Geofence", "LOITER mode attempt #$attempts error: ${e.message}")
                     }
 
                     // Short delay before retry (150ms)
-                    if (!holdSuccess) {
+                    if (!loiterSuccess) {
                         delay(150)
                     }
                 }
 
-                if (holdSuccess) {
+                if (loiterSuccess) {
                     addNotification(Notification(
-                        message = "🚨 GEOFENCE BREACH - Drone stopped in HOVER! Return to safe area.",
+                        message = "🚨 GEOFENCE BREACH - Drone stopped!",
                         type = NotificationType.ERROR
                     ))
-                    ttsManager?.speak("Geofence breach! Drone stopped in hover!")
+                    ttsManager?.speak("Geofence breach! Drone stopped!")
+
+                    // STEP 5: CONTINUOUS ENFORCEMENT - Keep sending LOITER to prevent pilot override
+                    // This ensures the pilot CANNOT push through the fence even if they try
+                    Log.i("Geofence", "🔒 Starting continuous LOITER enforcement...")
+                    startContinuousLoiterEnforcement()
                 } else {
-                    Log.e("Geofence", "❌ All hold modes failed after $maxAttempts attempts - drone should remain stopped")
+                    Log.e("Geofence", "❌ LOITER failed after $maxAttempts attempts - drone should remain stopped from BRAKE")
                     addNotification(Notification(
-                        message = "⚠️ GEOFENCE - Drone stopped, position hold failed",
+                        message = "⚠️ GEOFENCE - Drone stopped",
                         type = NotificationType.WARNING
                     ))
                     ttsManager?.speak("Geofence! Drone stopped!")
@@ -4018,11 +3986,44 @@ class SharedViewModel : ViewModel() {
                 Log.i("Geofence", "═══════════════════════════════════════════════════")
 
                 // Reset the geofence triggering flag after a short delay
-                // This ensures mode change detection doesn't show resume popup during geofence action
                 delay(2000)
                 geofenceTriggeringModeChange = false
                 Log.d("Geofence", "Geofence mode change flag reset")
             } ?: Log.e("Geofence", "❌ No connection - cannot send emergency commands!")
+        }
+    }
+
+    /**
+     * Continuous LOITER enforcement - keeps sending LOITER command while drone is in violation.
+     * This ensures the pilot CANNOT override and push through the fence.
+     * Runs until the violation is cleared (drone back inside safe zone).
+     */
+    private fun startContinuousLoiterEnforcement() {
+        viewModelScope.launch {
+            var enforcementCount = 0
+            while (_geofenceViolationDetected.value && currentCoroutineContext().isActive) {
+                delay(500)  // Check every 500ms
+
+                // Only enforce if still in violation and not safely back inside
+                if (_geofenceViolationDetected.value) {
+                    enforcementCount++
+                    try {
+                        Log.d("Geofence", "🔒 Continuous LOITER enforcement #$enforcementCount - preventing pilot override")
+                        repo?.changeMode(MavMode.LOITER)
+                    } catch (e: Exception) {
+                        Log.e("Geofence", "Continuous LOITER enforcement error: ${e.message}")
+                    }
+                } else {
+                    Log.i("Geofence", "✓ Geofence violation cleared - stopping continuous enforcement")
+                    break
+                }
+
+                // Safety limit: Stop after 2 minutes of continuous enforcement
+                if (enforcementCount > 240) {
+                    Log.w("Geofence", "⚠️ Continuous LOITER enforcement timeout - stopping")
+                    break
+                }
+            }
         }
     }
 
