@@ -14,6 +14,7 @@ import com.divpundir.mavlink.definitions.ardupilotmega.MagCalProgress
 import com.divpundir.mavlink.definitions.common.MagCalReport
 import com.example.aerogcsclone.Telemetry.AppScope
 import com.example.aerogcsclone.Telemetry.TelemetryState
+import com.example.aerogcsclone.Telemetry.extractDroneUniqueId
 
 import com.example.aerogcsclone.utils.AppStrings
 import com.example.aerogcsclone.telemetry.connections.MavConnectionProvider
@@ -1447,7 +1448,50 @@ class MavlinkTelemetryRepository(
                 }
         }
 
-        // AUTOPILOT_VERSION for drone identification
+        // OpenDroneID BASIC_ID for drone identification
+        scope.launch {
+            mavFrame
+                .filter { state.value.fcuDetected && it.systemId == fcuSystemId }
+                .map { it.message }
+                .filterIsInstance<OpenDroneIdBasicId>()
+                .collect { basicIdMessage ->
+                    try {
+                        Log.i("TelemetryRepo", "📥 OPEN_DRONE_ID_BASIC_ID received from FC")
+
+                        // Extract drone identifier using the new logic
+                        val droneIdentifier = extractDroneUniqueId(basicIdMessage)
+
+                        if (droneIdentifier != null) {
+                            Log.i("TelemetryRepo", "✅ Extracted Drone ID: ${droneIdentifier.serialNumber} (Type: ${droneIdentifier.idType})")
+
+                            // Update telemetry state with the serial number as droneUid
+                            _state.update { state ->
+                                state.copy(
+                                    droneUid = droneIdentifier.serialNumber,
+                                    droneUid2 = droneIdentifier.idOrMac, // Store MAC/ID as secondary
+                                    // Keep existing vendor/product/firmware info from AUTOPILOT_VERSION if available
+                                    vendorId = state.vendorId,
+                                    productId = state.productId,
+                                    firmwareVersion = state.firmwareVersion,
+                                    boardVersion = state.boardVersion
+                                )
+                            }
+
+                            // Announce drone ID via TTS
+                            val shortUid = droneIdentifier.serialNumber.takeLast(8) // Last 8 characters for brevity
+                            sharedViewModel.speak("Drone identified. Serial number ending in $shortUid")
+                            Log.i("TelemetryRepo", "🎤 Announced drone serial number via TTS")
+                        } else {
+                            Log.w("TelemetryRepo", "⚠️ No valid drone identifier found in OPEN_DRONE_ID_BASIC_ID message")
+                        }
+
+                    } catch (e: Exception) {
+                        Log.e("TelemetryRepo", "❌ Error processing OPEN_DRONE_ID_BASIC_ID", e)
+                    }
+                }
+        }
+
+        // Still process AUTOPILOT_VERSION for firmware/hardware info but not for droneUid
         scope.launch {
             mavFrame
                 .filter { state.value.fcuDetected && it.systemId == fcuSystemId }
@@ -1455,30 +1499,7 @@ class MavlinkTelemetryRepository(
                 .filterIsInstance<AutopilotVersion>()
                 .collect { autopilotVersion ->
                     try {
-                        Log.i("TelemetryRepo", "📥 AUTOPILOT_VERSION received from FC")
-
-                        // Extract UID - prefer uid2 over uid if uid2 is non-zero
-                        val primaryUid = if (autopilotVersion.uid2.any { it.toInt() != 0 }) {
-                            // Convert uid2 (18 bytes) to hex string
-                            val uid = autopilotVersion.uid2.joinToString("") { "%02x".format(it.toInt() and 0xFF) }
-                            Log.i("TelemetryRepo", "✅ Extracted UID from uid2: $uid")
-                            uid
-                        } else if (autopilotVersion.uid != 0UL) {
-                            // Convert uid (8 bytes) to hex string
-                            val uid = "%016x".format(autopilotVersion.uid)
-                            Log.i("TelemetryRepo", "✅ Extracted UID from uid: $uid")
-                            uid
-                        } else {
-                            Log.w("TelemetryRepo", "⚠️ No UID found in AUTOPILOT_VERSION (uid2 and uid are both zero)")
-                            null
-                        }
-
-                        // Also store uid2 separately if it exists and is different from uid
-                        val secondaryUid = if (autopilotVersion.uid2.any { it.toInt() != 0 }) {
-                            val uid2Hex = autopilotVersion.uid2.joinToString("") { "%02x".format(it.toInt() and 0xFF) }
-                            val uidHex = "%016x".format(autopilotVersion.uid)
-                            if (uid2Hex != uidHex) uid2Hex else null
-                        } else null
+                        Log.i("TelemetryRepo", "📥 AUTOPILOT_VERSION received from FC (for firmware info only)")
 
                         // Format firmware version (4 bytes: major.minor.patch.type)
                         val fwVersion = autopilotVersion.flightSwVersion
@@ -1488,14 +1509,12 @@ class MavlinkTelemetryRepository(
                         val fwType = fwVersion and 0xFFu
                         val formattedFirmware = "$major.$minor.$patch (type: $fwType)"
 
-                        if (secondaryUid != null) {
-                            Log.d("TelemetryRepo", "Secondary UID available: $secondaryUid")
-                        }
-
                         _state.update { state ->
                             state.copy(
-                                droneUid = primaryUid,
-                                droneUid2 = secondaryUid,
+                                // Keep existing droneUid from OpenDroneID
+                                droneUid = state.droneUid,
+                                droneUid2 = state.droneUid2,
+                                // Update firmware/hardware info
                                 vendorId = autopilotVersion.vendorId.toInt(),
                                 productId = autopilotVersion.productId.toInt(),
                                 firmwareVersion = formattedFirmware,
@@ -1503,12 +1522,6 @@ class MavlinkTelemetryRepository(
                             )
                         }
 
-                        // Announce drone ID via TTS
-                        if (primaryUid != null) {
-                            val shortUid = primaryUid.takeLast(8) // Last 8 characters for brevity
-                            sharedViewModel.speak("Drone identified. UID ending in $shortUid")
-                            Log.i("TelemetryRepo", "🎤 Announced drone UID via TTS")
-                        }
 
                     } catch (e: Exception) {
                         Log.e("TelemetryRepo", "❌ Error processing AUTOPILOT_VERSION", e)

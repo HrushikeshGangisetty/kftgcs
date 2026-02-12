@@ -1,5 +1,93 @@
 package com.example.aerogcsclone.Telemetry
 
+import com.divpundir.mavlink.definitions.common.OpenDroneIdBasicId
+import com.divpundir.mavlink.definitions.common.MavOdidIdType
+
+/**
+ * Drone identifier extracted from OpenDroneID messages
+ * Used to uniquely identify drones for backend storage
+ */
+data class DroneIdentifier(
+    val serialNumber: String,      // PRIMARY unique identifier
+    val idOrMac: String,            // Secondary identifier (MAC address)
+    val idType: String,             // Type of ID used
+    val timestamp: Long = System.currentTimeMillis()
+)
+
+/**
+ * Extract the unique drone identifier for backend storage
+ * Returns null if no valid serial number is found
+ */
+fun extractDroneUniqueId(message: OpenDroneIdBasicId): DroneIdentifier? {
+    // Extract idOrMac (MAC address / device ID)
+    val idOrMacHex = message.idOrMac
+        .takeWhile { it != 0.toUByte() }
+        .joinToString("") { it.toString(16).padStart(2, '0').uppercase() }
+
+    // Check if this is a Serial Number (recommended for backend)
+    val idType = message.idType.entry ?: MavOdidIdType.NONE
+
+    return when (idType) {
+        MavOdidIdType.SERIAL_NUMBER -> {
+            // Extract serial number (ASCII string)
+            val serialNumber = message.uasId
+                .takeWhile { it != 0.toUByte() }
+                .map { it.toByte().toInt().toChar() }
+                .joinToString("")
+
+            if (serialNumber.isNotEmpty()) {
+                DroneIdentifier(
+                    serialNumber = serialNumber,
+                    idOrMac = idOrMacHex,
+                    idType = "SERIAL_NUMBER"
+                )
+            } else null
+        }
+
+        MavOdidIdType.CAA_REGISTRATION_ID -> {
+            // Also acceptable as unique ID (regulatory registration)
+            val registration = message.uasId
+                .takeWhile { it != 0.toUByte() }
+                .map { it.toByte().toInt().toChar() }
+                .joinToString("")
+
+            if (registration.isNotEmpty()) {
+                DroneIdentifier(
+                    serialNumber = registration,
+                    idOrMac = idOrMacHex,
+                    idType = "CAA_REGISTRATION"
+                )
+            } else null
+        }
+
+        MavOdidIdType.UTM_ASSIGNED_UUID -> {
+            // UUID format - also unique
+            val uuid = extractUuidString(message.uasId)
+            DroneIdentifier(
+                serialNumber = uuid,
+                idOrMac = idOrMacHex,
+                idType = "UTM_UUID"
+            )
+        }
+
+        else -> {
+            // Fallback: use idOrMac as identifier (not recommended)
+            if (idOrMacHex.isNotEmpty()) {
+                DroneIdentifier(
+                    serialNumber = idOrMacHex,
+                    idOrMac = idOrMacHex,
+                    idType = "FALLBACK_MAC"
+                )
+            } else null
+        }
+    }
+}
+
+fun extractUuidString(bytes: List<UByte>): String {
+    val hex = bytes.take(16).joinToString("") { it.toString(16).padStart(2, '0') }
+    return "${hex.substring(0, 8)}-${hex.substring(8, 12)}-${hex.substring(12, 16)}-${hex.substring(16, 20)}-${hex.substring(20, 32)}"
+}
+
 /**
  * Spray telemetry data for agricultural drones
  * Maps to BATTERY_STATUS messages from flow sensor (BATT2) and level sensor (BATT3)
@@ -105,8 +193,8 @@ data class TelemetryState(
     // This tracks the waypoint number during mission execution to pre-fill resume dialog
     val lastAutoWaypoint: Int = -1,
 
-    // Drone identification from AUTOPILOT_VERSION message
-    val droneUid: String? = null,  // Primary UID from uid or uid2 field
+    // Drone identification from OpenDroneID BASIC_ID message (uasId field - SERIAL_NUMBER)
+    val droneUid: String? = null,  // Primary UID from OpenDroneID serial number
     val droneUid2: String? = null, // Secondary UID from uid2 field (if different from uid)
     val vendorId: Int? = null,     // Board vendor ID
     val productId: Int? = null,    // Board product ID
