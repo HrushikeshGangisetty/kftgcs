@@ -443,6 +443,22 @@ class WebSocketManager {
                         Log.e(TAG, "✅ TelemetryConsumer.receive() was triggered successfully!")
                         Log.e(TAG, "✅ Backend is properly configured and responding correctly")
                         Log.e(TAG, "⏳ Waiting for mission_created message from backend...")
+
+                        // 🔥 CHECK FOR DRONE UID UPDATE AFTER SESSION_ACK
+                        // This handles cases where drone ID becomes available after initial connection
+                        val currentDroneUid = droneUid.trim()
+                        if (currentDroneUid.isNotBlank() && currentDroneUid != "SITL_DRONE_001") {
+                            Log.i(TAG, "🔥 Real drone UID available after session_ack: '$currentDroneUid'")
+                            // Send drone_uid_update since we now have a real UID
+                            try {
+                                sendDroneUidUpdate(currentDroneUid)
+                                Log.i(TAG, "✅ Sent post-session drone_uid_update: '$currentDroneUid'")
+                            } catch (e: Exception) {
+                                Log.e(TAG, "❌ Failed to send post-session drone_uid_update", e)
+                            }
+                        } else {
+                            Log.w(TAG, "⚠️ Still using fallback drone UID: '$currentDroneUid'")
+                        }
                     }
                     "mission_created" -> {
                         missionId = msg.getString("mission_id")
@@ -452,6 +468,10 @@ class WebSocketManager {
                         Log.e(TAG, "🚀🚀🚀 MISSION CREATED BY BACKEND 🚀🚀🚀")
                         Log.e(TAG, "🚀 Mission ID: $missionId")
                         Log.e(TAG, "🚀 Mission was inserted into PostgreSQL database!")
+
+                        // 🔥 START DELAYED DRONE UID MONITORING
+                        // Check for real drone UID updates in the next 10 seconds
+                        startDelayedDroneUidMonitoring()
                     }
                     "error" -> {
                         // 🔥 Handle error messages from backend
@@ -900,5 +920,56 @@ class WebSocketManager {
         reconnectAttempts = 0
         shouldReconnect = true
         connect()
+    }
+
+    /**
+     * 🔥 Start delayed monitoring for drone UID updates
+     * Checks for real drone ID updates in the first 10 seconds after connection
+     * This handles cases where OpenDroneID or AUTOPILOT_VERSION arrive after WebSocket connection
+     */
+    private fun startDelayedDroneUidMonitoring() {
+        if (missionId == null) {
+            Log.w(TAG, "⚠️ Cannot start drone UID monitoring: no mission ID")
+            return
+        }
+
+        val initialDroneUid = droneUid.trim()
+        Log.i(TAG, "🔍 Starting delayed drone UID monitoring (current: '$initialDroneUid')")
+
+        // Check after 2, 5, and 10 seconds for drone UID updates
+        val checkDelays = listOf(2000L, 5000L, 10000L)
+
+        checkDelays.forEach { delay ->
+            handler.postDelayed({
+                if (isConnected && missionId != null) {
+                    val currentDroneUid = droneUid.trim()
+
+                    // Check if drone UID has been updated to a real value
+                    if (currentDroneUid.isNotBlank() &&
+                        currentDroneUid != "SITL_DRONE_001" &&
+                        currentDroneUid != initialDroneUid) {
+
+                        Log.i(TAG, "🔥 DELAYED DRONE UID UPDATE DETECTED!")
+                        Log.i(TAG, "   Initial: '$initialDroneUid'")
+                        Log.i(TAG, "   Current: '$currentDroneUid'")
+
+                        try {
+                            sendDroneUidUpdate(currentDroneUid)
+                            Log.i(TAG, "✅ Sent delayed drone_uid_update: '$currentDroneUid'")
+                        } catch (e: Exception) {
+                            Log.e(TAG, "❌ Failed to send delayed drone_uid_update", e)
+                        }
+                    } else if (delay == 10000L) {
+                        // Final check - log the status
+                        if (currentDroneUid == "SITL_DRONE_001" || currentDroneUid.isBlank()) {
+                            Log.w(TAG, "⚠️ After 10s monitoring: still using fallback drone UID '$currentDroneUid'")
+                            Log.w(TAG, "   This may indicate OpenDroneID/AUTOPILOT_VERSION not received from drone")
+                        } else {
+                            Log.i(TAG, "✅ Drone UID monitoring complete: using '$currentDroneUid'")
+                        }
+                    }
+                }
+            }, delay)
+        }
     }
 }

@@ -12,8 +12,11 @@ import androidx.compose.runtime.setValue
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.divpundir.mavlink.adapters.coroutines.trySendUnsignedV2
+import com.divpundir.mavlink.api.MavEnumValue
 import com.divpundir.mavlink.api.wrap
 import com.divpundir.mavlink.definitions.common.MavCmd
+import com.divpundir.mavlink.definitions.common.MavFrame
+import com.divpundir.mavlink.definitions.common.MavMissionType
 import com.divpundir.mavlink.definitions.common.MavResult
 import com.divpundir.mavlink.definitions.common.MissionItemInt
 import com.divpundir.mavlink.definitions.common.Statustext
@@ -1656,6 +1659,11 @@ class SharedViewModel : ViewModel() {
         if (_geofenceEnabled.value && polygon.size >= 3) {
             _geofencePolygon.value = polygon
             Log.i("Geofence", "Geofence polygon manually updated with ${polygon.size} vertices")
+
+            // 🔥 Upload manually updated geofence to FC
+            viewModelScope.launch {
+                uploadGeofenceToFC(polygon)
+            }
         }
     }
 
@@ -1736,6 +1744,18 @@ class SharedViewModel : ViewModel() {
                     }
                     _geofencePolygon.value = largerGeofence
                     Log.i("Geofence", "✓ Regenerated geofence with larger buffer")
+
+                    // 🔥 Upload regenerated geofence to FC
+                    if (largerGeofence.size >= 3) {
+                        viewModelScope.launch {
+                            uploadGeofenceToFC(largerGeofence)
+                        }
+                    }
+                } else {
+                    // 🔥 Upload original geofence to FC
+                    viewModelScope.launch {
+                        uploadGeofenceToFC(geofenceShape)
+                    }
                 }
             } else {
                 Log.w("Geofence", "Failed to generate valid geofence")
@@ -1761,6 +1781,94 @@ class SharedViewModel : ViewModel() {
             }
         }
         return true
+    }
+
+    /**
+     * 🔥 CRITICAL FIX: Upload geofence points to Flight Controller
+     * This function properly clears old fence and uploads new fence points
+     */
+    private suspend fun uploadGeofenceToFC(polygon: List<LatLng>) {
+        if (polygon.size < 3) {
+            Log.w("Geofence", "❌ Cannot upload geofence: insufficient points (${polygon.size})")
+            return
+        }
+
+        try {
+            Log.i("Geofence", "🔥 Starting geofence upload to FC: ${polygon.size} points")
+
+            // STEP 1: Clear existing fence by setting FENCE_TOTAL to 0
+            Log.i("Geofence", "📤 Clearing existing fence points (FENCE_TOTAL=0)")
+            val clearResult = setParameter("FENCE_TOTAL", 0f, timeoutMs = 5000L)
+            if (clearResult != null) {
+                Log.i("Geofence", "✅ Existing fence cleared successfully")
+            } else {
+                Log.w("Geofence", "⚠️ FENCE_TOTAL=0 sent but no confirmation")
+            }
+
+            // STEP 2: Upload fence points as mission items with fence mission type
+            Log.i("Geofence", "📤 Uploading ${polygon.size} fence points to FC")
+            val fenceItems = mutableListOf<MissionItemInt>()
+
+            polygon.forEachIndexed { index, point ->
+                val missionItem = MissionItemInt(
+                    targetSystem = 1u,
+                    targetComponent = 1u,
+                    seq = index.toUShort(),
+                    frame = MavEnumValue.of(MavFrame.GLOBAL),
+                    command = MavEnumValue.of(MavCmd.NAV_FENCE_POLYGON_VERTEX_INCLUSION),
+                    current = if (index == 0) 1u else 0u,
+                    autocontinue = 1u,
+                    param1 = polygon.size.toFloat(), // Total vertices in the first point
+                    param2 = 0f,
+                    param3 = 0f,
+                    param4 = 0f,
+                    x = (point.latitude * 1e7).toInt(),
+                    y = (point.longitude * 1e7).toInt(),
+                    z = 0f,
+                    missionType = MavEnumValue.of(MavMissionType.FENCE)
+                )
+                fenceItems.add(missionItem)
+            }
+
+            // Upload fence items using the existing mission upload infrastructure
+            val uploadResult = repo?.uploadFenceItems(fenceItems) ?: false
+            if (uploadResult) {
+                Log.i("Geofence", "✅ Fence points uploaded successfully")
+
+                // STEP 3: Set FENCE_TOTAL to the number of points
+                Log.i("Geofence", "📤 Setting FENCE_TOTAL=${polygon.size}")
+                val totalResult = setParameter("FENCE_TOTAL", polygon.size.toFloat(), timeoutMs = 5000L)
+                if (totalResult != null) {
+                    Log.i("Geofence", "✅ FENCE_TOTAL=${polygon.size} confirmed")
+                } else {
+                    Log.w("Geofence", "⚠️ FENCE_TOTAL=${polygon.size} sent but no confirmation")
+                }
+
+                addNotification(
+                    Notification(
+                        message = "✅ Geofence uploaded to FC (${polygon.size} points)",
+                        type = NotificationType.SUCCESS
+                    )
+                )
+            } else {
+                Log.e("Geofence", "❌ Failed to upload fence points to FC")
+                addNotification(
+                    Notification(
+                        message = "❌ Failed to upload geofence to FC",
+                        type = NotificationType.ERROR
+                    )
+                )
+            }
+
+        } catch (e: Exception) {
+            Log.e("Geofence", "❌ Geofence upload failed", e)
+            addNotification(
+                Notification(
+                    message = "❌ Geofence upload error: ${e.message}",
+                    type = NotificationType.ERROR
+                )
+            )
+        }
     }
 
     // --- MAVLink Actions ---

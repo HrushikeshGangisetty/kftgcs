@@ -23,6 +23,8 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeout
+import kotlinx.coroutines.TimeoutCancellationException
 import com.divpundir.mavlink.api.MavFrame
 import com.divpundir.mavlink.api.MavMessage
 import kotlinx.coroutines.withTimeoutOrNull
@@ -1519,9 +1521,20 @@ class MavlinkTelemetryRepository(
                         val formattedFirmware = "$major.$minor.$patch (type: $fwType)"
 
                         _state.update { state ->
+                            // 🔥 FALLBACK DRONE UID: If no OpenDroneID available, use AUTOPILOT_VERSION info
+                            val fallbackDroneUid = if (state.droneUid.isNullOrBlank()) {
+                                // Create a fallback drone UID from autopilot version info
+                                val vendorId = autopilotVersion.vendorId.toInt()
+                                val productId = autopilotVersion.productId.toInt()
+                                val boardVersion = autopilotVersion.boardVersion.toInt()
+                                "FC_${vendorId}_${productId}_${boardVersion}"
+                            } else {
+                                state.droneUid // Keep existing OpenDroneID
+                            }
+
                             state.copy(
-                                // Keep existing droneUid from OpenDroneID
-                                droneUid = state.droneUid,
+                                // Use fallback UID if OpenDroneID not available
+                                droneUid = fallbackDroneUid,
                                 droneUid2 = state.droneUid2,
                                 // Update firmware/hardware info
                                 vendorId = autopilotVersion.vendorId.toInt(),
@@ -1529,6 +1542,18 @@ class MavlinkTelemetryRepository(
                                 firmwareVersion = formattedFirmware,
                                 boardVersion = autopilotVersion.boardVersion.toInt()
                             )
+                        }
+
+                        // 🔥 Update WebSocketManager with drone UID (OpenDroneID or fallback)
+                        val currentState = _state.value
+                        if (!currentState.droneUid.isNullOrBlank()) {
+                            try {
+                                val wsManager = WebSocketManager.getInstance()
+                                wsManager.droneUid = currentState.droneUid!!
+                                Log.i("TelemetryRepo", "✅ Updated WebSocketManager with droneUid from AUTOPILOT_VERSION: '${currentState.droneUid}'")
+                            } catch (e: Exception) {
+                                Log.e("TelemetryRepo", "❌ Failed to update WebSocketManager droneUid from AUTOPILOT_VERSION", e)
+                            }
                         }
 
 
@@ -2158,6 +2183,106 @@ class MavlinkTelemetryRepository(
             job.cancel()
 
         } catch (e: Exception) {
+        }
+    }
+
+    /**
+     * 🔥 Upload fence items to Flight Controller
+     * Similar to uploadMissionWithAck but specifically for geofence points
+     */
+    suspend fun uploadFenceItems(fenceItems: List<MissionItemInt>, timeoutMs: Long = 30000): Boolean {
+        if (!state.value.fcuDetected) {
+            Log.e("TelemetryRepo", "❌ Cannot upload fence: FCU not detected")
+            return false
+        }
+
+        if (fenceItems.isEmpty()) {
+            Log.w("TelemetryRepo", "❌ Cannot upload fence: No fence items")
+            return false
+        }
+
+        try {
+            Log.i("TelemetryRepo", "🔥 Uploading ${fenceItems.size} fence points to FC")
+
+            // Step 1: Send mission count for fence items
+            val missionCount = MissionCount(
+                targetSystem = fcuSystemId,
+                targetComponent = fcuComponentId,
+                count = fenceItems.size.toUShort(),
+                missionType = MavEnumValue.of(MavMissionType.FENCE)
+            )
+
+            connection.trySendUnsignedV2(gcsSystemId, gcsComponentId, missionCount)
+            Log.i("TelemetryRepo", "📤 Sent fence mission count: ${fenceItems.size}")
+
+            // Step 2: Wait for mission requests and send fence items
+            val finalAckDeferred = CompletableDeferred<Pair<Boolean, String>>()
+            val sentSeqs = mutableSetOf<Int>()
+
+            val job = AppScope.launch {
+                connection.mavFrame.collect { frame ->
+                    when (val msg = frame.message) {
+                        is MissionRequest, is MissionRequestInt -> {
+                            val seq = if (msg is MissionRequestInt) msg.seq.toInt() else (msg as MissionRequest).seq.toInt()
+
+                            if (seq !in 0 until fenceItems.size) {
+                                finalAckDeferred.complete(false to "Invalid fence sequence $seq")
+                                return@collect
+                            }
+
+                            val fenceItem = fenceItems[seq].copy(
+                                targetSystem = fcuSystemId,
+                                targetComponent = fcuComponentId,
+                                seq = seq.toUShort()
+                            )
+
+                            delay(50L) // Small delay for stability
+                            connection.trySendUnsignedV2(gcsSystemId, gcsComponentId, fenceItem)
+                            sentSeqs.add(seq)
+
+                            Log.d("TelemetryRepo", "📤 Sent fence point $seq/${fenceItems.size}")
+                        }
+
+                        is MissionAck -> {
+                            if (msg.missionType.value == MavMissionType.FENCE.value) {
+                                when (msg.type.value) {
+                                    MavMissionResult.MAV_MISSION_ACCEPTED.value -> {
+                                        finalAckDeferred.complete(true to "Fence upload successful")
+                                    }
+                                    MavMissionResult.MAV_MISSION_DENIED.value -> {
+                                        finalAckDeferred.complete(false to "Fence upload denied")
+                                    }
+                                    MavMissionResult.MAV_MISSION_ERROR.value -> {
+                                        finalAckDeferred.complete(false to "Fence upload error")
+                                    }
+                                    else -> {
+                                        finalAckDeferred.complete(false to "Unknown fence upload result: ${msg.type.value}")
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Wait for completion
+            val result = withTimeout(timeoutMs) {
+                finalAckDeferred.await()
+            }
+
+            job.cancel()
+
+            val success = result.first
+            val message = result.second
+            Log.i("TelemetryRepo", if (success) "✅ $message" else "❌ $message")
+            return success
+
+        } catch (e: TimeoutCancellationException) {
+            Log.e("TelemetryRepo", "❌ Fence upload timeout after ${timeoutMs}ms")
+            return false
+        } catch (e: Exception) {
+            Log.e("TelemetryRepo", "❌ Fence upload failed", e)
+            return false
         }
     }
 
