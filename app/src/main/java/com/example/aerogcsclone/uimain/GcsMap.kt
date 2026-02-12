@@ -395,15 +395,17 @@ fun GcsMap(
         cameraState.move(CameraUpdateFactory.newLatLngZoom(LatLng(lat, lon), 16f))
     }
 
-    LaunchedEffect(lat, lon, telemetryState.sprayTelemetry.sprayEnabled, telemetryState.sprayTelemetry.flowRateLiterPerMin) {
+    // Use sprayActive which is TRUE when either RC7 is enabled OR flow > 0 (AUTO mission spray)
+    LaunchedEffect(lat, lon, telemetryState.sprayTelemetry.sprayActive, telemetryState.sprayTelemetry.flowRateLiterPerMin) {
         if (lat != null && lon != null) {
             val pos = LatLng(lat, lon)
 
             // Determine if drone is actively spraying
-            // Spraying = spray system enabled AND flow rate > 0
-            val sprayEnabled = telemetryState.sprayTelemetry.sprayEnabled
+            // For AUTO missions: sprayActive is TRUE when flow > 0 even if RC7 is OFF
+            // This ensures green spray lines are drawn when spray is enabled via DO_SET_SERVO or Sprayer library
+            val sprayActive = telemetryState.sprayTelemetry.sprayActive
             val flowRate = telemetryState.sprayTelemetry.flowRateLiterPerMin ?: 0f
-            val isSpraying = sprayEnabled && flowRate > 0f
+            val isSpraying = sprayActive && flowRate > 0f
 
             val newPoint = DronePathPoint(pos, isSpraying)
 
@@ -414,7 +416,7 @@ fun GcsMap(
 
                 // Log spray status changes for debugging
                 if (visitedPathPoints.isNotEmpty() && visitedPathPoints.last().isSpraying != isSpraying) {
-                    android.util.Log.i("GcsMap", "🚁 Spray status changed: ${if (isSpraying) "SPRAYING" else "NOT_SPRAYING"} (enabled=$sprayEnabled, flow=$flowRate L/min)")
+                    android.util.Log.i("GcsMap", "🚁 Spray status changed: ${if (isSpraying) "SPRAYING" else "NOT_SPRAYING"} (active=$sprayActive, flow=$flowRate L/min)")
                 }
 
                 visitedPathPoints.add(newPoint)

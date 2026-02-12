@@ -39,6 +39,7 @@ object MavMode {
     const val GUIDED: UInt = 4u // GUIDED mode for copter takeoff
     const val RTL: UInt = 6u // RTL (Return to Launch) mode
     const val LAND: UInt = 9u // Add LAND mode for explicit landing
+    const val POSHOLD: UInt = 16u // POSHOLD (Position Hold) - holds position precisely like Hover
     const val BRAKE: UInt = 17u // BRAKE mode - immediately stops all horizontal movement
     // Add other modes as needed
 }
@@ -613,6 +614,16 @@ class MavlinkTelemetryRepository(
                             else -> "%.2f L".format(consumedLiters)
                         }
 
+                        // ═══════════════════════════════════════════════════════════════════
+                        // AUTO MISSION SPRAY DETECTION
+                        // Spray is considered "active" when:
+                        // 1. RC7 is enabled (manual spray via RC), OR
+                        // 2. Flow rate > 0 (spray enabled via DO_SET_SERVO, DO_SPRAYER, or Sprayer library)
+                        // This ensures green spray lines are drawn even when RC7 is OFF during AUTO missions
+                        // ═══════════════════════════════════════════════════════════════════
+                        val rc7SprayEnabled = state.value.sprayTelemetry.sprayEnabled
+                        val hasFlowDetected = flowRateLiterPerMin != null && flowRateLiterPerMin > 0f
+                        val sprayIsActive = rc7SprayEnabled || hasFlowDetected
 
                         _state.update { state ->
                             state.copy(
@@ -622,17 +633,21 @@ class MavlinkTelemetryRepository(
                                     flowCapacityLiters = flowCapacityLiters,
                                     flowRemainingPercent = flowRemainingPercent,
                                     formattedFlowRate = formattedFlowRate,
-                                    formattedConsumed = formattedConsumed
+                                    formattedConsumed = formattedConsumed,
+                                    sprayActive = sprayIsActive  // Set based on RC7 OR flow detection
                                 )
                             )
                         }
 
                         // ╔══╗ FLOW-BASED TANK EMPTY DETECTION ╔══╗
                         // Tank is considered empty when:
-                        // 1. Sprayer is ON (rc7 enabled)
+                        // 1. Spray is ACTIVE (RC7 enabled OR was recently spraying via AUTO mission)
                         // 2. Flow rate is 0 for 3+ seconds
                         // 3. BATT2 is properly configured
-                        val currentSprayEnabledForEmpty = state.value.sprayTelemetry.sprayEnabled
+                        //
+                        // For AUTO missions: If we were spraying (had flow) and now flow is 0,
+                        // that indicates tank empty even if RC7 is OFF
+                        val currentSprayEnabledForEmpty = sprayIsActive || state.value.sprayTelemetry.sprayActive
                         val configValid = state.value.sprayTelemetry.configurationValid
                         val flowIsZero = flowRateLiterPerMin == null || flowRateLiterPerMin == 0f
 
@@ -668,6 +683,13 @@ class MavlinkTelemetryRepository(
                                         )
                                         sharedViewModel.announceTankEmpty()
                                         tankEmptyNotificationShown = true
+
+                                        // If in AUTO mode, switch to LOITER and trigger resume popup
+                                        val currentMode = state.value.mode
+                                        if (currentMode?.equals("Auto", ignoreCase = true) == true) {
+                                            Log.i("TankEmpty", "🚨 AUTO mode detected - switching to LOITER for tank refill")
+                                            sharedViewModel.handleTankEmptyInAutoMode()
+                                        }
                                     }
                                 }
                             } else if (!flowIsZero) {
@@ -1011,10 +1033,67 @@ class MavlinkTelemetryRepository(
                             // Disable yaw hold when exiting Auto mode
                             sharedViewModel.disableYawHold()
                         } else if (lastArmed == true && !armed) {
-                            // Drone disarmed - cancel timer and DON'T show mission complete popup for disarm
+                            // Drone disarmed - check if we had an active mission to trigger completion dialog
                             missionTimerJob?.cancel()
                             missionTimerJob = null
-                            _state.update { it.copy(isMissionActive = false, missionElapsedSec = null) }
+
+                            // Get current mission state before updating
+                            val lastElapsed = state.value.missionElapsedSec ?: state.value.lastMissionElapsedSec
+                            val wasMissionActive = state.value.isMissionActive
+                            val wasInAutoMode = lastMode?.equals("Auto", ignoreCase = true) == true
+                            val isPaused = state.value.missionPaused
+                            val alreadyCompleted = state.value.missionCompleted
+
+                            // Show mission completion dialog if:
+                            // 1. There was meaningful mission time (elapsed > 0)
+                            // 2. Mission was not paused
+                            // 3. Not already marked as completed
+                            if ((lastElapsed ?: 0L) > 0L && !isPaused && !alreadyCompleted) {
+                                _state.update { it.copy(
+                                    isMissionActive = false,
+                                    missionElapsedSec = null,
+                                    missionCompleted = true,
+                                    lastMissionElapsedSec = lastElapsed
+                                )}
+
+                                // Send mission status ENDED to backend
+                                try {
+                                    val wsManager = WebSocketManager.getInstance()
+                                    wsManager.sendMissionStatus(WebSocketManager.MISSION_STATUS_ENDED)
+                                    wsManager.sendMissionEvent(
+                                        eventType = "MISSION_ENDED",
+                                        eventStatus = "INFO",
+                                        description = "Mission completed - drone disarmed"
+                                    )
+
+                                    // Send mission summary
+                                    val currentState = state.value
+                                    val batteryEnd = currentState.batteryPercent ?: 0
+                                    val totalDistance = currentState.totalDistanceMeters ?: 0f
+                                    val flyingTimeMinutes = (lastElapsed ?: 0L) / 60.0
+                                    val avgSpeed = if (flyingTimeMinutes > 0) (totalDistance / 1000.0) / (flyingTimeMinutes / 60.0) else 0.0
+                                    val totalSprayUsed = currentState.sprayTelemetry.consumedLiters?.toDouble() ?: 0.0
+                                    val sprayWidthMeters = 5.0
+                                    val totalAreaSqMeters = totalDistance * sprayWidthMeters
+                                    val totalAcres = totalAreaSqMeters / 4046.86
+
+                                    wsManager.sendMissionSummary(
+                                        totalAcres = totalAcres,
+                                        totalSprayUsed = totalSprayUsed,
+                                        flyingTimeMinutes = flyingTimeMinutes,
+                                        averageSpeed = avgSpeed,
+                                        batteryStart = wsManager.missionBatteryStart,
+                                        batteryEnd = batteryEnd,
+                                        alertsCount = wsManager.missionAlertsCount,
+                                        status = "COMPLETED"
+                                    )
+                                } catch (e: Exception) {
+                                    // Ignore WebSocket errors
+                                }
+                            } else {
+                                // No meaningful mission or already handled - just reset state
+                                _state.update { it.copy(isMissionActive = false, missionElapsedSec = null) }
+                            }
 
                             // Also disable spray when drone is disarmed for safety
                             sharedViewModel.disableSprayOnModeChange()
@@ -1848,6 +1927,7 @@ class MavlinkTelemetryRepository(
             5u -> "Loiter"
             6u -> "RTL"
             9u -> "Land"
+            16u -> "PosHold"
             17u -> "Brake"
             else -> "Unknown"
         }

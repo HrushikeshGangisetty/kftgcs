@@ -71,6 +71,9 @@ class UnifiedFlightTracker(
     private var previousArmed = false
     private var previousMode: String? = null
 
+    // Store pending stop reason to avoid re-evaluation losing the disarm detection
+    private var pendingStopReason: String? = null
+
     // Constants
     private val TAKEOFF_ALTITUDE_THRESHOLD = 1.0f  // meters above ground
     private val LANDING_ALTITUDE_THRESHOLD = 0.5f  // meters above ground
@@ -471,6 +474,8 @@ class UnifiedFlightTracker(
             val now = System.currentTimeMillis()
             if (stopConditionMetAt == 0L) {
                 stopConditionMetAt = now
+                // Store the stop reason so it doesn't get lost when previousArmed is updated
+                pendingStopReason = stopReason
             }
 
             // Check if debounce period passed
@@ -479,6 +484,7 @@ class UnifiedFlightTracker(
             }
         } else {
             stopConditionMetAt = 0
+            pendingStopReason = null
         }
     }
 
@@ -532,17 +538,22 @@ class UnifiedFlightTracker(
     }
 
     private suspend fun checkStopDebounce(telemetry: TelemetryState) {
-        // Verify conditions still met
-        val stopReason = evaluateStopConditions(telemetry)
+        // Use the stored stop reason from when we entered STOPPING state
+        // This is critical because previousArmed gets updated every cycle,
+        // so re-evaluating would fail for disarm detection
+        val stopReason = pendingStopReason ?: evaluateStopConditions(telemetry)
 
         if (stopReason == null) {
+            // Conditions no longer met and no pending reason - go back to ACTIVE
             currentState = FlightState.ACTIVE
             stopConditionMetAt = 0
+            pendingStopReason = null
             return
         }
 
-        // Transition to FINALIZING
+        // Transition to FINALIZING with the stored reason
         stopFlight(stopReason)
+        pendingStopReason = null
     }
 
     private suspend fun stopFlight(reason: String) {
@@ -624,6 +635,7 @@ class UnifiedFlightTracker(
         missionMode = null
         startConditionMetAt = 0
         stopConditionMetAt = 0
+        pendingStopReason = null
         flightStartTime = 0
         groundLevelAltitude = 0f
         totalDistanceMeters = 0f

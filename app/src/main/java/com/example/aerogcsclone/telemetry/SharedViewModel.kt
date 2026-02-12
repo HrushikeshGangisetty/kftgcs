@@ -381,6 +381,64 @@ class SharedViewModel : ViewModel() {
         ttsManager?.speak("Warning! Tank is empty. Please refill the tank.")
     }
 
+    /**
+     * Handle tank empty detection during AUTO mission.
+     * This will:
+     * 1. Change mode to LOITER to hold position
+     * 2. The mode change detection (AUTO → LOITER) will automatically trigger the resume popup
+     *
+     * Called from TelemetryRepository when tank empty is detected during AUTO mode.
+     */
+    fun handleTankEmptyInAutoMode() {
+        viewModelScope.launch {
+            try {
+                val currentMode = _telemetryState.value.mode
+                val currentWp = _telemetryState.value.currentWaypoint
+                val lastAutoWp = _telemetryState.value.lastAutoWaypoint
+
+                // Only proceed if we're in AUTO mode
+                if (currentMode?.equals("Auto", ignoreCase = true) != true) {
+                    Log.d("SharedVM", "Tank empty detected but not in AUTO mode ($currentMode) - skipping LOITER transition")
+                    return@launch
+                }
+
+                Log.i("SharedVM", "=== TANK EMPTY IN AUTO MODE ===")
+                Log.i("SharedVM", "Switching to LOITER mode for tank refill")
+                Log.i("SharedVM", "Current waypoint: $currentWp, Last AUTO waypoint: $lastAutoWp")
+
+                // Change mode to LOITER - this will trigger the resume popup via mode change detection
+                // (AUTO → LOITER transition is detected in TelemetryRepository and triggers onModeChangedToLoiterFromAuto)
+                val result = repo?.changeMode(MavMode.LOITER) ?: false
+
+                if (result) {
+                    Log.i("SharedVM", "LOITER mode command sent successfully - resume popup will be triggered by mode change detection")
+
+                    // Send mission status to backend
+                    try {
+                        WebSocketManager.getInstance().sendMissionStatus(WebSocketManager.MISSION_STATUS_PAUSED)
+                        WebSocketManager.getInstance().sendMissionEvent(
+                            eventType = "TANK_EMPTY_PAUSE",
+                            eventStatus = "WARNING",
+                            description = "Mission paused due to tank empty"
+                        )
+                    } catch (e: Exception) {
+                        Log.e("SharedVM", "Failed to send tank empty pause status", e)
+                    }
+                } else {
+                    Log.e("SharedVM", "Failed to send LOITER mode command for tank empty")
+                    addNotification(
+                        Notification(
+                            message = "Failed to switch to LOITER mode for tank refill",
+                            type = NotificationType.ERROR
+                        )
+                    )
+                }
+            } catch (e: Exception) {
+                Log.e("SharedVM", "Error handling tank empty in AUTO mode", e)
+            }
+        }
+    }
+
     fun speak(text: String) {
         ttsManager?.speak(text)
     }
@@ -1003,11 +1061,11 @@ class SharedViewModel : ViewModel() {
     private val _planningWaypoints = MutableStateFlow<List<LatLng>>(emptyList())
     val planningWaypoints: StateFlow<List<LatLng>> = _planningWaypoints.asStateFlow()
 
-    private val _fenceRadius = MutableStateFlow(5f)
+    private val _fenceRadius = MutableStateFlow(1f)  // Default 1m as requested
     val fenceRadius: StateFlow<Float> = _fenceRadius.asStateFlow()
 
     // Track previous fence radius to calculate delta for scaling
-    private var _previousFenceRadius: Float = 5f
+    private var _previousFenceRadius: Float = 1f
 
     private val _geofenceEnabled = MutableStateFlow(false)
     val geofenceEnabled: StateFlow<Boolean> = _geofenceEnabled.asStateFlow()
@@ -3377,25 +3435,32 @@ class SharedViewModel : ViewModel() {
     // --- Geofence Violation Detection ---
     // Geofence constants - Similar to ArduPilot's FENCE_MARGIN behavior
     companion object {
+        // ═══════════════════════════════════════════════════════════════════════════
+        // GEOFENCE BUFFER CONFIGURATION - INCREASED FOR BETTER FENCE ENFORCEMENT
+        // ═══════════════════════════════════════════════════════════════════════════
+
         // Minimum buffer distance - triggers even when stationary
-        // This is the absolute minimum distance from fence before triggering
-        // Increased to 3.0m for better safety margin
-        private const val MIN_BUFFER_METERS = 3.0  // Minimum buffer when stationary
+        // INCREASED from 3.0m to 8.0m for much better safety margin
+        // This ensures drone stops well before the physical fence boundary
+        private const val MIN_BUFFER_METERS = 8.0  // Minimum buffer when stationary
 
         // Maximum buffer distance - caps the dynamic buffer at high speeds
-        // Increased to 15m for high-speed scenarios to ensure drone can stop before fence
-        private const val MAX_BUFFER_METERS = 15.0  // Maximum buffer for high speed scenarios
+        // INCREASED from 15m to 25m for high-speed scenarios
+        private const val MAX_BUFFER_METERS = 25.0  // Maximum buffer for high speed scenarios
 
         // Maximum deceleration capability (m/s²) - conservative estimate for multicopters
-        // Using 3.5 for more realistic braking estimate (accounts for wind, load, reaction time)
-        private const val MAX_DECEL_M_S2 = 3.5  // Conservative deceleration
+        // REDUCED from 3.5 to 2.5 for more conservative braking estimate
+        // This accounts for wind, load, reaction time, and real-world deceleration
+        private const val MAX_DECEL_M_S2 = 2.5  // Very conservative deceleration
 
         // System latency in seconds (GPS + telemetry + command execution)
-        // GPS: ~200ms, Telemetry: ~200ms, Command: ~300ms = ~700ms total
-        private const val SYSTEM_LATENCY_SECONDS = 0.7  // 700ms total latency (more conservative)
+        // GPS: ~200ms, Telemetry: ~200ms, Command: ~400ms = ~800ms total
+        // INCREASED from 0.7 to 1.0 second for more conservative latency handling
+        private const val SYSTEM_LATENCY_SECONDS = 1.0  // 1000ms total latency (conservative)
 
         // Safety margin multiplier for stopping distance (accounts for uncertainties)
-        private const val STOPPING_DISTANCE_SAFETY_FACTOR = 1.5  // 50% safety margin for high speed
+        // INCREASED from 1.5 to 2.0 for better safety
+        private const val STOPPING_DISTANCE_SAFETY_FACTOR = 2.0  // 100% safety margin for high speed
 
         // Breach confirmation - reduced to 2 samples for faster response at high speed
         private const val BREACH_CONFIRMATION_SAMPLES = 2 // Number of consecutive breach samples required
@@ -3409,6 +3474,12 @@ class SharedViewModel : ViewModel() {
 
         // Number of consecutive commands to send on first breach
         private const val EMERGENCY_COMMAND_BURST_COUNT = 10
+
+        // ═══════════════════════════════════════════════════════════════════════════
+        // DEFAULT FENCE RADIUS - Distance between waypoints and geofence boundary
+        // INCREASED from 5m to 15m for much better separation
+        // ═══════════════════════════════════════════════════════════════════════════
+        private const val DEFAULT_FENCE_RADIUS_METERS = 15.0f
     }
 
     private val _geofenceViolationDetected = MutableStateFlow(false)
@@ -3496,50 +3567,68 @@ class SharedViewModel : ViewModel() {
 
     /**
      * Calculate dynamic buffer distance based on current speed.
-     * Uses physics-based stopping distance calculation with latency compensation:
+     * Uses improved physics-based stopping distance calculation with multiple factors:
      *
-     * Total buffer = MIN_BUFFER + latency_distance + stopping_distance
+     * Total buffer = MIN_BUFFER + gps_uncertainty + latency_distance + stopping_distance + wind_margin
      *
      * Where:
+     * - gps_uncertainty = 2-5m (GPS accuracy can vary)
      * - latency_distance = speed × system_latency (distance traveled during latency)
      * - stopping_distance = v² / (2 × deceleration) × safety_factor
+     * - wind_margin = speed × 0.3 (accounts for wind pushing drone during deceleration)
      *
      * This ensures the drone triggers brake EARLY ENOUGH to stop before the fence,
-     * accounting for GPS, telemetry, and command execution delays.
+     * accounting for GPS uncertainty, telemetry delays, command execution delays, wind, and momentum.
      *
-     * Examples at different speeds (with MIN_BUFFER=2m, decel=5.5m/s², latency=0.5s, safety=1.2):
-     * - 0 m/s:  3.0m (minimum buffer only - allows hovering close to fence)
-     * - 2 m/s:  3 + 1.4 + 0.86 = 5.26m
-     * - 3 m/s:  3 + 2.1 + 1.93 = 7.03m
-     * - 5 m/s:  3 + 3.5 + 5.36 = 11.86m
-     * - 8 m/s:  3 + 5.6 + 13.7 = capped at 15m (high speed multiplier applied)
+     * Examples at different speeds (with MIN_BUFFER=8m, decel=2.5m/s², latency=1.0s, safety=2.0):
+     * - 0 m/s:  8.0m (minimum buffer only - stationary safety margin)
+     * - 2 m/s:  8 + 3 + 2.0 + 1.6 + 0.6 = 15.2m
+     * - 3 m/s:  8 + 3 + 3.0 + 3.6 + 0.9 = 18.5m
+     * - 5 m/s:  8 + 3 + 5.0 + 10 + 1.5 = 27.5m → capped at 25m
+     * - 8 m/s:  capped at 25m (max buffer)
      */
     private fun calculateDynamicBuffer(currentSpeedMs: Float, altitudeMeters: Float = 0f): Double {
         if (currentSpeedMs <= 0) {
             return MIN_BUFFER_METERS
         }
 
-        // 1. Distance traveled during system latency (GPS + telemetry + command delay)
-        // At 3 m/s with 700ms latency = 2.1m traveled before braking even starts
+        // 1. GPS Uncertainty - GPS accuracy can drift 2-5 meters
+        val gpsUncertainty = 3.0  // Conservative 3m GPS uncertainty
+
+        // 2. Distance traveled during system latency (GPS + telemetry + command delay)
+        // At 3 m/s with 1.0s latency = 3.0m traveled before braking even starts
         val latencyDistance = currentSpeedMs * SYSTEM_LATENCY_SECONDS
 
-        // 2. Physics-based stopping distance: v² / (2a)
-        // At 3 m/s with 3.5 m/s² decel = 9/7 = 1.29m
+        // 3. Physics-based stopping distance: v² / (2a)
+        // At 3 m/s with 2.5 m/s² decel = 9/5 = 1.8m
         val stoppingDistance = (currentSpeedMs * currentSpeedMs) / (2 * MAX_DECEL_M_S2)
 
-        // 3. Apply safety factor to stopping distance only (latency is already worst-case)
+        // 4. Apply safety factor to stopping distance (accounts for momentum, load variation)
         val safeStoppingDistance = stoppingDistance * STOPPING_DISTANCE_SAFETY_FACTOR
 
-        // 4. HIGH SPEED MULTIPLIER: At speeds above 5 m/s, apply additional safety margin
-        // This accounts for drone momentum and reaction time at high speed
+        // 5. Wind margin - accounts for wind pushing drone during deceleration
+        // Assumes wind could add 30% to stopping distance at speed
+        val windMargin = currentSpeedMs * 0.3
+
+        // 6. HIGH SPEED MULTIPLIER: At speeds above 5 m/s, apply additional safety margin
+        // This accounts for drone momentum and slower reaction time at high speed
         val highSpeedMultiplier = if (currentSpeedMs > 5.0f) {
-            1.0 + ((currentSpeedMs - 5.0f) * 0.1)  // +10% per m/s above 5 m/s
+            1.0 + ((currentSpeedMs - 5.0f) * 0.15)  // +15% per m/s above 5 m/s (increased from 10%)
         } else {
             1.0
         }
 
-        // Total buffer = (minimum + latency distance + safe stopping distance) × high-speed multiplier
-        val totalBuffer = (MIN_BUFFER_METERS + latencyDistance + safeStoppingDistance) * highSpeedMultiplier
+        // 7. Altitude factor - at higher altitudes, GPS accuracy may be slightly worse
+        // and wind effects are often stronger
+        val altitudeFactor = if (altitudeMeters > 20f) {
+            1.0 + ((altitudeMeters - 20f) * 0.01).coerceAtMost(0.2)  // Up to +20% at high altitude
+        } else {
+            1.0
+        }
+
+        // Total buffer = (minimum + gps + latency + stopping + wind) × multipliers
+        val baseBuffer = MIN_BUFFER_METERS + gpsUncertainty + latencyDistance + safeStoppingDistance + windMargin
+        val totalBuffer = baseBuffer * highSpeedMultiplier * altitudeFactor
 
         // Cap at maximum buffer
         return minOf(MAX_BUFFER_METERS, totalBuffer)
@@ -3554,8 +3643,8 @@ class SharedViewModel : ViewModel() {
      * - Also checks corner distances (important when perpendicular doesn't hit any segment)
      * - Dynamic buffer based on current speed to ensure drone can stop in time
      * - Returns 0 if outside fence (BREACH), otherwise returns distance to nearest edge
-     * - Triggers BRAKE + LOITER if BREACH or within dynamic buffer distance at high speed
-     * - LOITER keeps drone stationary and prevents user from flying outside fence
+     * - Triggers BRAKE + POSHOLD (Hover) if BREACH or within dynamic buffer distance at high speed
+     * - POSHOLD (Hover) keeps drone stationary precisely and prevents user from flying outside fence
      */
     private fun checkGeofenceNow() {
         // Skip if geofence not enabled
@@ -3640,7 +3729,7 @@ class SharedViewModel : ViewModel() {
                     Log.e("Geofence", "Position: $droneLat, $droneLon")
 
                     // 🔊 TTS Announcement for critical geofence violation
-                    speak("Critical geofence breach! Emergency LOITER activated!")
+                    speak("Critical geofence breach! Emergency HOVER activated!")
 
                     // Send BRAKE then LOITER - this will set rtlInitiated = true
                     sendEmergencyBrakeAndLoiterBurst()
@@ -3731,7 +3820,7 @@ class SharedViewModel : ViewModel() {
     /**
      * Send BRAKE command immediately - FIRE AND FORGET, no waiting!
      * Uses fire-and-forget pattern for maximum speed.
-     * Falls back to LOITER if BRAKE fails.
+     * Falls back to POSHOLD (Hover mode) if BRAKE fails, then LOITER as last resort.
      */
     private fun sendBrakeCommandImmediate() {
         viewModelScope.launch {
@@ -3739,16 +3828,25 @@ class SharedViewModel : ViewModel() {
                 geofenceTriggeringModeChange = true  // Mark that geofence is triggering mode change
                 val brakeSuccess = repo?.changeMode(MavMode.BRAKE) ?: false
                 if (!brakeSuccess) {
-                    // Fallback to LOITER which also stops movement
-                    repo?.changeMode(MavMode.LOITER)
+                    // Fallback to POSHOLD (Hover) which holds position precisely
+                    Log.w("Geofence", "BRAKE failed, trying POSHOLD (Hover)...")
+                    val posholdSuccess = repo?.changeMode(MavMode.POSHOLD) ?: false
+                    if (!posholdSuccess) {
+                        // Final fallback to LOITER
+                        Log.w("Geofence", "POSHOLD failed, trying LOITER...")
+                        repo?.changeMode(MavMode.LOITER)
+                    }
                 }
             } catch (e: Exception) {
                 Log.e("Geofence", "BRAKE command error: ${e.message}")
-                // Try LOITER as fallback
+                // Try POSHOLD then LOITER as fallback
                 try {
-                    repo?.changeMode(MavMode.LOITER)
+                    val posholdSuccess = repo?.changeMode(MavMode.POSHOLD) ?: false
+                    if (!posholdSuccess) {
+                        repo?.changeMode(MavMode.LOITER)
+                    }
                 } catch (e2: Exception) {
-                    Log.e("Geofence", "LOITER fallback also failed: ${e2.message}")
+                    Log.e("Geofence", "All fallback modes failed: ${e2.message}")
                 }
             }
         }
@@ -3757,7 +3855,7 @@ class SharedViewModel : ViewModel() {
     /**
      * Send PREEMPTIVE BRAKE when approaching fence at high speed.
      * This triggers BEFORE actual breach to slow the drone down and prevent crossing.
-     * After brake, transitions to LOITER to hold position.
+     * After brake, transitions to POSHOLD (Hover) to hold position precisely.
      */
     private fun sendPreemptiveBrake() {
         viewModelScope.launch {
@@ -3770,14 +3868,23 @@ class SharedViewModel : ViewModel() {
                 Log.i("Geofence", "🛑 Preemptive BRAKE result: $brakeSuccess")
 
                 if (!brakeSuccess) {
-                    // Fallback to LOITER which also stops movement
-                    Log.w("Geofence", "⚠️ Preemptive BRAKE failed, trying LOITER...")
-                    repo?.changeMode(MavMode.LOITER)
+                    // Fallback to POSHOLD (Hover) which holds position precisely
+                    Log.w("Geofence", "⚠️ Preemptive BRAKE failed, trying POSHOLD (Hover)...")
+                    val posholdSuccess = repo?.changeMode(MavMode.POSHOLD) ?: false
+                    if (!posholdSuccess) {
+                        Log.w("Geofence", "⚠️ POSHOLD failed, trying LOITER...")
+                        repo?.changeMode(MavMode.LOITER)
+                    }
                 } else {
-                    // Wait briefly then switch to LOITER to hold position
+                    // Wait briefly then switch to POSHOLD (Hover) to hold position precisely
                     delay(300)
-                    Log.i("Geofence", "🔒 Switching to LOITER to hold position...")
-                    repo?.changeMode(MavMode.LOITER)
+                    Log.i("Geofence", "🔒 Switching to POSHOLD (Hover) to hold position...")
+                    val posholdSuccess = repo?.changeMode(MavMode.POSHOLD) ?: false
+                    if (!posholdSuccess) {
+                        // Fallback to LOITER if POSHOLD not available
+                        Log.w("Geofence", "⚠️ POSHOLD failed, using LOITER...")
+                        repo?.changeMode(MavMode.LOITER)
+                    }
                 }
 
                 // Notify user
@@ -3791,11 +3898,14 @@ class SharedViewModel : ViewModel() {
 
             } catch (e: Exception) {
                 Log.e("Geofence", "Preemptive BRAKE error: ${e.message}")
-                // Try LOITER as fallback
+                // Try POSHOLD then LOITER as fallback
                 try {
-                    repo?.changeMode(MavMode.LOITER)
+                    val posholdSuccess = repo?.changeMode(MavMode.POSHOLD) ?: false
+                    if (!posholdSuccess) {
+                        repo?.changeMode(MavMode.LOITER)
+                    }
                 } catch (e2: Exception) {
-                    Log.e("Geofence", "LOITER fallback also failed: ${e2.message}")
+                    Log.e("Geofence", "All fallback modes failed: ${e2.message}")
                 }
             } finally {
                 // Reset flag after a short delay
@@ -3806,13 +3916,14 @@ class SharedViewModel : ViewModel() {
     }
 
     /**
-     * EMERGENCY BURST: Send BRAKE to stop, then immediately try LOITER.
-     * OPTIMIZED: Minimal delay between BRAKE and LOITER for fast response.
+     * EMERGENCY BURST: Send BRAKE to stop, then immediately try POSHOLD (Hover).
+     * OPTIMIZED: Minimal delay between BRAKE and POSHOLD for fast response.
      * The BRAKE command just needs to be sent - drone starts decelerating immediately.
-     * We don't need to wait for full stop before sending LOITER.
+     * We don't need to wait for full stop before sending POSHOLD.
      *
-     * LOITER keeps the drone stationary at its current position, preventing
-     * the user from flying further outside the fence boundary.
+     * POSHOLD (Hover mode) keeps the drone stationary at its current position precisely,
+     * preventing the user from flying further outside the fence boundary.
+     * Falls back to LOITER if POSHOLD is not available on the drone.
      */
     private fun sendEmergencyBrakeAndLoiterBurst() {
         viewModelScope.launch {
@@ -3831,9 +3942,13 @@ class SharedViewModel : ViewModel() {
                     Log.i("Geofence", "🛑 BRAKE result: $brakeSuccess")
 
                     if (!brakeSuccess) {
-                        // Try LOITER as fallback (also stops movement)
-                        Log.w("Geofence", "⚠️ BRAKE failed, trying LOITER...")
-                        repository.changeMode(MavMode.LOITER)
+                        // Try POSHOLD (Hover) as fallback (holds position)
+                        Log.w("Geofence", "⚠️ BRAKE failed, trying POSHOLD (Hover)...")
+                        val posholdSuccess = repository.changeMode(MavMode.POSHOLD)
+                        if (!posholdSuccess) {
+                            Log.w("Geofence", "⚠️ POSHOLD failed, trying LOITER...")
+                            repository.changeMode(MavMode.LOITER)
+                        }
                     }
                 } catch (e: Exception) {
                     Log.e("Geofence", "BRAKE error: ${e.message}")
@@ -3841,51 +3956,60 @@ class SharedViewModel : ViewModel() {
 
                 // STEP 2: Minimal delay - just enough for command to register (200ms)
                 // Drone starts braking immediately, we don't need to wait for full stop
-                Log.i("Geofence", "⏳ Brief pause before LOITER (200ms)...")
+                Log.i("Geofence", "⏳ Brief pause before POSHOLD (200ms)...")
                 delay(200)
 
-                // STEP 3: Mark LOITER as initiated - this stops continuous BRAKE commands
+                // STEP 3: Mark POSHOLD as initiated - this stops continuous BRAKE commands
                 rtlInitiated = true
-                Log.i("Geofence", "🔒 LOITER process initiated - stopping BRAKE enforcement")
+                Log.i("Geofence", "🔒 POSHOLD process initiated - stopping BRAKE enforcement")
 
-                // STEP 4: Now send LOITER and KEEP TRYING until it works
-                // LOITER keeps drone stationary, preventing further fence crossing
-                Log.i("Geofence", "🔒 Now sending LOITER command...")
-                var loiterSuccess = false
+                // STEP 4: Now send POSHOLD (Hover) and KEEP TRYING until it works
+                // POSHOLD keeps drone stationary precisely, preventing further fence crossing
+                Log.i("Geofence", "🔒 Now sending POSHOLD (Hover) command...")
+                var holdSuccess = false
                 var attempts = 0
                 val maxAttempts = 10
 
-                while (!loiterSuccess && attempts < maxAttempts) {
+                while (!holdSuccess && attempts < maxAttempts) {
                     attempts++
                     try {
-                        Log.i("Geofence", "🔒 LOITER attempt #$attempts...")
-                        loiterSuccess = repository.changeMode(MavMode.LOITER)
-                        Log.i("Geofence", "🔒 LOITER attempt #$attempts result: $loiterSuccess")
+                        // Try POSHOLD first (better position hold)
+                        Log.i("Geofence", "🔒 POSHOLD attempt #$attempts...")
+                        holdSuccess = repository.changeMode(MavMode.POSHOLD)
+                        Log.i("Geofence", "🔒 POSHOLD attempt #$attempts result: $holdSuccess")
 
-                        if (loiterSuccess) {
-                            Log.i("Geofence", "✓✓✓ LOITER MODE ACTIVATED SUCCESSFULLY! ✓✓✓")
+                        if (holdSuccess) {
+                            Log.i("Geofence", "✓✓✓ POSHOLD (HOVER) MODE ACTIVATED SUCCESSFULLY! ✓✓✓")
                             break
+                        } else {
+                            // Try LOITER as fallback
+                            Log.w("Geofence", "POSHOLD failed, trying LOITER...")
+                            holdSuccess = repository.changeMode(MavMode.LOITER)
+                            if (holdSuccess) {
+                                Log.i("Geofence", "✓✓✓ LOITER MODE ACTIVATED AS FALLBACK! ✓✓✓")
+                                break
+                            }
                         }
                     } catch (e: Exception) {
-                        Log.e("Geofence", "LOITER attempt #$attempts error: ${e.message}")
+                        Log.e("Geofence", "Hold mode attempt #$attempts error: ${e.message}")
                     }
 
                     // Short delay before retry (150ms)
-                    if (!loiterSuccess) {
+                    if (!holdSuccess) {
                         delay(150)
                     }
                 }
 
-                if (loiterSuccess) {
+                if (holdSuccess) {
                     addNotification(Notification(
-                        message = "🚨 GEOFENCE BREACH - Drone stopped! Return to safe area.",
+                        message = "🚨 GEOFENCE BREACH - Drone stopped in HOVER! Return to safe area.",
                         type = NotificationType.ERROR
                     ))
-                    ttsManager?.speak("Geofence breach! Drone stopped!")
+                    ttsManager?.speak("Geofence breach! Drone stopped in hover!")
                 } else {
-                    Log.e("Geofence", "❌ LOITER failed after $maxAttempts attempts - drone should remain stopped")
+                    Log.e("Geofence", "❌ All hold modes failed after $maxAttempts attempts - drone should remain stopped")
                     addNotification(Notification(
-                        message = "⚠️ GEOFENCE - Drone stopped, LOITER failed",
+                        message = "⚠️ GEOFENCE - Drone stopped, position hold failed",
                         type = NotificationType.WARNING
                     ))
                     ttsManager?.speak("Geofence! Drone stopped!")

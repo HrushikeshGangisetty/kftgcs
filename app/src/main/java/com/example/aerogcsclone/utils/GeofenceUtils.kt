@@ -135,38 +135,107 @@ object GeofenceUtils {
     }
 
     /**
-     * Creates an expanded buffer around a convex hull
-     * This ensures the buffer extends outward from all hull vertices
+     * Creates an expanded buffer around a convex hull using vertex normal offset.
+     * This uses the bisector angle method which provides more accurate buffer distances
+     * at polygon corners, ensuring the buffer is at least bufferDistanceMeters from all edges.
+     *
+     * Algorithm:
+     * 1. For each vertex, calculate the bisector angle between the two adjacent edges
+     * 2. Calculate the offset distance using miter join formula: d / cos(angle/2)
+     * 3. Move the vertex outward along the bisector by the calculated distance
+     *
+     * This ensures that even at sharp corners, the inner polygon is at least
+     * bufferDistanceMeters away from all points on the original polygon.
      */
     private fun createExpandedBuffer(hull: List<LatLng>, bufferDistanceMeters: Double): List<LatLng> {
         if (hull.size < 3) return hull
 
         val bufferedPoints = mutableListOf<LatLng>()
         val earthRadius = 6371000.0
-        val centroid = calculateCentroid(hull)
+        val n = hull.size
 
-        for (i in hull.indices) {
+        for (i in 0 until n) {
+            val prev = hull[(i - 1 + n) % n]
             val current = hull[i]
+            val next = hull[(i + 1) % n]
 
-            // Calculate direction from centroid to current point (outward direction)
-            val toCentroidLat = current.latitude - centroid.latitude
-            val toCentroidLon = current.longitude - centroid.longitude
-            val distToCentroid = sqrt(toCentroidLat * toCentroidLat + toCentroidLon * toCentroidLon)
+            // Calculate edge vectors (in lat/lon space, scaled for approximate meters)
+            val avgLat = current.latitude
+            val lonScale = cos(avgLat * PI / 180)
 
-            if (distToCentroid < 1e-10) {
-                // Point is at centroid, use a default direction
-                bufferedPoints.add(current)
+            // Edge from prev to current
+            val e1Lat = current.latitude - prev.latitude
+            val e1Lon = (current.longitude - prev.longitude) * lonScale
+            val e1Len = sqrt(e1Lat * e1Lat + e1Lon * e1Lon)
+
+            // Edge from current to next
+            val e2Lat = next.latitude - current.latitude
+            val e2Lon = (next.longitude - current.longitude) * lonScale
+            val e2Len = sqrt(e2Lat * e2Lat + e2Lon * e2Lon)
+
+            if (e1Len < 1e-10 || e2Len < 1e-10) {
+                // Degenerate case - just use centroid-based offset
+                val centroid = calculateCentroid(hull)
+                val toCentroidLat = current.latitude - centroid.latitude
+                val toCentroidLon = current.longitude - centroid.longitude
+                val distToCentroid = sqrt(toCentroidLat * toCentroidLat + toCentroidLon * toCentroidLon)
+
+                if (distToCentroid > 1e-10) {
+                    val outwardLat = toCentroidLat / distToCentroid
+                    val outwardLon = toCentroidLon / distToCentroid
+                    val offsetLat = outwardLat * (bufferDistanceMeters / earthRadius) * 180 / PI
+                    val offsetLon = outwardLon * (bufferDistanceMeters / (earthRadius * lonScale)) * 180 / PI
+                    bufferedPoints.add(LatLng(current.latitude + offsetLat, current.longitude + offsetLon))
+                } else {
+                    bufferedPoints.add(current)
+                }
                 continue
             }
 
-            // Normalize the outward direction
-            val outwardLat = toCentroidLat / distToCentroid
-            val outwardLon = toCentroidLon / distToCentroid
+            // Normalize edge vectors
+            val e1NormLat = e1Lat / e1Len
+            val e1NormLon = e1Lon / e1Len
+            val e2NormLat = e2Lat / e2Len
+            val e2NormLon = e2Lon / e2Len
 
-            // Apply buffer distance in the outward direction
-            val avgLat = current.latitude
-            val offsetLat = outwardLat * (bufferDistanceMeters / earthRadius) * 180 / PI
-            val offsetLon = outwardLon * (bufferDistanceMeters / (earthRadius * cos(avgLat * PI / 180))) * 180 / PI
+            // Calculate outward normals (perpendicular to edges, pointing outward for CCW polygon)
+            // For edge 1: normal is (-e1NormLon, e1NormLat) or (e1NormLon, -e1NormLat) depending on orientation
+            // We want outward normals, so we use the right-hand perpendicular for CCW
+            val n1Lat = -e1NormLon / lonScale  // Adjust back for lon scaling
+            val n1Lon = e1NormLat * lonScale
+
+            val n2Lat = -e2NormLon / lonScale
+            val n2Lon = e2NormLat * lonScale
+
+            // Bisector direction is the sum of the two normals (normalized)
+            val bisectLat = n1Lat + n2Lat
+            val bisectLon = n1Lon + n2Lon
+            val bisectLen = sqrt(bisectLat * bisectLat + bisectLon * bisectLon)
+
+            if (bisectLen < 1e-10) {
+                // Normals are opposite (180° corner) - use edge normal
+                val offsetLat = n1Lat * (bufferDistanceMeters / earthRadius) * 180 / PI
+                val offsetLon = n1Lon * (bufferDistanceMeters / earthRadius) * 180 / PI
+                bufferedPoints.add(LatLng(current.latitude + offsetLat, current.longitude + offsetLon))
+                continue
+            }
+
+            // Normalized bisector
+            val bisectNormLat = bisectLat / bisectLen
+            val bisectNormLon = bisectLon / bisectLen
+
+            // Calculate the angle between the two edge normals (for miter calculation)
+            val dotProduct = n1Lat * n2Lat + n1Lon * n2Lon
+            val cosHalfAngle = sqrt((1 + dotProduct.coerceIn(-1.0, 1.0)) / 2)
+
+            // Miter offset distance: buffer / cos(angle/2)
+            // Clamp the miter factor to prevent extreme offsets at sharp corners
+            val miterFactor = (1.0 / cosHalfAngle.coerceAtLeast(0.3)).coerceAtMost(3.0)
+            val miterDistance = bufferDistanceMeters * miterFactor
+
+            // Apply offset in bisector direction
+            val offsetLat = bisectNormLat * (miterDistance / earthRadius) * 180 / PI
+            val offsetLon = bisectNormLon * (miterDistance / (earthRadius * lonScale)) * 180 / PI
 
             bufferedPoints.add(LatLng(
                 current.latitude + offsetLat,

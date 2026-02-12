@@ -442,8 +442,8 @@ fun TopNavBar(
                                 Slider(
                                     value = fenceRadius,
                                     onValueChange = { telemetryViewModel.setFenceRadius(it) },
-                                    valueRange = -4f..50f, // Same range as PlanScreen
-                                    steps = 50, // Same steps as PlanScreen
+                                    valueRange = 1f..50f, // Minimum 1m as requested, max 50m
+                                    steps = 48, // 1m increments from 1 to 50
                                     modifier = Modifier.fillMaxWidth(),
                                     colors = SliderDefaults.colors(
                                         thumbColor = Color.Green,

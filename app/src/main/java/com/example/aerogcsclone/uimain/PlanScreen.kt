@@ -103,7 +103,7 @@ fun PlanScreen(
     var lineSpacing by remember { mutableStateOf(3f) }
     var gridAngle by remember { mutableStateOf(0f) }
     var surveySpeed by remember { mutableStateOf(10f) }
-    var surveyAltitude by remember { mutableStateOf(60f) }
+    var surveyAltitude by remember { mutableStateOf(1f) }
     var holdNosePosition by remember { mutableStateOf(false) }
     var autoSpray by remember { mutableStateOf(false) }
     var indentation by remember { mutableStateOf(1f) }  // Safe zone padding in meters (1-10m, 0.5 step)
@@ -2171,8 +2171,8 @@ fun PlanScreen(
                                 Slider(
                                     value = fenceRadius,
                                     onValueChange = { telemetryViewModel.setFenceRadius(it) },
-                                    valueRange = -4f..50f, // Changed minimum from 0 to -4 for testing boundary crossing
-                                    steps = 50, // Updated steps to match new range
+                                    valueRange = 1f..50f, // Minimum 1m as requested, max 50m
+                                    steps = 48, // 1m increments from 1 to 50
                                     modifier = Modifier.fillMaxWidth(),
                                     colors = SliderDefaults.colors(
                                         thumbColor = Color.Green,

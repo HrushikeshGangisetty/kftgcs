@@ -93,9 +93,13 @@ fun extractUuidString(bytes: List<UByte>): String {
  * Maps to BATTERY_STATUS messages from flow sensor (BATT2) and level sensor (BATT3)
  */
 data class SprayTelemetry(
-    // Spray system status (RC7 channel)
-    val sprayEnabled: Boolean = false,       // Whether spray system is ON (RC7 > 1500)
+    // Spray system status
+    val sprayEnabled: Boolean = false,       // Whether spray system is ON via RC7 (RC7 > 1500)
     val rc7Value: Int? = null,               // Raw RC7 PWM value (1000-2000)
+
+    // AUTO mission spray detection - spray is active when flow is detected
+    // This catches spray enabled via DO_SET_SERVO, DO_SPRAYER, or ArduPilot Sprayer library
+    val sprayActive: Boolean = false,        // TRUE if sprayEnabled OR flow > 0 (actual spraying)
 
     // Flow sensor data (BATT2 - Instance 1)
     val flowRateLiterPerMin: Float? = null,  // Current flow rate in L/min
