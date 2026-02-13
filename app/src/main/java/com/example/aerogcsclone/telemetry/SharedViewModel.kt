@@ -1090,6 +1090,365 @@ class SharedViewModel : ViewModel() {
         updateGeofencePolygon()
     }
 
+    fun setSurveyPolygon(polygon: List<LatLng>) {
+        _surveyPolygon.value = polygon
+        updateGeofencePolygon()
+        updateSurveyArea()
+    }
+    fun setGridLines(lines: List<Pair<LatLng, LatLng>>) {
+        _gridLines.value = lines
+    }
+    fun setGridWaypoints(waypoints: List<LatLng>) {
+        _gridWaypoints.value = waypoints
+        updateGeofencePolygon()
+        // Grid waypoints may be derived from survey polygon - ensure survey area is recalculated
+        updateSurveyArea()
+    }
+
+    /**
+     * Set obstacle zones for display on the map
+     */
+    fun setObstacles(obstacleList: List<List<LatLng>>) {
+        _obstacles.value = obstacleList
+    }
+
+    fun setPlanningWaypoints(waypoints: List<LatLng>) {
+        _planningWaypoints.value = waypoints
+        updateGeofencePolygon()
+        updateSurveyArea()
+    }
+
+    fun setFenceRadius(radius: Float) {
+        // Ensure minimum 5m radius
+        val newRadius = radius.coerceAtLeast(5f)
+        val oldRadius = _fenceRadius.value
+
+        // Calculate the delta (change in buffer distance)
+        val deltaMeters = (newRadius - oldRadius).toDouble()
+
+        _fenceRadius.value = newRadius
+
+        // If geofence is enabled and we have an existing polygon, scale it
+        if (_geofenceEnabled.value && _geofencePolygon.value.size >= 3 && deltaMeters != 0.0) {
+            // Scale the existing polygon by the delta
+            val scaledPolygon = GeofenceUtils.scalePolygon(_geofencePolygon.value, deltaMeters)
+            if (scaledPolygon.size >= 3) {
+                _geofencePolygon.value = scaledPolygon
+                Log.i("Geofence", "Geofence polygon scaled by ${deltaMeters}m (new buffer: ${newRadius}m)")
+            }
+        } else {
+            // No existing polygon, generate a new one
+            updateGeofencePolygon()
+        }
+
+        // Update the previous radius tracker
+        _previousFenceRadius = newRadius
+    }
+
+    fun setGeofenceEnabled(enabled: Boolean) {
+        _geofenceEnabled.value = enabled
+        if (enabled) {
+            // Reset geofence state for fresh monitoring
+            resetGeofenceState()
+
+            // Capture current drone position as home position if not set
+            val droneLat = _telemetryState.value.latitude
+            val droneLon = _telemetryState.value.longitude
+            if (_homePosition.value == null && droneLat != null && droneLon != null) {
+                _homePosition.value = LatLng(droneLat, droneLon)
+                Log.i("Geofence", "Home position captured: $droneLat, $droneLon")
+            }
+            updateGeofencePolygon()
+
+            // 🔥 CRITICAL FIX: Send FENCE_ENABLE=1 to Flight Controller
+            viewModelScope.launch {
+                try {
+                    Log.i("Geofence", "📤 Sending FENCE_ENABLE=1 to Flight Controller")
+                    val result = setParameter("FENCE_ENABLE", 1f, timeoutMs = 5000L)
+                    if (result != null) {
+                        Log.i("Geofence", "✅ FENCE_ENABLE=1 confirmed by FC")
+                        addNotification(
+                            Notification(
+                                message = "Geofence enabled on Flight Controller",
+                                type = NotificationType.INFO
+                            )
+                        )
+                    } else {
+                        Log.e("Geofence", "⚠️ No response from FC for FENCE_ENABLE=1")
+                        addNotification(
+                            Notification(
+                                message = "Geofence enable command sent (no confirmation)",
+                                type = NotificationType.WARNING
+                            )
+                        )
+                    }
+                } catch (e: Exception) {
+                    Log.e("Geofence", "❌ Failed to enable geofence on FC", e)
+                    addNotification(
+                        Notification(
+                            message = "Failed to enable geofence on FC: ${e.message}",
+                            type = NotificationType.ERROR
+                        )
+                    )
+                }
+            }
+
+            Log.i("Geofence", "✓ Geofence ENABLED - monitoring active")
+            addNotification(
+                Notification(
+                    message = "Geofence enabled - monitoring active",
+                    type = NotificationType.INFO
+                )
+            )
+        } else {
+            // 🔥 FIX: CRITICAL - Disable geofence on FC and reset ALL state
+            viewModelScope.launch {
+                try {
+                    Log.i("Geofence", "📤 Sending FENCE_ENABLE=0 to Flight Controller")
+                    val result = setParameter("FENCE_ENABLE", 0f, timeoutMs = 5000L)
+                    if (result != null) {
+                        Log.i("Geofence", "✅ FENCE_ENABLE=0 confirmed by FC")
+                    } else {
+                        Log.e("Geofence", "⚠️ No response from FC for FENCE_ENABLE=0")
+                    }
+                } catch (e: Exception) {
+                    Log.e("Geofence", "❌ Failed to disable geofence on FC", e)
+                }
+            }
+
+            // Reset ALL geofence state
+            resetGeofenceState()
+            _geofencePolygon.value = emptyList()
+            _homePosition.value = null
+            Log.i("Geofence", "Geofence DISABLED - all state reset")
+            addNotification(
+                Notification(
+                    message = "Geofence disabled",
+                    type = NotificationType.INFO
+                )
+            )
+        }
+    }
+
+    /**
+     * Manually update the geofence polygon (for user adjustments via dragging)
+     */
+    fun updateGeofencePolygonManually(polygon: List<LatLng>) {
+        if (_geofenceEnabled.value && polygon.size >= 3) {
+            _geofencePolygon.value = polygon
+            Log.i("Geofence", "Geofence polygon manually updated with ${polygon.size} vertices")
+
+            // 🔥 Upload manually updated geofence to FC
+            viewModelScope.launch {
+                uploadGeofenceToFC(polygon)
+            }
+        }
+    }
+
+    private fun updateGeofencePolygon() {
+        if (!_geofenceEnabled.value) {
+            _geofencePolygon.value = emptyList()
+            return
+        }
+
+        val allWaypoints = mutableListOf<LatLng>()
+
+        // ALWAYS include home position (where drone was when geofence was enabled)
+        val homePos = _homePosition.value
+        if (homePos != null) {
+            allWaypoints.add(homePos)
+            Log.d("Geofence", "Added home position to geofence: $homePos")
+        }
+
+        // DO NOT include current drone position - geofence should remain stationary
+        // The drone should move within the fence, not the fence move with the drone
+
+        // Add mission waypoints
+        if (_uploadedWaypoints.value.isNotEmpty()) {
+            allWaypoints.addAll(_uploadedWaypoints.value)
+            Log.d("Geofence", "Added ${_uploadedWaypoints.value.size} uploaded waypoints")
+        } else {
+            allWaypoints.addAll(_planningWaypoints.value)
+            if (_planningWaypoints.value.isNotEmpty()) {
+                Log.d("Geofence", "Added ${_planningWaypoints.value.size} planning waypoints")
+            }
+        }
+        allWaypoints.addAll(_surveyPolygon.value)
+        if (_surveyPolygon.value.isNotEmpty()) {
+            Log.d("Geofence", "Added ${_surveyPolygon.value.size} survey polygon points")
+        }
+        allWaypoints.addAll(_gridWaypoints.value)
+        if (_gridWaypoints.value.isNotEmpty()) {
+            Log.d("Geofence", "Added ${_gridWaypoints.value.size} grid waypoints")
+        }
+
+        if (allWaypoints.isNotEmpty()) {
+            // Use default buffer distance with 7m minimum (increased from 5m for 2m extra safety)
+            val bufferDistance = _fenceRadius.value.toDouble().coerceAtLeast(7.0)
+            Log.i("Geofence", "Generating ${if (_useSquareGeofence.value) "square" else "polygon"} geofence with ${allWaypoints.size} points, buffer distance: ${bufferDistance}m")
+
+            val geofenceShape = if (_useSquareGeofence.value) {
+                GeofenceUtils.generateSquareGeofence(allWaypoints, bufferDistance)
+            } else {
+                GeofenceUtils.generatePolygonBuffer(allWaypoints, bufferDistance)
+            }
+
+            if (geofenceShape.size >= 3) {
+                _geofencePolygon.value = geofenceShape
+                Log.i("Geofence", "✓ Geofence ${if (_useSquareGeofence.value) "square" else "polygon"} generated successfully with ${geofenceShape.size} vertices")
+
+                // 🔥 VALIDATION: Verify all source waypoints are inside the generated geofence
+                var allInside = true
+                for ((index, wp) in allWaypoints.withIndex()) {
+                    val isInside = GeofenceUtils.isPointInPolygon(wp, geofenceShape)
+                    val distToEdge = GeofenceUtils.distanceToPolygonEdge(wp, geofenceShape)
+                    if (!isInside) {
+                        Log.e("Geofence", "❌ VALIDATION FAILED: Waypoint $index at ${wp.latitude}, ${wp.longitude} is OUTSIDE generated geofence!")
+                        allInside = false
+                    } else {
+                        Log.d("Geofence", "✓ Waypoint $index inside geofence, ${String.format("%.1f", distToEdge)}m from edge")
+                    }
+                }
+
+                if (!allInside) {
+                    Log.e("Geofence", "⚠️ WARNING: Some waypoints are outside the geofence! Buffer may be too small.")
+                    // Increase buffer and regenerate
+                    val largerBuffer = bufferDistance + 5.0
+                    Log.i("Geofence", "Attempting to regenerate with larger buffer: ${largerBuffer}m")
+                    val largerGeofence = if (_useSquareGeofence.value) {
+                        GeofenceUtils.generateSquareGeofence(allWaypoints, largerBuffer)
+                    } else {
+                        GeofenceUtils.generatePolygonBuffer(allWaypoints, largerBuffer)
+                    }
+                    _geofencePolygon.value = largerGeofence
+                    Log.i("Geofence", "✓ Regenerated geofence with larger buffer")
+
+                    // 🔥 Upload regenerated geofence to FC
+                    if (largerGeofence.size >= 3) {
+                        viewModelScope.launch {
+                            uploadGeofenceToFC(largerGeofence)
+                        }
+                    }
+                } else {
+                    // 🔥 Upload original geofence to FC
+                    viewModelScope.launch {
+                        uploadGeofenceToFC(geofenceShape)
+                    }
+                }
+            } else {
+                Log.w("Geofence", "Failed to generate valid geofence")
+                _geofencePolygon.value = emptyList()
+            }
+        } else {
+            Log.w("Geofence", "No waypoints available for geofence")
+            _geofencePolygon.value = emptyList()
+        }
+    }
+
+    /**
+     * Validates that all points are inside or on the polygon boundary
+     */
+    private fun validatePolygonContainsPoints(polygon: List<LatLng>, points: List<LatLng>): Boolean {
+        if (polygon.size < 3) return false
+
+        // Check if all points are inside the polygon with a small tolerance
+        for (point in points) {
+            if (!GeofenceUtils.isPointInPolygon(point, polygon)) {
+                Log.w("SharedVM", "Point not in geofence: $point")
+                return false
+            }
+        }
+        return true
+    }
+
+    /**
+     * 🔥 CRITICAL FIX: Upload geofence points to Flight Controller
+     * This function properly clears old fence and uploads new fence points
+     */
+    private suspend fun uploadGeofenceToFC(polygon: List<LatLng>) {
+        if (polygon.size < 3) {
+            Log.w("Geofence", "❌ Cannot upload geofence: insufficient points (${polygon.size})")
+            return
+        }
+
+        try {
+            Log.i("Geofence", "🔥 Starting geofence upload to FC: ${polygon.size} points")
+
+            // STEP 1: Clear existing fence by setting FENCE_TOTAL to 0
+            Log.i("Geofence", "📤 Clearing existing fence points (FENCE_TOTAL=0)")
+            val clearResult = setParameter("FENCE_TOTAL", 0f, timeoutMs = 5000L)
+            if (clearResult != null) {
+                Log.i("Geofence", "✅ Existing fence cleared successfully")
+            } else {
+                Log.w("Geofence", "⚠️ FENCE_TOTAL=0 sent but no confirmation")
+            }
+
+            // STEP 2: Upload fence points as mission items with fence mission type
+            Log.i("Geofence", "📤 Uploading ${polygon.size} fence points to FC")
+            val fenceItems = mutableListOf<MissionItemInt>()
+
+            polygon.forEachIndexed { index, point ->
+                val missionItem = MissionItemInt(
+                    targetSystem = 1u,
+                    targetComponent = 1u,
+                    seq = index.toUShort(),
+                    frame = MavEnumValue.of(MavFrame.GLOBAL),
+                    command = MavEnumValue.of(MavCmd.NAV_FENCE_POLYGON_VERTEX_INCLUSION),
+                    current = if (index == 0) 1u else 0u,
+                    autocontinue = 1u,
+                    param1 = polygon.size.toFloat(), // Total vertices in the first point
+                    param2 = 0f,
+                    param3 = 0f,
+                    param4 = 0f,
+                    x = (point.latitude * 1e7).toInt(),
+                    y = (point.longitude * 1e7).toInt(),
+                    z = 0f,
+                    missionType = MavEnumValue.of(MavMissionType.FENCE)
+                )
+                fenceItems.add(missionItem)
+            }
+
+            // Upload fence items using the existing mission upload infrastructure
+            val uploadResult = repo?.uploadFenceItems(fenceItems) ?: false
+            if (uploadResult) {
+                Log.i("Geofence", "✅ Fence points uploaded successfully")
+
+                // STEP 3: Set FENCE_TOTAL to the number of points
+                Log.i("Geofence", "📤 Setting FENCE_TOTAL=${polygon.size}")
+                val totalResult = setParameter("FENCE_TOTAL", polygon.size.toFloat(), timeoutMs = 5000L)
+                if (totalResult != null) {
+                    Log.i("Geofence", "✅ FENCE_TOTAL=${polygon.size} confirmed")
+                } else {
+                    Log.w("Geofence", "⚠️ FENCE_TOTAL=${polygon.size} sent but no confirmation")
+                }
+
+                addNotification(
+                    Notification(
+                        message = "✅ Geofence uploaded to FC (${polygon.size} points)",
+                        type = NotificationType.SUCCESS
+                    )
+                )
+            } else {
+                Log.e("Geofence", "❌ Failed to upload fence points to FC")
+                addNotification(
+                    Notification(
+                        message = "❌ Failed to upload geofence to FC",
+                        type = NotificationType.ERROR
+                    )
+                )
+            }
+
+        } catch (e: Exception) {
+            Log.e("Geofence", "❌ Geofence upload failed", e)
+            addNotification(
+                Notification(
+                    message = "❌ Geofence upload error: ${e.message}",
+                    type = NotificationType.ERROR
+                )
+            )
+        }
+    }
+
     // Spray control state
     private val _sprayEnabled = MutableStateFlow(false)
     val sprayEnabled: StateFlow<Boolean> = _sprayEnabled.asStateFlow()
@@ -1371,11 +1730,11 @@ class SharedViewModel : ViewModel() {
             // Get the resume location (where drone was paused)
             val resumeLocation = _resumePointLocation.value
 
-            Log.i("SharedVM", "═══════════════════════════════════════")
-            Log.i("SharedVM", "=== CONFIRM ADD RESUME HERE ===")
-            Log.i("SharedVM", "Resume waypoint: $resumeWaypoint")
-            Log.i("SharedVM", "Resume location: ${resumeLocation?.latitude}, ${resumeLocation?.longitude}")
-            Log.i("SharedVM", "═══════════════════════════════════════")
+            Log.i("ResumeMission", "═══════════════════════════════════════")
+            Log.i("ResumeMission", "=== CONFIRM ADD RESUME HERE ===")
+            Log.i("ResumeMission", "Resume waypoint: $resumeWaypoint")
+            Log.i("ResumeMission", "Resume location: ${resumeLocation?.latitude}, ${resumeLocation?.longitude}")
+            Log.i("ResumeMission", "═══════════════════════════════════════")
 
             _showAddResumeHerePopup.value = false
 
@@ -1459,46 +1818,115 @@ class SharedViewModel : ViewModel() {
 
                 // Step 6: Upload modified mission to FC
                 val uploadSuccess = repo?.uploadMissionWithAck(resequenced) ?: false
-                if (!uploadSuccess) {
-                    Log.e("SharedVM", "❌ Mission upload failed")
-                    onResult(false, "Failed to upload mission to FC")
+                if (uploadSuccess) {
+                    Log.i("SharedVM", "✅ Modified mission uploaded to FC")
+
+                    // Verify by reading back the mission count
+                    // Delay allows FC to fully commit mission to storage before verification
+                    delay(1000)
+                    val verifyCount = repo?.getMissionCount() ?: 0
+                    if (verifyCount != resequenced.size) {
+                        Log.e("SharedVM", "⚠️ WARNING: FC reports $verifyCount waypoints but we uploaded ${resequenced.size}")
+                    } else {
+                        Log.i("SharedVM", "✅ FC confirms $verifyCount waypoints stored")
+                    }
+                } else {
+                    Log.e("SharedVM", "❌ Mission upload FAILED - FC rejected mission")
+                    onResult(false, "Mission upload failed - flight controller rejected mission")
                     return@launch
                 }
 
-                Log.i("SharedVM", "✅ Modified mission uploaded to FC")
+                // Step 7: Set Current Waypoint to start execution
+                onProgress("Setting current waypoint...")
+                Log.i("SharedVM", "Setting current waypoint to 1 (start from first mission item after HOME)")
+                val setWaypointSuccess = repo?.setCurrentWaypoint(1) ?: false
+
+                if (!setWaypointSuccess) {
+                    Log.w("SharedVM", "Failed to set current waypoint, continuing anyway")
+                }
 
                 delay(500)
 
-                onProgress("Setting start waypoint...")
+                // Step 8: Switch to AUTO Mode
+                onProgress("Switching to AUTO mode...")
+                val currentMode = _telemetryState.value.mode
+                Log.i("SharedVM", "Current mode: $currentMode")
 
-                // Step 7: Set current waypoint to 1 (first item after HOME in resequenced mission)
-                val setWpResult = repo?.setCurrentWaypoint(1) ?: false
-                if (setWpResult) {
-                    Log.i("SharedVM", "✅ Current waypoint set to 1")
-                } else {
-                    Log.w("SharedVM", "⚠️ Failed to set current waypoint, continuing anyway")
+                var autoSuccess = false
+                var retryCount = 0
+                val maxRetries = 3
+
+                while (!autoSuccess && retryCount < maxRetries) {
+                    val attempt = retryCount + 1
+                    Log.i("SharedVM", "Attempt $attempt/$maxRetries: Sending AUTO mode command...")
+
+                    autoSuccess = repo?.changeMode(MavMode.AUTO) ?: false
+
+                    Log.i("SharedVM", "Attempt $attempt result: ${if (autoSuccess) "SUCCESS" else "FAILED"}")
+
+                    if (!autoSuccess) {
+                        retryCount++
+                        if (retryCount < maxRetries) {
+                            Log.w("SharedVM", "Waiting 2 seconds before retry...")
+                            delay(2000)
+                        }
+                    }
                 }
 
-                // Mark that resume mission is ready
-                _resumeMissionReady.value = true
+                if (!autoSuccess) {
+                    val finalMode = _telemetryState.value.mode
+                    Log.e("SharedVM", "❌ Failed to switch to AUTO after $maxRetries attempts")
+                    Log.e("SharedVM", "Final mode: $finalMode")
+                    onResult(false, "Failed to switch to AUTO. Stuck in: $finalMode")
+                    return@launch
+                }
+
+                Log.i("SharedVM", "✅ Successfully switched to AUTO mode")
+
+                // Complete: Update state
+                onProgress("Mission resumed!")
+                _telemetryState.update {
+                    it.copy(
+                        missionPaused = false,
+                        pausedAtWaypoint = null
+                    )
+                }
+
+                // ✅ Send mission status RESUMED to backend (crash-safe)
+                try {
+                    WebSocketManager.getInstance().sendMissionStatus(WebSocketManager.MISSION_STATUS_RESUMED)
+                    WebSocketManager.getInstance().sendMissionEvent(
+                        eventType = "MISSION_RESUMED",
+                        eventStatus = "INFO",
+                        description = "Mission resumed"
+                    )
+                } catch (e: Exception) {
+                    Log.e("SharedVM", "Failed to send RESUMED status", e)
+                }
+
+                // Mark mission as uploaded
                 _missionUploaded.value = true
                 lastUploadedCount = resequenced.size
+                Log.i("SharedVM", "✅ Mission upload status updated: uploaded=$_missionUploaded, count=$lastUploadedCount")
 
-                Log.i("SharedVM", "═══════════════════════════════════════")
-                Log.i("SharedVM", "✅ Resume mission ready - waiting for AUTO mode")
-                Log.i("SharedVM", "═══════════════════════════════════════")
-
+                // Complete
                 addNotification(
                     Notification(
-                        message = "Resume point set at waypoint $resumeWaypoint - Switch to AUTO to resume",
+                        message = "Mission resumed from waypoint $resumeWaypoint",
                         type = NotificationType.SUCCESS
                     )
                 )
+                ttsManager?.announceMissionResumed()
+
+                Log.i("ResumeMission", "═══════════════════════════════════════")
+                Log.i("ResumeMission", "✅ Resume Mission Complete!")
+                Log.i("ResumeMission", "═══════════════════════════════════════")
 
                 onResult(true, null)
 
             } catch (e: Exception) {
-                Log.e("SharedVM", "Failed to prepare resume mission", e)
+                Log.e("ResumeMission", "❌ Resume mission failed", e)
+                addNotification(Notification("Resume mission failed: ${e.message}", NotificationType.ERROR))
                 onResult(false, e.message)
             }
         }
@@ -1571,363 +1999,6 @@ class SharedViewModel : ViewModel() {
      * Get the previous mode for transition detection
      */
     fun getPreviousMode(): String? = previousMode
-
-    fun setSurveyPolygon(polygon: List<LatLng>) {
-        _surveyPolygon.value = polygon
-        updateGeofencePolygon()
-        updateSurveyArea()
-    }
-    fun setGridLines(lines: List<Pair<LatLng, LatLng>>) { _gridLines.value = lines }
-    fun setGridWaypoints(waypoints: List<LatLng>) {
-        _gridWaypoints.value = waypoints
-        updateGeofencePolygon()
-        // Grid waypoints may be derived from survey polygon - ensure survey area is recalculated
-        updateSurveyArea()
-    }
-
-    /**
-     * Set obstacle zones for display on the map
-     */
-    fun setObstacles(obstacleList: List<List<LatLng>>) {
-        _obstacles.value = obstacleList
-    }
-
-    fun setPlanningWaypoints(waypoints: List<LatLng>) {
-        _planningWaypoints.value = waypoints
-        updateGeofencePolygon()
-        updateSurveyArea()
-    }
-
-    fun setFenceRadius(radius: Float) {
-        // Ensure minimum 5m radius
-        val newRadius = radius.coerceAtLeast(5f)
-        val oldRadius = _fenceRadius.value
-
-        // Calculate the delta (change in buffer distance)
-        val deltaMeters = (newRadius - oldRadius).toDouble()
-
-        _fenceRadius.value = newRadius
-
-        // If geofence is enabled and we have an existing polygon, scale it
-        if (_geofenceEnabled.value && _geofencePolygon.value.size >= 3 && deltaMeters != 0.0) {
-            // Scale the existing polygon by the delta
-            val scaledPolygon = GeofenceUtils.scalePolygon(_geofencePolygon.value, deltaMeters)
-            if (scaledPolygon.size >= 3) {
-                _geofencePolygon.value = scaledPolygon
-                Log.i("Geofence", "Geofence polygon scaled by ${deltaMeters}m (new buffer: ${newRadius}m)")
-            }
-        } else {
-            // No existing polygon, generate a new one
-            updateGeofencePolygon()
-        }
-
-        // Update the previous radius tracker
-        _previousFenceRadius = newRadius
-    }
-
-    fun setGeofenceEnabled(enabled: Boolean) {
-        _geofenceEnabled.value = enabled
-        if (enabled) {
-            // Reset geofence state for fresh monitoring
-            resetGeofenceState()
-
-            // Capture current drone position as home position if not set
-            val droneLat = _telemetryState.value.latitude
-            val droneLon = _telemetryState.value.longitude
-            if (_homePosition.value == null && droneLat != null && droneLon != null) {
-                _homePosition.value = LatLng(droneLat, droneLon)
-                Log.i("Geofence", "Home position captured: $droneLat, $droneLon")
-            }
-            updateGeofencePolygon()
-
-            // 🔥 CRITICAL FIX: Send FENCE_ENABLE=1 to Flight Controller
-            viewModelScope.launch {
-                try {
-                    Log.i("Geofence", "📤 Sending FENCE_ENABLE=1 to Flight Controller")
-                    val result = setParameter("FENCE_ENABLE", 1f, timeoutMs = 5000L)
-                    if (result != null) {
-                        Log.i("Geofence", "✅ FENCE_ENABLE=1 confirmed by FC")
-                        addNotification(
-                            Notification(
-                                message = "Geofence enabled on Flight Controller",
-                                type = NotificationType.INFO
-                            )
-                        )
-                    } else {
-                        Log.e("Geofence", "⚠️ No response from FC for FENCE_ENABLE=1")
-                        addNotification(
-                            Notification(
-                                message = "Geofence enable command sent (no confirmation)",
-                                type = NotificationType.WARNING
-                            )
-                        )
-                    }
-                } catch (e: Exception) {
-                    Log.e("Geofence", "❌ Failed to enable geofence on FC", e)
-                    addNotification(
-                        Notification(
-                            message = "Failed to enable geofence on FC: ${e.message}",
-                            type = NotificationType.ERROR
-                        )
-                    )
-                }
-            }
-
-            Log.i("Geofence", "✓ Geofence ENABLED - monitoring active")
-            addNotification(
-                Notification(
-                    message = "Geofence enabled - monitoring active",
-                    type = NotificationType.INFO
-                )
-            )
-        } else {
-            // 🔥 FIX: CRITICAL - Disable geofence on FC and reset ALL state
-            viewModelScope.launch {
-                try {
-                    Log.i("Geofence", "📤 Sending FENCE_ENABLE=0 to Flight Controller")
-                    val result = setParameter("FENCE_ENABLE", 0f, timeoutMs = 5000L)
-                    if (result != null) {
-                        Log.i("Geofence", "✅ FENCE_ENABLE=0 confirmed by FC")
-                    } else {
-                        Log.e("Geofence", "⚠️ No response from FC for FENCE_ENABLE=0")
-                    }
-                } catch (e: Exception) {
-                    Log.e("Geofence", "❌ Failed to disable geofence on FC", e)
-                }
-            }
-
-            // Reset ALL geofence state
-            resetGeofenceState()
-            _geofencePolygon.value = emptyList()
-            _homePosition.value = null
-            Log.i("Geofence", "Geofence DISABLED - all state reset")
-            addNotification(
-                Notification(
-                    message = "Geofence disabled",
-                    type = NotificationType.INFO
-                )
-            )
-        }
-    }
-
-    /**
-     * Manually update the geofence polygon (for user adjustments via dragging)
-     */
-    fun updateGeofencePolygonManually(polygon: List<LatLng>) {
-        if (_geofenceEnabled.value && polygon.size >= 3) {
-            _geofencePolygon.value = polygon
-            Log.i("Geofence", "Geofence polygon manually updated with ${polygon.size} vertices")
-
-            // 🔥 Upload manually updated geofence to FC
-            viewModelScope.launch {
-                uploadGeofenceToFC(polygon)
-            }
-        }
-    }
-
-    private fun updateGeofencePolygon() {
-        if (!_geofenceEnabled.value) {
-            _geofencePolygon.value = emptyList()
-            return
-        }
-
-        val allWaypoints = mutableListOf<LatLng>()
-
-        // ALWAYS include home position (where drone was when geofence was enabled)
-        val homePos = _homePosition.value
-        if (homePos != null) {
-            allWaypoints.add(homePos)
-            Log.d("Geofence", "Added home position to geofence: $homePos")
-        }
-        
-        // DO NOT include current drone position - geofence should remain stationary
-        // The drone should move within the fence, not the fence move with the drone
-
-        // Add mission waypoints
-        if (_uploadedWaypoints.value.isNotEmpty()) {
-            allWaypoints.addAll(_uploadedWaypoints.value)
-            Log.d("Geofence", "Added ${_uploadedWaypoints.value.size} uploaded waypoints")
-        } else {
-            allWaypoints.addAll(_planningWaypoints.value)
-            if (_planningWaypoints.value.isNotEmpty()) {
-                Log.d("Geofence", "Added ${_planningWaypoints.value.size} planning waypoints")
-            }
-        }
-        allWaypoints.addAll(_surveyPolygon.value)
-        if (_surveyPolygon.value.isNotEmpty()) {
-            Log.d("Geofence", "Added ${_surveyPolygon.value.size} survey polygon points")
-        }
-        allWaypoints.addAll(_gridWaypoints.value)
-        if (_gridWaypoints.value.isNotEmpty()) {
-            Log.d("Geofence", "Added ${_gridWaypoints.value.size} grid waypoints")
-        }
-
-        if (allWaypoints.isNotEmpty()) {
-            // Use default buffer distance with 7m minimum (increased from 5m for 2m extra safety)
-            val bufferDistance = _fenceRadius.value.toDouble().coerceAtLeast(7.0)
-            Log.i("Geofence", "Generating ${if (_useSquareGeofence.value) "square" else "polygon"} geofence with ${allWaypoints.size} points, buffer distance: ${bufferDistance}m")
-
-            val geofenceShape = if (_useSquareGeofence.value) {
-                GeofenceUtils.generateSquareGeofence(allWaypoints, bufferDistance)
-            } else {
-                GeofenceUtils.generatePolygonBuffer(allWaypoints, bufferDistance)
-            }
-
-            if (geofenceShape.size >= 3) {
-                _geofencePolygon.value = geofenceShape
-                Log.i("Geofence", "✓ Geofence ${if (_useSquareGeofence.value) "square" else "polygon"} generated successfully with ${geofenceShape.size} vertices")
-
-                // 🔥 VALIDATION: Verify all source waypoints are inside the generated geofence
-                var allInside = true
-                for ((index, wp) in allWaypoints.withIndex()) {
-                    val isInside = GeofenceUtils.isPointInPolygon(wp, geofenceShape)
-                    val distToEdge = GeofenceUtils.distanceToPolygonEdge(wp, geofenceShape)
-                    if (!isInside) {
-                        Log.e("Geofence", "❌ VALIDATION FAILED: Waypoint $index at ${wp.latitude}, ${wp.longitude} is OUTSIDE generated geofence!")
-                        allInside = false
-                    } else {
-                        Log.d("Geofence", "✓ Waypoint $index inside geofence, ${String.format("%.1f", distToEdge)}m from edge")
-                    }
-                }
-
-                if (!allInside) {
-                    Log.e("Geofence", "⚠️ WARNING: Some waypoints are outside the geofence! Buffer may be too small.")
-                    // Increase buffer and regenerate
-                    val largerBuffer = bufferDistance + 5.0
-                    Log.i("Geofence", "Attempting to regenerate with larger buffer: ${largerBuffer}m")
-                    val largerGeofence = if (_useSquareGeofence.value) {
-                        GeofenceUtils.generateSquareGeofence(allWaypoints, largerBuffer)
-                    } else {
-                        GeofenceUtils.generatePolygonBuffer(allWaypoints, largerBuffer)
-                    }
-                    _geofencePolygon.value = largerGeofence
-                    Log.i("Geofence", "✓ Regenerated geofence with larger buffer")
-
-                    // 🔥 Upload regenerated geofence to FC
-                    if (largerGeofence.size >= 3) {
-                        viewModelScope.launch {
-                            uploadGeofenceToFC(largerGeofence)
-                        }
-                    }
-                } else {
-                    // 🔥 Upload original geofence to FC
-                    viewModelScope.launch {
-                        uploadGeofenceToFC(geofenceShape)
-                    }
-                }
-            } else {
-                Log.w("Geofence", "Failed to generate valid geofence")
-                _geofencePolygon.value = emptyList()
-            }
-        } else {
-            Log.w("Geofence", "No waypoints available for geofence")
-            _geofencePolygon.value = emptyList()
-        }
-    }
-
-    /**
-     * Validates that all points are inside or on the polygon boundary
-     */
-    private fun validatePolygonContainsPoints(polygon: List<LatLng>, points: List<LatLng>): Boolean {
-        if (polygon.size < 3) return false
-        
-        // Check if all points are inside the polygon with a small tolerance
-        for (point in points) {
-            if (!GeofenceUtils.isPointInPolygon(point, polygon)) {
-                Log.w("SharedVM", "Point not in geofence: $point")
-                return false
-            }
-        }
-        return true
-    }
-
-    /**
-     * 🔥 CRITICAL FIX: Upload geofence points to Flight Controller
-     * This function properly clears old fence and uploads new fence points
-     */
-    private suspend fun uploadGeofenceToFC(polygon: List<LatLng>) {
-        if (polygon.size < 3) {
-            Log.w("Geofence", "❌ Cannot upload geofence: insufficient points (${polygon.size})")
-            return
-        }
-
-        try {
-            Log.i("Geofence", "🔥 Starting geofence upload to FC: ${polygon.size} points")
-
-            // STEP 1: Clear existing fence by setting FENCE_TOTAL to 0
-            Log.i("Geofence", "📤 Clearing existing fence points (FENCE_TOTAL=0)")
-            val clearResult = setParameter("FENCE_TOTAL", 0f, timeoutMs = 5000L)
-            if (clearResult != null) {
-                Log.i("Geofence", "✅ Existing fence cleared successfully")
-            } else {
-                Log.w("Geofence", "⚠️ FENCE_TOTAL=0 sent but no confirmation")
-            }
-
-            // STEP 2: Upload fence points as mission items with fence mission type
-            Log.i("Geofence", "📤 Uploading ${polygon.size} fence points to FC")
-            val fenceItems = mutableListOf<MissionItemInt>()
-
-            polygon.forEachIndexed { index, point ->
-                val missionItem = MissionItemInt(
-                    targetSystem = 1u,
-                    targetComponent = 1u,
-                    seq = index.toUShort(),
-                    frame = MavEnumValue.of(MavFrame.GLOBAL),
-                    command = MavEnumValue.of(MavCmd.NAV_FENCE_POLYGON_VERTEX_INCLUSION),
-                    current = if (index == 0) 1u else 0u,
-                    autocontinue = 1u,
-                    param1 = polygon.size.toFloat(), // Total vertices in the first point
-                    param2 = 0f,
-                    param3 = 0f,
-                    param4 = 0f,
-                    x = (point.latitude * 1e7).toInt(),
-                    y = (point.longitude * 1e7).toInt(),
-                    z = 0f,
-                    missionType = MavEnumValue.of(MavMissionType.FENCE)
-                )
-                fenceItems.add(missionItem)
-            }
-
-            // Upload fence items using the existing mission upload infrastructure
-            val uploadResult = repo?.uploadFenceItems(fenceItems) ?: false
-            if (uploadResult) {
-                Log.i("Geofence", "✅ Fence points uploaded successfully")
-
-                // STEP 3: Set FENCE_TOTAL to the number of points
-                Log.i("Geofence", "📤 Setting FENCE_TOTAL=${polygon.size}")
-                val totalResult = setParameter("FENCE_TOTAL", polygon.size.toFloat(), timeoutMs = 5000L)
-                if (totalResult != null) {
-                    Log.i("Geofence", "✅ FENCE_TOTAL=${polygon.size} confirmed")
-                } else {
-                    Log.w("Geofence", "⚠️ FENCE_TOTAL=${polygon.size} sent but no confirmation")
-                }
-
-                addNotification(
-                    Notification(
-                        message = "✅ Geofence uploaded to FC (${polygon.size} points)",
-                        type = NotificationType.SUCCESS
-                    )
-                )
-            } else {
-                Log.e("Geofence", "❌ Failed to upload fence points to FC")
-                addNotification(
-                    Notification(
-                        message = "❌ Failed to upload geofence to FC",
-                        type = NotificationType.ERROR
-                    )
-                )
-            }
-
-        } catch (e: Exception) {
-            Log.e("Geofence", "❌ Geofence upload failed", e)
-            addNotification(
-                Notification(
-                    message = "❌ Geofence upload error: ${e.message}",
-                    type = NotificationType.ERROR
-                )
-            )
-        }
-    }
 
     // --- MAVLink Actions ---
 
@@ -2028,12 +2099,12 @@ class SharedViewModel : ViewModel() {
             Log.e("MissionValidation", "Actual sequences: $sequences")
             Log.e("MissionValidation", "Missing sequences: ${expectedSequences.minus(sequences.toSet())}")
             Log.e("MissionValidation", "Extra sequences: ${sequences.toSet().minus(expectedSequences.toSet())}")
-            
+
             // Log each mission item for debugging
             missionItems.forEach { item ->
                 Log.e("MissionValidation", "Item: seq=${item.seq} cmd=${item.command.value} current=${item.current}")
             }
-            
+
             return Pair(false, "Invalid sequence numbers - Expected: $expectedSequences, Got: $sequences")
         }
 
@@ -2075,7 +2146,7 @@ class SharedViewModel : ViewModel() {
                 )) {
                 val lat = item.x / 1e7
                 val lon = item.y / 1e7
-                
+
                 // Skip HOME waypoint (seq=0) coordinate check as it can be (0,0)
                 if (item.seq.toInt() != 0) {
                     if (lat !in -90.0..90.0 || lon !in -180.0..180.0) {
@@ -2085,7 +2156,7 @@ class SharedViewModel : ViewModel() {
                         Log.w("MissionValidation", "⚠️ Waypoint at seq=${item.seq} has coordinates (0,0)")
                     }
                 }
-                
+
                 if (item.z < AltitudeLimits.MIN_ALTITUDE || item.z > AltitudeLimits.MAX_ALTITUDE) {
                     return Pair(false, "Invalid altitude at seq=${item.seq}: ${item.z}m (valid range: ${AltitudeLimits.MIN_ALTITUDE}-${AltitudeLimits.MAX_ALTITUDE}m)")
                 }
@@ -2525,7 +2596,7 @@ class SharedViewModel : ViewModel() {
                 onProgress("Step 2/8: Retrieving mission from flight controller...")
                 Log.i("ResumeMission", "Retrieving current mission from FC...")
                 val allWaypoints = repo?.getAllWaypoints()
-                
+
                 if (allWaypoints == null || allWaypoints.isEmpty()) {
                     Log.e("ResumeMission", "❌ Failed to retrieve mission from FC")
                     onResult(false, "Failed to retrieve mission from flight controller")
@@ -2555,7 +2626,7 @@ class SharedViewModel : ViewModel() {
                     onResult(false, "Mission filtering failed - no waypoints to resume")
                     return@launch
                 }
-                
+
                 Log.i("ResumeMission", "────────────────────────────────")
                 Log.i("ResumeMission", "Filtered mission count: ${filtered.size}")
                 filtered.forEach { wp ->
@@ -2566,13 +2637,13 @@ class SharedViewModel : ViewModel() {
                 onProgress("Step 4/8: Resequencing waypoints...")
                 Log.i("ResumeMission", "Resequencing waypoints...")
                 val resequenced = repo?.resequenceWaypoints(filtered)
-                
+
                 if (resequenced == null || resequenced.isEmpty()) {
                     Log.e("ResumeMission", "❌ Resequencing resulted in empty mission")
                     onResult(false, "Mission resequencing failed")
                     return@launch
                 }
-                
+
                 Log.i("ResumeMission", "────────────────────────────────")
                 Log.i("ResumeMission", "Resequenced mission count: ${resequenced.size}")
                 resequenced.forEach { wp ->
@@ -2597,7 +2668,7 @@ class SharedViewModel : ViewModel() {
 
                 if (success) {
                     Log.i("ResumeMission", "✅ Mission upload confirmed by FC")
-                    
+
                     // Verify by reading back the mission count
                     // Delay allows FC to fully commit mission to storage before verification
                     delay(1000)
@@ -3150,6 +3221,8 @@ class SharedViewModel : ViewModel() {
     // Expose FCU system and component IDs for mission building
     fun getFcuSystemId(): UByte = repo?.fcuSystemId ?: 0u
     fun getFcuComponentId(): UByte = repo?.fcuComponentId ?: 0u
+
+
 
     suspend fun cancelConnection() {
         repo?.let {
@@ -3755,7 +3828,9 @@ class SharedViewModel : ViewModel() {
         }
 
         // CASE 2: WARNING ZONE - drone is INSIDE fence but close to edge
-        // 🔥 HIGH SPEED PREEMPTIVE BRAKE: If drone is approaching fence at high speed, stop it immediately
+        // 🔥 TWO-TIER GEOFENCE SYSTEM:
+        // - INNER WARNING ZONE (60-100% of buffer): BRAKE once to slow down
+        // - OUTER BREACH ZONE (outside fence): RTL to force return and prevent RC override
         if (isWithinBuffer) {
             // Set warning state for UI indication (yellow border, etc.)
             if (!_geofenceWarningTriggered.value) {
@@ -3773,21 +3848,17 @@ class SharedViewModel : ViewModel() {
                 speak("Approaching geofence boundary")
             }
 
-            // 🔥 HIGH SPEED PREVENTION: If drone is moving fast (>2.5 m/s) and very close to boundary,
-            // send immediate BRAKE to prevent crossing
-            // IMPROVED: Trigger at 60% of buffer (was 50%) and lower speed threshold (was 3.0 m/s)
-            val criticalDistance = dynamicBuffer * 0.6  // 60% of buffer = critical zone (more aggressive)
-            if (currentSpeed > 2.5f && distanceToFence < criticalDistance) {
-                Log.w("Geofence", "🛑 HIGH SPEED APPROACHING FENCE! Speed=${String.format("%.1f", currentSpeed)}m/s, dist=${String.format("%.1f", distanceToFence)}m, critical=${String.format("%.1f", criticalDistance)}m - Sending preemptive BRAKE!")
+            // 🔥 INNER WARNING ZONE: If drone is moving fast (>2.5 m/s) and in critical zone,
+            // send ONE BRAKE command to slow it down
+            // Critical zone = 60% of buffer (inner warning boundary)
+            val criticalDistance = dynamicBuffer * 0.6  // 60% of buffer = inner critical zone
+            if (currentSpeed > 2.5f && distanceToFence < criticalDistance && !geofenceActionTaken) {
+                Log.w("Geofence", "🛑 INNER WARNING! Speed=${String.format("%.1f", currentSpeed)}m/s, dist=${String.format("%.1f", distanceToFence)}m, critical=${String.format("%.1f", criticalDistance)}m - Sending ONE BRAKE!")
 
-                // Send brake only if we haven't already taken action
-                if (!geofenceActionTaken) {
-                    val now = System.currentTimeMillis()
-                    if (now - lastBrakeCommandTime > BRAKE_COMMAND_INTERVAL_MS) {
-                        lastBrakeCommandTime = now
-                        sendPreemptiveBrake()
-                    }
-                }
+                geofenceActionTaken = true
+                val now = System.currentTimeMillis()
+                lastBrakeCommandTime = now
+                sendSingleBrakeCommand()  // Send BRAKE once, no RTL follow-up
             }
         }
 
@@ -3855,9 +3926,49 @@ class SharedViewModel : ViewModel() {
     }
 
     /**
+     * Send SINGLE BRAKE command for inner warning zone.
+     * This sends BRAKE ONCE to slow the drone down, WITHOUT follow-up RTL.
+     * Allows pilot to regain control after slowing down.
+     */
+    private fun sendSingleBrakeCommand() {
+        viewModelScope.launch {
+            try {
+                Log.i("Geofence", "🛑 INNER WARNING BRAKE - Slowing drone at fence boundary!")
+                geofenceTriggeringModeChange = true
+
+                // Send BRAKE command once
+                val brakeSuccess = repo?.changeMode(MavMode.BRAKE) ?: false
+                Log.i("Geofence", "🛑 Inner warning BRAKE result: $brakeSuccess")
+
+                if (!brakeSuccess) {
+                    // Fallback to LOITER
+                    Log.w("Geofence", "⚠️ BRAKE failed, trying LOITER...")
+                    repo?.changeMode(MavMode.LOITER)
+                }
+
+                // Notify user
+                addNotification(
+                    Notification(
+                        message = "⚠️ Slowing down: Approaching geofence",
+                        type = NotificationType.WARNING
+                    )
+                )
+                ttsManager?.speak("Warning! Approaching fence!")
+
+            } catch (e: Exception) {
+                Log.e("Geofence", "Single BRAKE error: ${e.message}")
+            } finally {
+                // Reset flag after a short delay
+                delay(500)
+                geofenceTriggeringModeChange = false
+            }
+        }
+    }
+
+    /**
      * Send PREEMPTIVE BRAKE when approaching fence at high speed.
      * This triggers BEFORE actual breach to slow the drone down and prevent crossing.
-     * After brake, transitions to LOITER to hold position.
+     * After brake, transitions to RTL to bring drone back to safe zone.
      */
     private fun sendPreemptiveBrake() {
         viewModelScope.launch {
