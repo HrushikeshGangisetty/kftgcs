@@ -1015,6 +1015,14 @@ class SharedViewModel : ViewModel() {
             val totalSprayUsed = currentState.sprayTelemetry.consumedLiters?.toDouble() ?: 0.0
             val batteryEnd = currentState.batteryPercent ?: 0
 
+            // Parse sprayed acres from the completion data string (e.g., "0.13 acres")
+            val totalSprayedAcres = completionData.sprayedAcres
+                .replace(" acres", "")
+                .replace(" acre", "")
+                .toDoubleOrNull() ?: 0.0
+
+            Log.d("SharedVM", "🔥 DEBUG: completionData.sprayedAcres='${completionData.sprayedAcres}', parsed totalSprayedAcres=$totalSprayedAcres")
+
             wsManager.sendMissionSummary(
                 totalAcres = totalAcres,
                 totalSprayUsed = totalSprayUsed,
@@ -1026,7 +1034,8 @@ class SharedViewModel : ViewModel() {
                 status = "COMPLETED",
                 projectName = projectName,
                 plotName = plotName,
-                cropType = cropType
+                cropType = cropType,
+                totalSprayedAcres = totalSprayedAcres
             )
             Log.i("SharedVM", "📤 Mission summary sent with cropType=$cropType")
         } catch (e: Exception) {
@@ -1418,30 +1427,16 @@ class SharedViewModel : ViewModel() {
                 Log.i("Geofence", "✅ Fence uploaded to FC successfully")
                 _fenceConfiguration.value = config
                 lastFenceUploadTime = System.currentTimeMillis()
-                addNotification(
-                    Notification(
-                        message = "✅ Geofence uploaded to FC",
-                        type = NotificationType.SUCCESS
-                    )
-                )
+                // NOTE: Removed geofence upload notification from notification panel
+                // The upload progress is shown in the dedicated upload UI
             } else {
                 Log.e("Geofence", "❌ Failed to upload fence to FC")
-                addNotification(
-                    Notification(
-                        message = "❌ Failed to upload geofence to FC",
-                        type = NotificationType.ERROR
-                    )
-                )
+                // NOTE: Removed geofence upload failure notification from notification panel
             }
 
         } catch (e: Exception) {
             Log.e("Geofence", "❌ Geofence upload failed", e)
-            addNotification(
-                Notification(
-                    message = "❌ Geofence upload error: ${e.message}",
-                    type = NotificationType.ERROR
-                )
-            )
+            // NOTE: Removed geofence upload error notification from notification panel
         } finally {
             fenceUploadMutex.unlock()
         }
@@ -2217,7 +2212,18 @@ class SharedViewModel : ViewModel() {
                 )
                 Log.d("MissionUpload", "VM: Progress UI updated - Uploading")
 
-                val success = repo?.uploadMissionWithAck(missionItems) ?: false
+                val success = repo?.uploadMissionWithAck(
+                    missionItems = missionItems,
+                    onProgress = { currentItem, totalItems ->
+                        // Update progress UI on main thread
+                        _missionUploadProgress.value = MissionUploadProgress(
+                            stage = "Uploading",
+                            currentItem = currentItem,
+                            totalItems = totalItems,
+                            message = "Uploading waypoint $currentItem of $totalItems..."
+                        )
+                    }
+                ) ?: false
 
                 _missionUploaded.value = success
                 if (success) {
@@ -3715,12 +3721,7 @@ class SharedViewModel : ViewModel() {
                     // Also update the UI polygon for display
                     _geofencePolygon.value = outerBoundary
 
-                    addNotification(
-                        Notification(
-                            message = "✅ Geofence uploaded to flight controller",
-                            type = NotificationType.SUCCESS
-                        )
-                    )
+                    // NOTE: Removed geofence upload notification from notification panel
                     speak("Geofence enabled")
 
                     Log.i("Geofence", "✅ Geofence uploaded successfully:")
@@ -3729,23 +3730,13 @@ class SharedViewModel : ViewModel() {
                     Log.i("Geofence", "  - Margin: ${margin}m")
                     Log.i("Geofence", "  - Alt Max: ${altitudeMax ?: "none"}m")
                 } else {
-                    addNotification(
-                        Notification(
-                            message = "❌ Failed to upload geofence",
-                            type = NotificationType.ERROR
-                        )
-                    )
+                    // NOTE: Removed geofence upload failure notification from notification panel
                     speak("Geofence upload failed")
                 }
 
             } catch (e: Exception) {
                 Log.e("Geofence", "Error uploading geofence: ${e.message}")
-                addNotification(
-                    Notification(
-                        message = "❌ Geofence error: ${e.message}",
-                        type = NotificationType.ERROR
-                    )
-                )
+                // NOTE: Removed geofence upload error notification from notification panel
             }
         }
     }

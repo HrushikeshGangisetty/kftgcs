@@ -1293,12 +1293,8 @@ class MavlinkTelemetryRepository(
 
                     if (currentSeq != lastMissionSeq) {
                         lastMissionSeq = currentSeq
-                        sharedViewModel.addNotification(
-                            Notification(
-                                "Executing waypoint #${lastMissionSeq}",
-                                NotificationType.INFO
-                            )
-                        )
+                        // NOTE: Removed waypoint execution notification from notification panel
+                        // The UI already shows current waypoint progress in the telemetry display
                     }
                 }
         }
@@ -1329,12 +1325,8 @@ class MavlinkTelemetryRepository(
                     // Update SharedViewModel
                     sharedViewModel.updateCurrentWaypoint(reachedSeq)
 
-                    sharedViewModel.addNotification(
-                        Notification(
-                            "Reached waypoint #${reachedSeq}",
-                            NotificationType.INFO
-                        )
-                    )
+                    // NOTE: Removed "Reached waypoint" notification from notification panel
+                    // The UI already shows current waypoint progress in the telemetry display
                 }
         }
 
@@ -1351,9 +1343,8 @@ class MavlinkTelemetryRepository(
                         return@collect
                     }
 
-                    val message = "Mission upload: ${missionAck.type.entry?.name ?: "UNKNOWN"}"
-                    val type = if (missionAck.type.value == MavMissionResult.MAV_MISSION_ACCEPTED.value) NotificationType.SUCCESS else NotificationType.ERROR
-                    sharedViewModel.addNotification(Notification(message, type))
+                    // NOTE: Removed mission upload ACK notification from notification panel
+                    // The upload progress is shown in the dedicated upload dialog
                 }
         }
 
@@ -2002,9 +1993,14 @@ class MavlinkTelemetryRepository(
     /**
      * Uploads a mission using the MAVLink mission protocol handshake.
      * Returns true if ACK received, false otherwise.
+     * @param onProgress Optional callback for progress updates (currentItem, totalItems)
      */
     @Suppress("DEPRECATION")
-    suspend fun uploadMissionWithAck(missionItems: List<MissionItemInt>, timeoutMs: Long = 45000): Boolean {
+    suspend fun uploadMissionWithAck(
+        missionItems: List<MissionItemInt>,
+        timeoutMs: Long = 45000,
+        onProgress: ((currentItem: Int, totalItems: Int) -> Unit)? = null
+    ): Boolean {
         // Mark upload as in progress to prevent global listener from showing notifications
         isMissionUploadInProgress = true
 
@@ -2161,6 +2157,9 @@ class MavlinkTelemetryRepository(
 
                             connection.trySendUnsignedV2(gcsSystemId, gcsComponentId, item)
                             sentSeqs.add(seq)
+
+                            // Emit progress update to UI
+                            onProgress?.invoke(seq + 1, missionItems.size)
 
                             // Log progress: first, last, and every 10 items for verification
                             if (seq == 0 || seq == missionItems.size - 1 || seq % 10 == 0) {
@@ -3047,15 +3046,8 @@ class MavlinkTelemetryRepository(
 
                 Log.i("Geofence", "═══════════════════════════════════════════")
 
-                // Notify user via SharedViewModel
-                withContext(Dispatchers.Main) {
-                    sharedViewModel.addNotification(
-                        Notification(
-                            message = "✅ Geofence uploaded and enabled",
-                            type = NotificationType.SUCCESS
-                        )
-                    )
-                }
+                // NOTE: Removed geofence upload notification from notification panel
+                // The upload status is communicated via logs and TTS
 
                 true
 

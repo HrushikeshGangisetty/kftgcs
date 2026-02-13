@@ -445,11 +445,16 @@ class UnifiedFlightTracker(
             if (distance > 0.1f && distance < 100f) {  // Sanity check: 0.1m to 100m per update
                 totalDistanceMeters += distance
 
-                // Track sprayed distance - only when pump is ON and flow rate > 0
-                val isPumpOn = telemetry.sprayTelemetry.sprayEnabled
+                // Track sprayed distance - when spray is active (RC7 ON or flow detected)
+                // Use sprayActive which includes both RC7 and flow detection for AUTO missions
+                val isSprayActive = telemetry.sprayTelemetry.sprayActive
                 val flowRate = telemetry.sprayTelemetry.flowRateLiterPerMin ?: 0f
-                if (isPumpOn && flowRate > 0f) {
+                if (isSprayActive || flowRate > 0f) {
                     totalSprayedDistanceMeters += distance
+                    // Log every 50 meters of sprayed distance
+                    if (totalSprayedDistanceMeters.toInt() % 50 == 0) {
+                        android.util.Log.d("UnifiedFlightTracker", "🔄 Sprayed distance: ${totalSprayedDistanceMeters}m (isSprayActive=$isSprayActive, flowRate=$flowRate)")
+                    }
                 }
             }
             lastLat = lat
@@ -614,6 +619,11 @@ class UnifiedFlightTracker(
 
         // Show mission completion dialog with time, acres (converted from distance), sprayed acres, and consumed litres
         val consumedLitresStr = finalConsumedLitres?.let { "%.2f L".format(it) } ?: "N/A"
+
+        // Debug logging for sprayed acres calculation
+        android.util.Log.d("UnifiedFlightTracker", "🔥 FINAL VALUES: totalSprayedDistanceMeters=$totalSprayedDistanceMeters, finalSprayedDistance=$finalSprayedDistance")
+        android.util.Log.d("UnifiedFlightTracker", "🔥 formatAcres(finalSprayedDistance)=${formatAcres(finalSprayedDistance)}")
+
         sharedViewModel.showMissionCompletionDialog(
             totalTime = formatTime(finalTime),
             totalAcres = formatAcres(finalDistance),

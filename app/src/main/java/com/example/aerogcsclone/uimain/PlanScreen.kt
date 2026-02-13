@@ -100,9 +100,9 @@ fun PlanScreen(
     var isPlanSaved by remember { mutableStateOf(false) }  // True after saving, false during editing
 
     // Grid survey parameters
-    var lineSpacing by remember { mutableStateOf(3f) }
+    var lineSpacing by remember { mutableStateOf(2f) }
     var gridAngle by remember { mutableStateOf(0f) }
-    var surveySpeed by remember { mutableStateOf(10f) }
+    var surveySpeed by remember { mutableStateOf(1f) }
     var surveyAltitude by remember { mutableStateOf(1f) }
     var holdNosePosition by remember { mutableStateOf(false) }
     var autoSpray by remember { mutableStateOf(false) }
@@ -516,6 +516,9 @@ fun PlanScreen(
                 surveyAltitude = gridParams.surveyAltitude
                 surveyPolygon = gridParams.surveyPolygon
                 obstacles = gridParams.obstacles
+
+                // Debug log for obstacles loading
+                android.util.Log.d("PlanScreen", "Loaded template with ${gridParams.obstacles.size} obstacles")
 
                 if (surveyPolygon.size >= 3) {
                     regenerateGrid()
@@ -1747,8 +1750,8 @@ fun PlanScreen(
                                     value = lineSpacing,
                                     onValueChange = { if (!isPlanSaved) lineSpacing = it },
                                     enabled = !isPlanSaved,
-                                    valueRange = 3f..5f,
-                                    steps = 19,
+                                    valueRange = 2f..5f,
+                                    steps = 21,
                                     modifier = Modifier.weight(1f),
                                     colors = SliderDefaults.colors(
                                         thumbColor = if (isPlanSaved) Color.Gray else MaterialTheme.colorScheme.primary,
@@ -2589,6 +2592,9 @@ fun PlanScreen(
                 SaveMissionDialog(
                     onDismiss = { showSaveMissionDialog = false },
                     onSave = { projectName, plotName ->
+                        // Debug log for obstacles saving
+                        android.util.Log.d("PlanScreen", "Saving template with ${obstacles.size} obstacles")
+
                         val currentGridParams = if (isGridSurveyMode) {
                             GridParameters(
                                 lineSpacing = lineSpacing,
