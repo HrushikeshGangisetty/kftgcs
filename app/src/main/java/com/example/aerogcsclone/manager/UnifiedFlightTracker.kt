@@ -482,7 +482,16 @@ class UnifiedFlightTracker(
             if (now - stopConditionMetAt >= STOP_DEBOUNCE_MS) {
                 currentState = FlightState.STOPPING
             }
+        } else if (pendingStopReason != null && stopConditionMetAt > 0L) {
+            // We have a pending stop reason but current evaluation returned null
+            // (This happens when previousArmed gets updated after detecting disarm)
+            // Continue checking debounce with the stored reason
+            val now = System.currentTimeMillis()
+            if (now - stopConditionMetAt >= STOP_DEBOUNCE_MS) {
+                currentState = FlightState.STOPPING
+            }
         } else {
+            // No stop reason and no pending reason - reset everything
             stopConditionMetAt = 0
             pendingStopReason = null
         }
