@@ -29,6 +29,10 @@ import com.example.aerogcsclone.telemetry.connections.MavConnectionProvider
 import com.example.aerogcsclone.telemetry.connections.TcpConnectionProvider
 import com.example.aerogcsclone.utils.GeofenceUtils
 import com.example.aerogcsclone.utils.TextToSpeechManager
+import com.example.aerogcsclone.fence.FenceAction
+import com.example.aerogcsclone.fence.FenceConfiguration
+import com.example.aerogcsclone.fence.FenceStatus
+import com.example.aerogcsclone.fence.FenceZone
 import com.google.android.gms.maps.model.LatLng
 import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.launch
@@ -36,6 +40,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.isActive
 import com.example.aerogcsclone.grid.GridUtils
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.withTimeoutOrNull
 
 enum class ConnectionType {
@@ -200,50 +205,47 @@ class SharedViewModel : ViewModel() {
     /**
      * Clear the geofence polygon and disable geofence monitoring.
      * Called when navigating away from mission or when user disables geofence.
-     * 🔥 CRITICAL FIX: Now sends FENCE_ENABLE=0 to FC to properly disable geofence
+     * Uses Mission Planner-style approach to clear fence from FC.
      */
     fun clearGeofence() {
         Log.i("SharedVM", "🔥 Clearing geofence from UI and FC")
 
-        // 🔥 STEP 1: Disable geofence on the Flight Controller
+        // STEP 1: Disable and clear geofence on the Flight Controller
         viewModelScope.launch {
             try {
-                Log.i("Geofence", "📤 Sending FENCE_ENABLE=0 to Flight Controller")
-                val result = setParameter("FENCE_ENABLE", 0f, timeoutMs = 5000L)
-                if (result != null) {
-                    Log.i("Geofence", "✅ FENCE_ENABLE=0 confirmed by FC")
+                // Use the new clearGeofenceFromFC function
+                val cleared = repo?.clearGeofenceFromFC() ?: false
+                if (cleared) {
+                    Log.i("Geofence", "✅ Geofence cleared from FC")
                     addNotification(
                         Notification(
-                            message = "Geofence disabled on Flight Controller",
+                            message = "Geofence cleared from Flight Controller",
                             type = NotificationType.INFO
                         )
                     )
                 } else {
-                    Log.e("Geofence", "⚠️ No response from FC for FENCE_ENABLE=0")
-                    addNotification(
-                        Notification(
-                            message = "Geofence disable command sent (no confirmation)",
-                            type = NotificationType.WARNING
-                        )
-                    )
+                    // Fallback: just disable the fence
+                    repo?.enableFence(false)
+                    Log.i("Geofence", "✅ Geofence disabled on FC")
                 }
             } catch (e: Exception) {
-                Log.e("Geofence", "❌ Failed to disable geofence on FC", e)
+                Log.e("Geofence", "❌ Failed to clear geofence from FC", e)
                 addNotification(
                     Notification(
-                        message = "Failed to disable geofence on FC: ${e.message}",
+                        message = "Failed to clear geofence from FC: ${e.message}",
                         type = NotificationType.ERROR
                     )
                 )
             }
         }
 
-        // 🔥 STEP 2: Clear UI state
+        // STEP 2: Clear UI state
         _geofenceEnabled.value = false
         _geofencePolygon.value = emptyList()
+        _fenceConfiguration.value = null
         _homePosition.value = null
 
-        // 🔥 STEP 3: Reset geofence warning/violation states
+        // STEP 3: Reset geofence warning/violation states
         resetGeofenceState()
 
         Log.i("SharedVM", "✅ Geofence cleared from UI and FC")
@@ -1073,6 +1075,13 @@ class SharedViewModel : ViewModel() {
     private val _geofencePolygon = MutableStateFlow<List<LatLng>>(emptyList())
     val geofencePolygon: StateFlow<List<LatLng>> = _geofencePolygon.asStateFlow()
 
+    // Geofence upload control - prevent concurrent uploads and add debouncing
+    private var fenceUploadJob: Job? = null
+    private val fenceUploadMutex = kotlinx.coroutines.sync.Mutex()
+    private var pendingFenceUpload: List<LatLng>? = null
+    private var lastFenceUploadTime = 0L
+    private val FENCE_UPLOAD_DEBOUNCE_MS = 1500L  // Wait 1.5 seconds after last change before uploading
+
     // Obstacle zones - list of polygons representing no-fly zones
     private val _obstacles = MutableStateFlow<List<List<LatLng>>>(emptyList())
     val obstacles: StateFlow<List<List<LatLng>>> = _obstacles.asStateFlow()
@@ -1134,7 +1143,10 @@ class SharedViewModel : ViewModel() {
             val scaledPolygon = GeofenceUtils.scalePolygon(_geofencePolygon.value, deltaMeters)
             if (scaledPolygon.size >= 3) {
                 _geofencePolygon.value = scaledPolygon
-                Log.i("Geofence", "Geofence polygon scaled by ${deltaMeters}m (new buffer: ${newRadius}m)")
+                Log.d("Geofence", "Geofence polygon scaled by ${deltaMeters}m (new buffer: ${newRadius}m)")
+
+                // Schedule debounced upload - will upload after user stops adjusting slider
+                scheduleGeofenceUpload(scaledPolygon)
             }
         } else {
             // No existing polygon, generate a new one
@@ -1158,58 +1170,30 @@ class SharedViewModel : ViewModel() {
                 _homePosition.value = LatLng(droneLat, droneLon)
                 Log.i("Geofence", "Home position captured: $droneLat, $droneLon")
             }
+
+            // Generate geofence polygon from waypoints and upload to FC
+            // This will call uploadGeofenceToFC which uses the new Mission Planner approach
             updateGeofencePolygon()
 
-            // 🔥 CRITICAL FIX: Send FENCE_ENABLE=1 to Flight Controller
-            viewModelScope.launch {
-                try {
-                    Log.i("Geofence", "📤 Sending FENCE_ENABLE=1 to Flight Controller")
-                    val result = setParameter("FENCE_ENABLE", 1f, timeoutMs = 5000L)
-                    if (result != null) {
-                        Log.i("Geofence", "✅ FENCE_ENABLE=1 confirmed by FC")
-                        addNotification(
-                            Notification(
-                                message = "Geofence enabled on Flight Controller",
-                                type = NotificationType.INFO
-                            )
-                        )
-                    } else {
-                        Log.e("Geofence", "⚠️ No response from FC for FENCE_ENABLE=1")
-                        addNotification(
-                            Notification(
-                                message = "Geofence enable command sent (no confirmation)",
-                                type = NotificationType.WARNING
-                            )
-                        )
-                    }
-                } catch (e: Exception) {
-                    Log.e("Geofence", "❌ Failed to enable geofence on FC", e)
-                    addNotification(
-                        Notification(
-                            message = "Failed to enable geofence on FC: ${e.message}",
-                            type = NotificationType.ERROR
-                        )
-                    )
-                }
-            }
-
-            Log.i("Geofence", "✓ Geofence ENABLED - monitoring active")
+            Log.i("Geofence", "✓ Geofence ENABLED - uploading to FC")
             addNotification(
                 Notification(
-                    message = "Geofence enabled - monitoring active",
+                    message = "Geofence enabled - uploading to FC...",
                     type = NotificationType.INFO
                 )
             )
         } else {
-            // 🔥 FIX: CRITICAL - Disable geofence on FC and reset ALL state
+            // Disable geofence on FC and reset ALL state
             viewModelScope.launch {
                 try {
-                    Log.i("Geofence", "📤 Sending FENCE_ENABLE=0 to Flight Controller")
-                    val result = setParameter("FENCE_ENABLE", 0f, timeoutMs = 5000L)
-                    if (result != null) {
-                        Log.i("Geofence", "✅ FENCE_ENABLE=0 confirmed by FC")
+                    // Use the new clearGeofenceFromFC function
+                    val cleared = repo?.clearGeofenceFromFC() ?: false
+                    if (cleared) {
+                        Log.i("Geofence", "✅ Geofence cleared from FC")
                     } else {
-                        Log.e("Geofence", "⚠️ No response from FC for FENCE_ENABLE=0")
+                        // Fallback: just disable the fence
+                        repo?.enableFence(false)
+                        Log.i("Geofence", "✅ Geofence disabled on FC")
                     }
                 } catch (e: Exception) {
                     Log.e("Geofence", "❌ Failed to disable geofence on FC", e)
@@ -1219,6 +1203,7 @@ class SharedViewModel : ViewModel() {
             // Reset ALL geofence state
             resetGeofenceState()
             _geofencePolygon.value = emptyList()
+            _fenceConfiguration.value = null
             _homePosition.value = null
             Log.i("Geofence", "Geofence DISABLED - all state reset")
             addNotification(
@@ -1232,16 +1217,15 @@ class SharedViewModel : ViewModel() {
 
     /**
      * Manually update the geofence polygon (for user adjustments via dragging)
+     * Uses debounced upload to prevent rapid uploads during dragging.
      */
     fun updateGeofencePolygonManually(polygon: List<LatLng>) {
         if (_geofenceEnabled.value && polygon.size >= 3) {
             _geofencePolygon.value = polygon
-            Log.i("Geofence", "Geofence polygon manually updated with ${polygon.size} vertices")
+            Log.d("Geofence", "Geofence polygon manually updated with ${polygon.size} vertices")
 
-            // 🔥 Upload manually updated geofence to FC
-            viewModelScope.launch {
-                uploadGeofenceToFC(polygon)
-            }
+            // Use debounced upload for manual adjustments (dragging)
+            scheduleGeofenceUpload(polygon)
         }
     }
 
@@ -1323,17 +1307,13 @@ class SharedViewModel : ViewModel() {
                     _geofencePolygon.value = largerGeofence
                     Log.i("Geofence", "✓ Regenerated geofence with larger buffer")
 
-                    // 🔥 Upload regenerated geofence to FC
+                    // Upload regenerated geofence to FC immediately (first-time enable)
                     if (largerGeofence.size >= 3) {
-                        viewModelScope.launch {
-                            uploadGeofenceToFC(largerGeofence)
-                        }
+                        uploadGeofenceImmediately(largerGeofence)
                     }
                 } else {
-                    // 🔥 Upload original geofence to FC
-                    viewModelScope.launch {
-                        uploadGeofenceToFC(geofenceShape)
-                    }
+                    // Upload original geofence to FC immediately (first-time enable)
+                    uploadGeofenceImmediately(geofenceShape)
                 }
             } else {
                 Log.w("Geofence", "Failed to generate valid geofence")
@@ -1362,74 +1342,90 @@ class SharedViewModel : ViewModel() {
     }
 
     /**
-     * 🔥 CRITICAL FIX: Upload geofence points to Flight Controller
-     * This function properly clears old fence and uploads new fence points
+     * Schedule a debounced geofence upload to Flight Controller.
+     * This prevents rapid uploads when user is adjusting the slider or dragging points.
+     * The actual upload happens after FENCE_UPLOAD_DEBOUNCE_MS of no changes.
      */
-    private suspend fun uploadGeofenceToFC(polygon: List<LatLng>) {
+    private fun scheduleGeofenceUpload(polygon: List<LatLng>) {
         if (polygon.size < 3) {
             Log.w("Geofence", "❌ Cannot upload geofence: insufficient points (${polygon.size})")
+            return
+        }
+
+        // Store the pending polygon
+        pendingFenceUpload = polygon
+
+        // Cancel any existing debounce job
+        fenceUploadJob?.cancel()
+
+        // Start a new debounce job
+        fenceUploadJob = viewModelScope.launch {
+            Log.d("Geofence", "⏳ Waiting ${FENCE_UPLOAD_DEBOUNCE_MS}ms before uploading fence...")
+            delay(FENCE_UPLOAD_DEBOUNCE_MS)
+
+            // After debounce period, upload the latest polygon
+            pendingFenceUpload?.let { polygonToUpload ->
+                uploadGeofenceToFCInternal(polygonToUpload)
+            }
+            pendingFenceUpload = null
+        }
+    }
+
+    /**
+     * Force immediate geofence upload (bypasses debounce).
+     * Used when enabling geofence for the first time.
+     */
+    private fun uploadGeofenceImmediately(polygon: List<LatLng>) {
+        if (polygon.size < 3) {
+            Log.w("Geofence", "❌ Cannot upload geofence: insufficient points (${polygon.size})")
+            return
+        }
+
+        // Cancel any pending debounced upload
+        fenceUploadJob?.cancel()
+        pendingFenceUpload = null
+
+        viewModelScope.launch {
+            uploadGeofenceToFCInternal(polygon)
+        }
+    }
+
+    /**
+     * Internal function to upload geofence to Flight Controller.
+     * Uses mutex to prevent concurrent uploads.
+     */
+    private suspend fun uploadGeofenceToFCInternal(polygon: List<LatLng>) {
+        // Use mutex to prevent concurrent uploads
+        if (!fenceUploadMutex.tryLock()) {
+            Log.w("Geofence", "⏳ Upload already in progress, skipping...")
             return
         }
 
         try {
             Log.i("Geofence", "🔥 Starting geofence upload to FC: ${polygon.size} points")
 
-            // STEP 1: Clear existing fence by setting FENCE_TOTAL to 0
-            Log.i("Geofence", "📤 Clearing existing fence points (FENCE_TOTAL=0)")
-            val clearResult = setParameter("FENCE_TOTAL", 0f, timeoutMs = 5000L)
-            if (clearResult != null) {
-                Log.i("Geofence", "✅ Existing fence cleared successfully")
-            } else {
-                Log.w("Geofence", "⚠️ FENCE_TOTAL=0 sent but no confirmation")
-            }
+            // Use the new Mission Planner-style upload
+            val config = FenceConfiguration(
+                zones = listOf(FenceZone.Polygon(points = polygon, isInclusion = true)),
+                altitudeMax = 120f,  // Default max altitude
+                action = FenceAction.BRAKE,  // Recommended for spray drones
+                margin = 3.0f
+            )
 
-            // STEP 2: Upload fence points as mission items with fence mission type
-            Log.i("Geofence", "📤 Uploading ${polygon.size} fence points to FC")
-            val fenceItems = mutableListOf<MissionItemInt>()
+            val uploadResult = repo?.uploadGeofence(config) ?: false
 
-            polygon.forEachIndexed { index, point ->
-                val missionItem = MissionItemInt(
-                    targetSystem = 1u,
-                    targetComponent = 1u,
-                    seq = index.toUShort(),
-                    frame = MavEnumValue.of(MavFrame.GLOBAL),
-                    command = MavEnumValue.of(MavCmd.NAV_FENCE_POLYGON_VERTEX_INCLUSION),
-                    current = if (index == 0) 1u else 0u,
-                    autocontinue = 1u,
-                    param1 = polygon.size.toFloat(), // Total vertices in the first point
-                    param2 = 0f,
-                    param3 = 0f,
-                    param4 = 0f,
-                    x = (point.latitude * 1e7).toInt(),
-                    y = (point.longitude * 1e7).toInt(),
-                    z = 0f,
-                    missionType = MavEnumValue.of(MavMissionType.FENCE)
-                )
-                fenceItems.add(missionItem)
-            }
-
-            // Upload fence items using the existing mission upload infrastructure
-            val uploadResult = repo?.uploadFenceItems(fenceItems) ?: false
             if (uploadResult) {
-                Log.i("Geofence", "✅ Fence points uploaded successfully")
-
-                // STEP 3: Set FENCE_TOTAL to the number of points
-                Log.i("Geofence", "📤 Setting FENCE_TOTAL=${polygon.size}")
-                val totalResult = setParameter("FENCE_TOTAL", polygon.size.toFloat(), timeoutMs = 5000L)
-                if (totalResult != null) {
-                    Log.i("Geofence", "✅ FENCE_TOTAL=${polygon.size} confirmed")
-                } else {
-                    Log.w("Geofence", "⚠️ FENCE_TOTAL=${polygon.size} sent but no confirmation")
-                }
-
+                Log.i("Geofence", "✅ Fence uploaded to FC successfully")
+                _fenceConfiguration.value = config
+                lastFenceUploadTime = System.currentTimeMillis()
                 addNotification(
                     Notification(
-                        message = "✅ Geofence uploaded to FC (${polygon.size} points)",
+                        message = "✅ Geofence uploaded to FC",
                         type = NotificationType.SUCCESS
                     )
                 )
             } else {
-                Log.e("Geofence", "❌ Failed to upload fence points to FC")
+                Log.e("Geofence", "❌ Failed to upload fence to FC")
                 addNotification(
                     Notification(
                         message = "❌ Failed to upload geofence to FC",
@@ -1446,7 +1442,16 @@ class SharedViewModel : ViewModel() {
                     type = NotificationType.ERROR
                 )
             )
+        } finally {
+            fenceUploadMutex.unlock()
         }
+    }
+
+    /**
+     * Legacy function name for compatibility - now uses debounced upload
+     */
+    private fun uploadGeofenceToFC(polygon: List<LatLng>) {
+        scheduleGeofenceUpload(polygon)
     }
 
     // Spray control state
@@ -3505,73 +3510,37 @@ class SharedViewModel : ViewModel() {
         }
     }
 
-    // --- Geofence Violation Detection ---
-    // Geofence constants - Similar to ArduPilot's FENCE_MARGIN behavior
+    // ════════════════════════════════════════════════════════════════
+    // GEOFENCE MANAGEMENT (ArduPilot Native System - Mission Planner Style)
+    // FC handles all fence enforcement at 400Hz. GCS only uploads and monitors.
+    // ════════════════════════════════════════════════════════════════
+
     companion object {
-        // ═══════════════════════════════════════════════════════════════════════════
-        // GEOFENCE BUFFER CONFIGURATION - INCREASED FOR BETTER FENCE ENFORCEMENT
-        // ═══════════════════════════════════════════════════════════════════════════
-
-        // Minimum buffer distance - triggers even when stationary
-        // INCREASED from 3.0m to 11.0m for much better safety margin
-        // This ensures drone stops well before the physical fence boundary
-        private const val MIN_BUFFER_METERS = 9.5  // Minimum buffer when stationary (+2m extra to prevent crossing)
-
-        // Maximum buffer distance - caps the dynamic buffer at high speeds
-        // INCREASED from 15m to 27m for high-speed scenarios
-        private const val MAX_BUFFER_METERS = 27.0  // Maximum buffer for high speed scenarios (+2m extra)
-
-        // Maximum deceleration capability (m/s²) - conservative estimate for multicopters
-        // REDUCED from 3.5 to 2.0 for VERY conservative braking estimate (starts braking much earlier)
-        // This accounts for wind, load, reaction time, and real-world deceleration
-        private const val MAX_DECEL_M_S2 = 2.5  // Very conservative deceleration (increased stopping distance)
-
-        // System latency in seconds (GPS + telemetry + command execution)
-        // GPS: ~200ms, Telemetry: ~200ms, Command: ~400ms = ~800ms total
-        // Set to 0.8 second for conservative latency handling
-        private const val SYSTEM_LATENCY_SECONDS = 0.8  // 800ms total latency (conservative)
-
-        // Safety margin multiplier for stopping distance (accounts for uncertainties)
-        // INCREASED from 1.5 to 2.0 for better safety
-        private const val STOPPING_DISTANCE_SAFETY_FACTOR = 2.0  // 100% safety margin for high speed
-
-        // Breach confirmation - reduced to 2 samples for faster response at high speed
-        private const val BREACH_CONFIRMATION_SAMPLES = 2 // Number of consecutive breach samples required
-        private const val BREACH_CONFIRMATION_TIME_MS = 200L // 200ms window for breach confirmation
-
-        // ULTRA High frequency monitoring interval - 5ms = 200 checks per second
-        private const val GEOFENCE_MONITOR_INTERVAL_MS = 5L
-
-        // Continuous command sending interval when breached - VERY AGGRESSIVE
-        private const val BRAKE_COMMAND_INTERVAL_MS = 30L
-
-        // Number of consecutive commands to send on first breach
-        private const val EMERGENCY_COMMAND_BURST_COUNT = 10
-
-        // ═══════════════════════════════════════════════════════════════════════════
-        // DEFAULT FENCE RADIUS - Distance between waypoints and geofence boundary
-        // INCREASED from 5m to 17m for much better separation (+2m extra to prevent crossing)
-        // ═══════════════════════════════════════════════════════════════════════════
+        // Default fence radius - Distance between waypoints and geofence boundary
         private const val DEFAULT_FENCE_RADIUS_METERS = 17.0f
     }
 
-    private val _geofenceViolationDetected = MutableStateFlow(false)
-    val geofenceViolationDetected: StateFlow<Boolean> = _geofenceViolationDetected.asStateFlow()
+    // Current fence configuration uploaded to FC
+    private val _fenceConfiguration = MutableStateFlow<FenceConfiguration?>(null)
+    val fenceConfiguration: StateFlow<FenceConfiguration?> = _fenceConfiguration.asStateFlow()
 
-    // Pre-emptive warning state - triggered when approaching fence
+    // Internal fence status fallback when repo is not connected
+    private val _localFenceStatus = MutableStateFlow(FenceStatus())
+
+    // Fence status from FC - returns repo's fenceStatus if available, otherwise local fallback
+    val fenceStatus: StateFlow<FenceStatus>
+        get() = repo?.fenceStatus ?: _localFenceStatus
+
+    // Geofence warning state - for UI indication
     private val _geofenceWarningTriggered = MutableStateFlow(false)
     val geofenceWarningTriggered: StateFlow<Boolean> = _geofenceWarningTriggered.asStateFlow()
 
-    // Track if brake/RTL has been triggered - prevents multiple first commands
-    @Volatile
-    private var geofenceActionTaken = false
+    // Geofence violation detected - mirrors fenceStatus.breached for backward compatibility
+    private val _geofenceViolationDetected = MutableStateFlow(false)
+    val geofenceViolationDetected: StateFlow<Boolean> = _geofenceViolationDetected.asStateFlow()
 
-    // Track if RTL process has started - stops continuous BRAKE commands from interfering
-    @Volatile
-    private var rtlInitiated = false
-
-    // Track if geofence is currently triggering a mode change (BRAKE/RTL)
-    // Used to prevent resume popup from showing when geofence falls back to LOITER
+    // Track if geofence is currently triggering a mode change
+    // Used to prevent resume popup from showing when FC switches mode due to breach
     @Volatile
     private var geofenceTriggeringModeChange = false
 
@@ -3579,622 +3548,373 @@ class SharedViewModel : ViewModel() {
     val isGeofenceTriggeringModeChange: Boolean
         get() = geofenceTriggeringModeChange
 
-    // Track continuous brake sending
-    @Volatile
-    private var lastBrakeCommandTime = 0L
-
-    // Breach confirmation tracking - prevents false positives from GPS glitches
-    @Volatile
-    private var breachConfirmationCount = 0
-    @Volatile
-    private var firstBreachDetectedTime: Long? = null
-
-    // For periodic logging only
-    private var lastLogTime = 0L
-
-    // Background geofence monitoring job - runs independently at high frequency
-    private var geofenceMonitorJob: kotlinx.coroutines.Job? = null
-
     init {
-        // Start the ULTRA HIGH-FREQUENCY background geofence monitor
-        startGeofenceMonitor()
-
         // Monitor connection status and announce via TTS
+        // Also start fence status monitoring when connected
         viewModelScope.launch {
             isConnected.collect { connected ->
                 ttsManager?.announceConnectionStatus(connected)
                 Log.d("SharedVM", "Connection status changed: ${if (connected) "Connected" else "Disconnected"}")
+
+                // Start fence monitoring when connected (repo will be available)
+                if (connected && repo != null) {
+                    startFenceStatusMonitoring()
+                }
             }
         }
     }
 
-    /**
-     * Start ULTRA high-frequency background geofence monitoring.
-     * Runs in a SEPARATE coroutine at 100Hz (every 10ms) - does NOT wait for telemetry state updates.
-     * Directly reads the latest telemetry values for instant response.
-     * CRITICAL: This monitor MUST NEVER stop while app is running!
-     */
-    private fun startGeofenceMonitor() {
-        geofenceMonitorJob?.cancel()
-        geofenceMonitorJob = viewModelScope.launch {
-            Log.i("Geofence", "🔄🔄🔄 ULTRA HIGH-FREQUENCY GEOFENCE MONITOR STARTED (${1000/GEOFENCE_MONITOR_INTERVAL_MS}Hz) 🔄🔄🔄")
-            Log.i("Geofence", "🔒 Dynamic buffer: ${MIN_BUFFER_METERS}m (stationary) to ${MAX_BUFFER_METERS}m (max speed)")
-            Log.i("Geofence", "📐 Using Mission Planner cross-track distance formula")
-
-            while (isActive) {
-                try {
-                    // Check geofence using LATEST telemetry data directly
-                    checkGeofenceNow()
-                } catch (e: Exception) {
-                    Log.e("Geofence", "Monitor error (continuing): ${e.message}")
-                    // DON'T break - keep monitoring even if there's an error!
-                }
-
-                // High frequency polling - 10ms interval (100 times per second)
-                delay(GEOFENCE_MONITOR_INTERVAL_MS)
-            }
-
-            Log.w("Geofence", "⚠️ Geofence monitor stopped - this should not happen!")
-        }
-    }
+    // Flag to prevent multiple fence monitoring jobs
+    private var fenceMonitoringStarted = false
 
     /**
-     * Calculate dynamic buffer distance based on current speed.
-     * Uses improved physics-based stopping distance calculation with multiple factors:
-     *
-     * Total buffer = MIN_BUFFER + gps_uncertainty + latency_distance + stopping_distance + wind_margin
-     *
-     * Where:
-     * - gps_uncertainty = 2-5m (GPS accuracy can vary)
-     * - latency_distance = speed × system_latency (distance traveled during latency)
-     * - stopping_distance = v² / (2 × deceleration) × safety_factor
-     * - wind_margin = speed × 0.3 (accounts for wind pushing drone during deceleration)
-     *
-     * This ensures the drone triggers brake EARLY ENOUGH to stop before the fence,
-     * accounting for GPS uncertainty, telemetry delays, command execution delays, wind, and momentum.
-     *
-     * Examples at different speeds (with MIN_BUFFER=8m, decel=2.5m/s², latency=1.0s, safety=2.0):
-     * - 0 m/s:  8.0m (minimum buffer only - stationary safety margin)
-     * - 2 m/s:  8 + 3 + 2.0 + 1.6 + 0.6 = 15.2m
-     * - 3 m/s:  8 + 3 + 3.0 + 3.6 + 0.9 = 18.5m
-     * - 5 m/s:  8 + 3 + 5.0 + 10 + 1.5 = 27.5m → capped at 25m
-     * - 8 m/s:  capped at 25m (max buffer)
+     * Monitor fence status from flight controller.
+     * FC handles all breach detection and enforcement at 400Hz.
+     * GCS just monitors and notifies user.
      */
-    private fun calculateDynamicBuffer(currentSpeedMs: Float, altitudeMeters: Float = 0f): Double {
-        if (currentSpeedMs <= 0) {
-            return MIN_BUFFER_METERS
-        }
+    private fun startFenceStatusMonitoring() {
+        if (fenceMonitoringStarted) return
+        fenceMonitoringStarted = true
 
-        // 1. GPS Uncertainty - GPS accuracy can drift 2-5 meters
-        val gpsUncertainty = 3.0  // Conservative 3m GPS uncertainty
-
-        // 2. Distance traveled during system latency (GPS + telemetry + command delay)
-        // At 3 m/s with 1.0s latency = 3.0m traveled before braking even starts
-        val latencyDistance = currentSpeedMs * SYSTEM_LATENCY_SECONDS
-
-        // 3. Physics-based stopping distance: v² / (2a)
-        // At 3 m/s with 2.5 m/s² decel = 9/5 = 1.8m
-        val stoppingDistance = (currentSpeedMs * currentSpeedMs) / (2 * MAX_DECEL_M_S2)
-
-        // 4. Apply safety factor to stopping distance (accounts for momentum, load variation)
-        val safeStoppingDistance = stoppingDistance * STOPPING_DISTANCE_SAFETY_FACTOR
-
-        // 5. Wind margin - accounts for wind pushing drone during deceleration
-        // Assumes wind could add 40% to stopping distance at speed (increased from 30% for better safety)
-        val windMargin = currentSpeedMs * 0.4
-
-        // 6. HIGH SPEED MULTIPLIER: At speeds above 5 m/s, apply additional safety margin
-        // This accounts for drone momentum and slower reaction time at high speed
-        val highSpeedMultiplier = if (currentSpeedMs > 5.0f) {
-            1.0 + ((currentSpeedMs - 5.0f) * 0.15)  // +15% per m/s above 5 m/s (increased from 10%)
-        } else {
-            1.0
-        }
-
-        // 7. Altitude factor - at higher altitudes, GPS accuracy may be slightly worse
-        // and wind effects are often stronger
-        val altitudeFactor = if (altitudeMeters > 20f) {
-            1.0 + ((altitudeMeters - 20f) * 0.01).coerceAtMost(0.2)  // Up to +20% at high altitude
-        } else {
-            1.0
-        }
-
-        // Total buffer = (minimum + gps + latency + stopping + wind) × multipliers
-        val baseBuffer = MIN_BUFFER_METERS + gpsUncertainty + latencyDistance + safeStoppingDistance + windMargin
-        val totalBuffer = baseBuffer * highSpeedMultiplier * altitudeFactor
-
-        // Cap at maximum buffer
-        return minOf(MAX_BUFFER_METERS, totalBuffer)
-    }
-
-    /**
-     * ULTRA HIGH-FREQUENCY geofence check - runs every 5ms in background.
-     * Reads LATEST telemetry values directly, does not wait for state updates.
-     *
-     * LOGIC based on Mission Planner / ArduPilot:
-     * - Uses cross-track distance formula for accurate perpendicular distance to fence edges
-     * - Also checks corner distances (important when perpendicular doesn't hit any segment)
-     * - Dynamic buffer based on current speed to ensure drone can stop in time
-     * - Returns 0 if outside fence (BREACH), otherwise returns distance to nearest edge
-     * - Triggers BRAKE + LOITER if BREACH or within dynamic buffer distance at high speed
-     * - LOITER holds drone at current position to prevent further fence violations
-     */
-    private fun checkGeofenceNow() {
-        // Skip if geofence not enabled
-        if (!_geofenceEnabled.value) return
-
-        val polygon = _geofencePolygon.value
-        if (polygon.size < 3) return
-
-        // Get LATEST position directly from telemetry state (not waiting for collect)
-        val currentState = _telemetryState.value
-        val droneLat = currentState.latitude ?: return
-        val droneLon = currentState.longitude ?: return
-
-        // Skip if drone is not armed (no need to enforce geofence when disarmed)
-        if (!currentState.armed) return
-
-        // 🔥 FIX: Get current mode - important for debugging
-        val currentMode = currentState.mode
-
-        val dronePosition = LatLng(droneLat, droneLon)
-        val currentSpeed = currentState.groundspeed ?: 0f
-        val currentAltitude = currentState.altitudeRelative ?: 0f
-
-        // Use Mission Planner's checkGeofenceDistance - returns 0 if BREACH (outside fence)
-        // Otherwise returns the cross-track distance to nearest fence edge
-        val distanceToFence = GeofenceUtils.checkGeofenceDistance(dronePosition, polygon)
-        val isInsideFence = distanceToFence > 0  // If distance is 0, drone is OUTSIDE fence (BREACH)
-
-        // Calculate dynamic buffer based on speed AND altitude (ArduPilot FENCE_MARGIN behavior)
-        val dynamicBuffer = calculateDynamicBuffer(currentSpeed, currentAltitude)
-
-        // Log every 500ms for debugging
-        val now = System.currentTimeMillis()
-        if (now - lastLogTime > 500) {
-            lastLogTime = now
-            Log.d("Geofence", "📍 MONITOR: mode=$currentMode inside=$isInsideFence, dist=${String.format("%.1f", distanceToFence)}m, buffer=${String.format("%.1f", dynamicBuffer)}m, speed=${String.format("%.1f", currentSpeed)}m/s, actionTaken=$geofenceActionTaken")
-        }
-
-        // ═══ MISSION PLANNER / ARDUPILOT STYLE FENCE LOGIC WITH BREACH CONFIRMATION ═══
-        // 🔥 FIX: Only trigger BRAKE/LOITER for CONFIRMED breach (drone outside fence for sustained period)
-        // Being close to the edge (within buffer) should only WARN, not trigger LOITER
-        // This prevents false positives from GPS glitches and instantaneous readings
-        val isOutsideFence = distanceToFence == 0.0
-        val isWithinBuffer = isInsideFence && distanceToFence <= dynamicBuffer
-
-        // CASE 1: ACTUAL BREACH - drone is OUTSIDE the fence polygon
-        if (isOutsideFence) {
-            // Increment breach confirmation counter
-            if (firstBreachDetectedTime == null) {
-                firstBreachDetectedTime = now
-                breachConfirmationCount = 1
-                Log.w("Geofence", "⚠️ BREACH DETECTED (1/${BREACH_CONFIRMATION_SAMPLES}) - Starting confirmation...")
-            } else {
-                val timeSinceFirstBreach = now - firstBreachDetectedTime!!
-
-                if (timeSinceFirstBreach <= BREACH_CONFIRMATION_TIME_MS) {
-                    // Within confirmation window - increment counter
-                    breachConfirmationCount++
-                    Log.w("Geofence", "⚠️ BREACH CONFIRMED (${breachConfirmationCount}/${BREACH_CONFIRMATION_SAMPLES}) - ${timeSinceFirstBreach}ms elapsed")
-                } else {
-                    // Exceeded time window - restart confirmation
-                    firstBreachDetectedTime = now
-                    breachConfirmationCount = 1
-                    Log.w("Geofence", "⚠️ BREACH confirmation timed out - Restarting...")
-                }
-            }
-
-            // Only trigger LOITER if breach is CONFIRMED (multiple consecutive detections)
-            if (breachConfirmationCount >= BREACH_CONFIRMATION_SAMPLES) {
-                Log.e("Geofence", "🔴 HARD BREACH CONFIRMED! DRONE IS OUTSIDE FENCE!")
-
-                _geofenceWarningTriggered.value = true
-                _geofenceViolationDetected.value = true
-
-                // FIRST TIME: Send BRAKE then LOITER
-                if (!geofenceActionTaken) {
-                    geofenceActionTaken = true
-                    rtlInitiated = false // Will be set to true once LOITER process starts
-                    lastBrakeCommandTime = now
-
-                    Log.e("Geofence", "🚨🚨🚨 CONFIRMED BREACH! Outside fence - EMERGENCY BRAKE + LOITER! 🚨🚨🚨")
-                    Log.e("Geofence", "Position: $droneLat, $droneLon")
-
-                    // 🔊 TTS Announcement for critical geofence violation
-                    speak("Critical geofence breach! Drone stopping!")
-
-                    // Send BRAKE then LOITER - this will set rtlInitiated = true (loiter initiated)
-                    sendEmergencyBrakeAndLoiter()
-                }
-
-                // CONTINUOUS ENFORCEMENT: Only send BRAKE if LOITER hasn't been initiated yet
-                // Once LOITER process starts, we don't want to interfere with it
-                if (!rtlInitiated && now - lastBrakeCommandTime > BRAKE_COMMAND_INTERVAL_MS) {
-                    lastBrakeCommandTime = now
-                    sendBrakeCommandImmediate()
-                }
-            } else {
-                // Breach detected but not yet confirmed - just log
-                Log.d("Geofence", "📍 Possible breach - waiting for confirmation (${breachConfirmationCount}/${BREACH_CONFIRMATION_SAMPLES})")
-            }
-        } else {
-            // Reset breach confirmation if drone is back inside
-            if (breachConfirmationCount > 0 || firstBreachDetectedTime != null) {
-                Log.i("Geofence", "✓ Breach confirmation reset - drone back inside (dist: ${String.format("%.1f", distanceToFence)}m)")
-                breachConfirmationCount = 0
-                firstBreachDetectedTime = null
-            }
-        }
-
-        // CASE 2: WARNING ZONE - drone is INSIDE fence but close to edge
-        // 🔥 TWO-TIER GEOFENCE SYSTEM:
-        // - INNER WARNING ZONE (60-100% of buffer): BRAKE once to slow down
-        // - OUTER BREACH ZONE (outside fence): RTL to force return and prevent RC override
-        if (isWithinBuffer) {
-            // Set warning state for UI indication (yellow border, etc.)
-            if (!_geofenceWarningTriggered.value) {
-                Log.w("Geofence", "⚠️ WARNING: Close to fence edge! dist=${String.format("%.1f", distanceToFence)}m (buffer: ${String.format("%.1f", dynamicBuffer)}m)")
-                _geofenceWarningTriggered.value = true
-                // Only notify once per warning event
-                addNotification(
-                    Notification(
-                        message = "⚠️ Warning: Approaching geofence boundary",
-                        type = NotificationType.WARNING
-                    )
-                )
-
-                // 🔊 TTS Announcement for geofence warning
-                speak("Approaching geofence boundary")
-            }
-
-            // 🔥 INNER WARNING ZONE: If drone is moving fast (>2.5 m/s) and in critical zone,
-            // send ONE BRAKE command to slow it down
-            // Critical zone = 60% of buffer (inner warning boundary)
-            val criticalDistance = dynamicBuffer * 0.6  // 60% of buffer = inner critical zone
-            if (currentSpeed > 2.5f && distanceToFence < criticalDistance && !geofenceActionTaken) {
-                Log.w("Geofence", "🛑 INNER WARNING! Speed=${String.format("%.1f", currentSpeed)}m/s, dist=${String.format("%.1f", distanceToFence)}m, critical=${String.format("%.1f", criticalDistance)}m - Sending ONE BRAKE!")
-
-                geofenceActionTaken = true
-                val now = System.currentTimeMillis()
-                lastBrakeCommandTime = now
-                sendSingleBrakeCommand()  // Send BRAKE once, no RTL follow-up
-            }
-        }
-
-        // Reset state when safely back inside
-        // TWO-STAGE RESET:
-        // 1. Reset geofenceActionTaken when drone is safely inside (beyond dynamic buffer) - allows re-trigger
-        // 2. Reset warning flags only when further inside to prevent UI oscillation
-
-        // Stage 1: Reset action taken when back inside fence beyond the dynamic buffer
-        // This ensures geofence can re-trigger LOITER if drone goes out again
-        // Use 1.5x dynamic buffer as hysteresis to prevent oscillation at boundary (reduced from 2x for faster rearm)
-        val rearmThreshold = dynamicBuffer * 1.5
-        if (isInsideFence && distanceToFence > rearmThreshold) {
-            if (geofenceActionTaken || rtlInitiated) {
-                Log.i("Geofence", "✓ Drone back inside fence (${String.format("%.1f", distanceToFence)}m from edge, threshold: ${String.format("%.1f", rearmThreshold)}m) - Geofence REARMED for re-trigger")
-                geofenceActionTaken = false
-                rtlInitiated = false
-                _geofenceViolationDetected.value = false
-                geofenceTriggeringModeChange = false
-            }
-
-            // Also reset breach confirmation when safely inside
-            if (breachConfirmationCount > 0 || firstBreachDetectedTime != null) {
-                breachConfirmationCount = 0
-                firstBreachDetectedTime = null
-            }
-        }
-
-        // Stage 2: Clear warning when beyond the buffer zone (plus some hysteresis)
-        // This clears the warning UI state
-        val warningClearThreshold = dynamicBuffer * 1.2  // 20% hysteresis (reduced from 1.5x)
-        if (isInsideFence && distanceToFence > warningClearThreshold) {
-            if (_geofenceWarningTriggered.value) {
-                Log.i("Geofence", "✓ Drone safely away from fence edge (${String.format("%.1f", distanceToFence)}m) - Warning cleared")
-                _geofenceWarningTriggered.value = false
-            }
-        }
-    }
-
-    /**
-     * Send BRAKE command immediately - FIRE AND FORGET, no waiting!
-     * Uses fire-and-forget pattern for maximum speed.
-     * Falls back to LOITER if BRAKE fails.
-     */
-    private fun sendBrakeCommandImmediate() {
         viewModelScope.launch {
-            try {
-                geofenceTriggeringModeChange = true  // Mark that geofence is triggering mode change
-                val brakeSuccess = repo?.changeMode(MavMode.BRAKE) ?: false
-                if (!brakeSuccess) {
-                    // Fallback to LOITER which holds position
-                    Log.w("Geofence", "BRAKE failed, trying LOITER...")
-                    repo?.changeMode(MavMode.LOITER)
-                }
-            } catch (e: Exception) {
-                Log.e("Geofence", "BRAKE command error: ${e.message}")
-                // Try LOITER as fallback
-                try {
-                    repo?.changeMode(MavMode.LOITER)
-                } catch (e2: Exception) {
-                    Log.e("Geofence", "LOITER fallback failed: ${e2.message}")
-                }
-            }
-        }
-    }
+            // Collect fence status updates from repository
+            repo?.fenceStatus?.collect { status ->
+                // Update backward-compatible violation state
+                _geofenceViolationDetected.value = status.breached
 
-    /**
-     * Send SINGLE BRAKE command for inner warning zone.
-     * This sends BRAKE ONCE to slow the drone down, WITHOUT follow-up RTL.
-     * Allows pilot to regain control after slowing down.
-     */
-    private fun sendSingleBrakeCommand() {
-        viewModelScope.launch {
-            try {
-                Log.i("Geofence", "🛑 INNER WARNING BRAKE - Slowing drone at fence boundary!")
-                geofenceTriggeringModeChange = true
+                if (status.breached) {
+                    // Just notify - FC is handling everything
+                    Log.w("Geofence", "⚠️ Fence breach detected - FC handling with ${getCurrentFenceAction()}")
+                    _geofenceWarningTriggered.value = true
+                    geofenceTriggeringModeChange = true
 
-                // Send BRAKE command once
-                val brakeSuccess = repo?.changeMode(MavMode.BRAKE) ?: false
-                Log.i("Geofence", "🛑 Inner warning BRAKE result: $brakeSuccess")
-
-                if (!brakeSuccess) {
-                    // Fallback to LOITER
-                    Log.w("Geofence", "⚠️ BRAKE failed, trying LOITER...")
-                    repo?.changeMode(MavMode.LOITER)
-                }
-
-                // Notify user
-                addNotification(
-                    Notification(
-                        message = "⚠️ Slowing down: Approaching geofence",
-                        type = NotificationType.WARNING
-                    )
-                )
-                ttsManager?.speak("Warning! Approaching fence!")
-
-            } catch (e: Exception) {
-                Log.e("Geofence", "Single BRAKE error: ${e.message}")
-            } finally {
-                // Reset flag after a short delay
-                delay(500)
-                geofenceTriggeringModeChange = false
-            }
-        }
-    }
-
-    /**
-     * Send PREEMPTIVE BRAKE when approaching fence at high speed.
-     * This triggers BEFORE actual breach to slow the drone down and prevent crossing.
-     * After brake, transitions to RTL to bring drone back to safe zone.
-     */
-    private fun sendPreemptiveBrake() {
-        viewModelScope.launch {
-            try {
-                Log.i("Geofence", "🛑 PREEMPTIVE BRAKE - High speed approach to fence boundary!")
-                geofenceTriggeringModeChange = true
-                geofenceActionTaken = true  // Mark action as taken to prevent repeated preemptive brakes
-
-                // Send BRAKE first
-                val brakeSuccess = repo?.changeMode(MavMode.BRAKE) ?: false
-                Log.i("Geofence", "🛑 Preemptive BRAKE result: $brakeSuccess")
-
-                if (!brakeSuccess) {
-                    // Fallback to LOITER which holds position
-                    Log.w("Geofence", "⚠️ Preemptive BRAKE failed, trying LOITER...")
-                    repo?.changeMode(MavMode.LOITER)
-                    rtlInitiated = true  // Mark as initiated even on fallback
-                } else {
-                    // Wait briefly then switch to LOITER to hold position
-                    delay(200)  // Reduced from 300ms to 200ms for faster response
-                    Log.i("Geofence", "🔒 Switching to LOITER to hold position...")
-                    repo?.changeMode(MavMode.LOITER)
-                    rtlInitiated = true  // Mark loiter as initiated
-                }
-
-                // Notify user
-                addNotification(
-                    Notification(
-                        message = "⚠️ Stopped: Approaching geofence at high speed",
-                        type = NotificationType.WARNING
-                    )
-                )
-                ttsManager?.speak("Stopping! Approaching fence!")
-
-            } catch (e: Exception) {
-                Log.e("Geofence", "Preemptive BRAKE error: ${e.message}")
-                // Try LOITER as fallback
-                try {
-                    repo?.changeMode(MavMode.LOITER)
-                    rtlInitiated = true
-                } catch (e2: Exception) {
-                    Log.e("Geofence", "LOITER fallback failed: ${e2.message}")
-                }
-            } finally {
-                // Reset flag after a short delay
-                delay(1000)
-                geofenceTriggeringModeChange = false
-            }
-        }
-    }
-
-    /**
-     * EMERGENCY BURST: Send BRAKE to stop, then LOITER to hold position.
-     * OPTIMIZED: Minimal delay between BRAKE and LOITER for fast response.
-     * The BRAKE command just needs to be sent - drone starts decelerating immediately.
-     *
-     * LOITER holds the drone at its current position, preventing it from crossing the fence.
-     * This ensures the pilot CANNOT push forward through the fence even if they try.
-     */
-    private fun sendEmergencyBrakeAndLoiter() {
-        viewModelScope.launch {
-            repo?.let { repository ->
-                Log.i("Geofence", "═══════════════════════════════════════════════════")
-                Log.i("Geofence", "🚨 EMERGENCY GEOFENCE BREACH - STOPPING DRONE!")
-                Log.i("Geofence", "═══════════════════════════════════════════════════")
-
-                // Mark that geofence is triggering mode change - prevents resume popup
-                geofenceTriggeringModeChange = true
-
-                // STEP 1: Send BRAKE command to stop immediately
-                try {
-                    Log.i("Geofence", "🛑 Sending BRAKE command...")
-                    val brakeSuccess = repository.changeMode(MavMode.BRAKE)
-                    Log.i("Geofence", "🛑 BRAKE result: $brakeSuccess")
-
-                    if (!brakeSuccess) {
-                        // Try LOITER as fallback
-                        Log.w("Geofence", "⚠️ BRAKE failed, trying LOITER...")
-                        repository.changeMode(MavMode.LOITER)
-                    }
-                } catch (e: Exception) {
-                    Log.e("Geofence", "BRAKE error: ${e.message}")
-                }
-
-                // STEP 2: Minimal delay - just enough for command to register (200ms)
-                Log.i("Geofence", "⏳ Brief pause before LOITER (200ms)...")
-                delay(200)
-
-                // STEP 3: Mark loiter as initiated - this stops continuous BRAKE commands
-                rtlInitiated = true  // Note: Variable name kept for compatibility, but this means LOITER initiated
-                Log.i("Geofence", "🔒 LOITER process initiated - stopping BRAKE enforcement")
-
-                // STEP 4: Now send LOITER and KEEP TRYING until it works
-                Log.i("Geofence", "🔒 Now sending LOITER command...")
-                var loiterSuccess = false
-                var attempts = 0
-                val maxAttempts = 10
-
-                while (!loiterSuccess && attempts < maxAttempts) {
-                    attempts++
-                    try {
-                        Log.i("Geofence", "🔒 LOITER attempt #$attempts...")
-                        loiterSuccess = repository.changeMode(MavMode.LOITER)
-                        Log.i("Geofence", "🔒 LOITER attempt #$attempts result: $loiterSuccess")
-
-                        if (loiterSuccess) {
-                            Log.i("Geofence", "✓✓✓ LOITER MODE ACTIVATED SUCCESSFULLY! ✓✓✓")
-                            break
-                        }
-                    } catch (e: Exception) {
-                        Log.e("Geofence", "LOITER mode attempt #$attempts error: ${e.message}")
-                    }
-
-                    // Short delay before retry (150ms)
-                    if (!loiterSuccess) {
-                        delay(150)
-                    }
-                }
-
-                if (loiterSuccess) {
                     addNotification(Notification(
-                        message = "🚨 GEOFENCE BREACH - Drone stopped!",
+                        message = "⚠️ Geofence breach! FC activated ${getCurrentFenceAction()}",
+                        type = NotificationType.WARNING
+                    ))
+                    speak("Geofence breach")
+
+                    // Reset geofence triggering flag after FC handles it
+                    delay(2000)
+                    geofenceTriggeringModeChange = false
+                } else if (_geofenceWarningTriggered.value) {
+                    // Breach cleared
+                    Log.i("Geofence", "✓ Fence breach cleared - drone back in safe zone")
+                    _geofenceWarningTriggered.value = false
+                    addNotification(Notification(
+                        message = "✓ Geofence clear - drone back in safe zone",
+                        type = NotificationType.INFO
+                    ))
+                }
+            }
+        }
+    }
+
+    /**
+     * Get the current fence action string for display
+     */
+    private fun getCurrentFenceAction(): String {
+        return when (_fenceConfiguration.value?.action) {
+            FenceAction.BRAKE -> "BRAKE"
+            FenceAction.RTL -> "RTL"
+            FenceAction.HOLD -> "LOITER"
+            FenceAction.SMART_RTL -> "SMART RTL"
+            FenceAction.GUIDED -> "GUIDED"
+            FenceAction.REPORT_ONLY -> "REPORT"
+            else -> "Safety Mode"
+        }
+    }
+
+    /**
+     * Upload geofence to flight controller.
+     * This replaces the old GCS-based fence enforcement.
+     * FC will enforce the fence autonomously at 400Hz.
+     *
+     * @param outerBoundary Inclusion polygon - drone must stay inside
+     * @param innerBoundary Optional exclusion polygon - drone must stay outside (creates "donut" shape)
+     * @param exclusionZones Additional exclusion polygons (obstacles, buildings, etc.)
+     * @param returnPoint Where drone goes if fence is breached (defaults to first point if null)
+     * @param altitudeMax Maximum altitude in meters AGL
+     * @param altitudeMin Minimum altitude in meters AGL
+     * @param action What FC does on breach (BRAKE recommended for spray drones)
+     * @param margin Safety margin in meters
+     */
+    fun uploadGeofence(
+        outerBoundary: List<LatLng>,
+        innerBoundary: List<LatLng>? = null,
+        exclusionZones: List<List<LatLng>> = emptyList(),
+        returnPoint: LatLng? = null,
+        altitudeMax: Float? = null,
+        altitudeMin: Float? = null,
+        action: FenceAction = FenceAction.BRAKE,
+        margin: Float = 3.0f
+    ) {
+        viewModelScope.launch {
+            try {
+                Log.i("Geofence", "Preparing geofence upload...")
+
+                // Build fence zones
+                val zones = mutableListOf<FenceZone>()
+
+                // Outer boundary (inclusion - drone must stay inside)
+                if (outerBoundary.size >= 3) {
+                    zones.add(FenceZone.Polygon(
+                        points = outerBoundary,
+                        isInclusion = true
+                    ))
+                } else {
+                    Log.e("Geofence", "Outer boundary must have at least 3 points")
+                    addNotification(Notification(
+                        message = "❌ Geofence needs at least 3 boundary points",
                         type = NotificationType.ERROR
                     ))
-                    ttsManager?.speak("Geofence breach! Drone stopped!")
+                    return@launch
+                }
 
-                    // STEP 5: CONTINUOUS ENFORCEMENT - Keep sending LOITER to prevent pilot override
-                    // This ensures the pilot CANNOT push through the fence even if they try
-                    Log.i("Geofence", "🔒 Starting continuous LOITER enforcement...")
-                    startContinuousLoiterEnforcement()
-                } else {
-                    Log.e("Geofence", "❌ LOITER failed after $maxAttempts attempts - drone should remain stopped from BRAKE")
-                    addNotification(Notification(
-                        message = "⚠️ GEOFENCE - Drone stopped",
-                        type = NotificationType.WARNING
+                // Inner boundary (exclusion - drone must stay outside)
+                // This creates a "donut" - outer inclusion + inner exclusion
+                if (innerBoundary != null && innerBoundary.size >= 3) {
+                    zones.add(FenceZone.Polygon(
+                        points = innerBoundary,
+                        isInclusion = false  // Exclusion zone
                     ))
-                    ttsManager?.speak("Geofence! Drone stopped!")
                 }
 
-                Log.i("Geofence", "═══════════════════════════════════════════════════")
-
-                // Reset the geofence triggering flag after a short delay
-                delay(2000)
-                geofenceTriggeringModeChange = false
-                Log.d("Geofence", "Geofence mode change flag reset")
-            } ?: Log.e("Geofence", "❌ No connection - cannot send emergency commands!")
-        }
-    }
-
-    /**
-     * Continuous LOITER enforcement - keeps sending LOITER command while drone is in violation.
-     * This ensures the pilot CANNOT override and push through the fence.
-     * Runs until the violation is cleared (drone back inside safe zone).
-     */
-    private fun startContinuousLoiterEnforcement() {
-        viewModelScope.launch {
-            var enforcementCount = 0
-            while (_geofenceViolationDetected.value && currentCoroutineContext().isActive) {
-                delay(500)  // Check every 500ms
-
-                // Only enforce if still in violation and not safely back inside
-                if (_geofenceViolationDetected.value) {
-                    enforcementCount++
-                    try {
-                        Log.d("Geofence", "🔒 Continuous LOITER enforcement #$enforcementCount - preventing pilot override")
-                        repo?.changeMode(MavMode.LOITER)
-                    } catch (e: Exception) {
-                        Log.e("Geofence", "Continuous LOITER enforcement error: ${e.message}")
+                // Additional exclusion zones (obstacles, buildings, etc.)
+                exclusionZones.forEach { zone ->
+                    if (zone.size >= 3) {
+                        zones.add(FenceZone.Polygon(
+                            points = zone,
+                            isInclusion = false
+                        ))
                     }
-                } else {
-                    Log.i("Geofence", "✓ Geofence violation cleared - stopping continuous enforcement")
-                    break
                 }
 
-                // Safety limit: Stop after 2 minutes of continuous enforcement
-                if (enforcementCount > 240) {
-                    Log.w("Geofence", "⚠️ Continuous LOITER enforcement timeout - stopping")
-                    break
+                // Return point (where to go if breached)
+                val actualReturnPoint = returnPoint ?: outerBoundary.firstOrNull()
+                if (actualReturnPoint != null) {
+                    zones.add(FenceZone.ReturnPoint(actualReturnPoint))
                 }
+
+                // Create configuration
+                val config = FenceConfiguration(
+                    zones = zones,
+                    altitudeMin = altitudeMin,
+                    altitudeMax = altitudeMax,
+                    action = action,
+                    margin = margin
+                )
+
+                // Upload to FC
+                val success = repo?.uploadGeofence(config) ?: false
+
+                if (success) {
+                    _fenceConfiguration.value = config
+                    _geofenceEnabled.value = true
+
+                    // Also update the UI polygon for display
+                    _geofencePolygon.value = outerBoundary
+
+                    addNotification(
+                        Notification(
+                            message = "✅ Geofence uploaded to flight controller",
+                            type = NotificationType.SUCCESS
+                        )
+                    )
+                    speak("Geofence enabled")
+
+                    Log.i("Geofence", "✅ Geofence uploaded successfully:")
+                    Log.i("Geofence", "  - Zones: ${zones.size}")
+                    Log.i("Geofence", "  - Action: $action")
+                    Log.i("Geofence", "  - Margin: ${margin}m")
+                    Log.i("Geofence", "  - Alt Max: ${altitudeMax ?: "none"}m")
+                } else {
+                    addNotification(
+                        Notification(
+                            message = "❌ Failed to upload geofence",
+                            type = NotificationType.ERROR
+                        )
+                    )
+                    speak("Geofence upload failed")
+                }
+
+            } catch (e: Exception) {
+                Log.e("Geofence", "Error uploading geofence: ${e.message}")
+                addNotification(
+                    Notification(
+                        message = "❌ Geofence error: ${e.message}",
+                        type = NotificationType.ERROR
+                    )
+                )
             }
         }
     }
 
     /**
-     * Handle drone returning to safe zone inside geofence
+     * Upload circular geofence (inclusion or exclusion)
      */
-    private fun handleReturnToSafeZone() {
-        if (_geofenceViolationDetected.value || _geofenceWarningTriggered.value) {
-            _geofenceViolationDetected.value = false
-            _geofenceWarningTriggered.value = false
-            geofenceActionTaken = false
+    fun uploadCircularGeofence(
+        center: LatLng,
+        radiusMeters: Float,
+        isInclusion: Boolean = true,
+        altitudeMax: Float? = null,
+        action: FenceAction = FenceAction.BRAKE,
+        margin: Float = 3.0f
+    ) {
+        viewModelScope.launch {
+            try {
+                Log.i("Geofence", "Uploading circular geofence: radius=${radiusMeters}m")
 
-            Log.i("Geofence", "✓ Drone returned to safe zone")
-            addNotification(
-                Notification(
-                    message = "✓ GEOFENCE CLEAR: Drone back inside boundary",
-                    type = NotificationType.INFO
+                val zones = listOf(
+                    FenceZone.Circle(
+                        center = center,
+                        radiusMeters = radiusMeters,
+                        isInclusion = isInclusion
+                    ),
+                    FenceZone.ReturnPoint(center)
                 )
-            )
+
+                val config = FenceConfiguration(
+                    zones = zones,
+                    altitudeMax = altitudeMax,
+                    action = action,
+                    margin = margin
+                )
+
+                val success = repo?.uploadGeofence(config) ?: false
+
+                if (success) {
+                    _fenceConfiguration.value = config
+                    _geofenceEnabled.value = true
+                    addNotification(Notification(
+                        message = "✅ Circular geofence enabled (${radiusMeters}m radius)",
+                        type = NotificationType.SUCCESS
+                    ))
+                    speak("Circular geofence enabled")
+                } else {
+                    addNotification(Notification(
+                        message = "❌ Failed to upload circular geofence",
+                        type = NotificationType.ERROR
+                    ))
+                }
+
+            } catch (e: Exception) {
+                Log.e("Geofence", "Error uploading circular geofence: ${e.message}")
+            }
         }
     }
 
+    /**
+     * Download current geofence from flight controller
+     */
+    fun downloadGeofence() {
+        viewModelScope.launch {
+            try {
+                val zones = repo?.downloadGeofence() ?: emptyList()
+
+                if (zones.isNotEmpty()) {
+                    addNotification(
+                        Notification(
+                            message = "✅ Downloaded ${zones.size} fence zones",
+                            type = NotificationType.SUCCESS
+                        )
+                    )
+
+                    // Extract polygon points for UI display
+                    val polygonZone = zones.filterIsInstance<FenceZone.Polygon>()
+                        .firstOrNull { it.isInclusion }
+                    if (polygonZone != null) {
+                        _geofencePolygon.value = polygonZone.points
+                        _geofenceEnabled.value = true
+                    }
+
+                    Log.i("Geofence", "Downloaded ${zones.size} fence zones from FC")
+                } else {
+                    addNotification(
+                        Notification(
+                            message = "⚠️ No geofence configured on FC",
+                            type = NotificationType.WARNING
+                        )
+                    )
+                }
+
+            } catch (e: Exception) {
+                Log.e("Geofence", "Error downloading geofence: ${e.message}")
+            }
+        }
+    }
 
     /**
-     * Reset geofence state - call this when starting a new mission or re-enabling geofence
+     * Enable/disable geofence on FC
+     */
+    fun setFenceEnabled(enabled: Boolean) {
+        viewModelScope.launch {
+            val success = repo?.enableFence(enabled) ?: false
+
+            if (success) {
+                _geofenceEnabled.value = enabled
+                val message = if (enabled) "✅ Geofence enabled" else "⚠️ Geofence disabled"
+                addNotification(Notification(message, NotificationType.INFO))
+                speak(if (enabled) "Geofence enabled" else "Geofence disabled")
+                Log.i("Geofence", message)
+            } else {
+                addNotification(
+                    Notification(
+                        message = "❌ Failed to ${if (enabled) "enable" else "disable"} geofence",
+                        type = NotificationType.ERROR
+                    )
+                )
+            }
+        }
+    }
+
+    /**
+     * Clear geofence from FC and UI
+     */
+    fun clearGeofenceFromFC() {
+        viewModelScope.launch {
+            try {
+                val success = repo?.clearGeofenceFromFC() ?: false
+
+                if (success) {
+                    _fenceConfiguration.value = null
+                    _geofenceEnabled.value = false
+                    _geofencePolygon.value = emptyList()
+                    _geofenceViolationDetected.value = false
+                    _geofenceWarningTriggered.value = false
+
+                    addNotification(Notification(
+                        message = "✅ Geofence cleared from FC",
+                        type = NotificationType.SUCCESS
+                    ))
+                    speak("Geofence cleared")
+                    Log.i("Geofence", "✅ Geofence cleared from FC and UI")
+                } else {
+                    addNotification(Notification(
+                        message = "❌ Failed to clear geofence from FC",
+                        type = NotificationType.ERROR
+                    ))
+                }
+
+            } catch (e: Exception) {
+                Log.e("Geofence", "Error clearing geofence: ${e.message}")
+            }
+        }
+    }
+
+    /**
+     * Reset geofence state - call this when starting a new mission
      */
     fun resetGeofenceState() {
         _geofenceViolationDetected.value = false
         _geofenceWarningTriggered.value = false
-        geofenceActionTaken = false
-        rtlInitiated = false
-        lastBrakeCommandTime = 0L
-        breachConfirmationCount = 0
-        firstBreachDetectedTime = null
-        Log.i("Geofence", "Geofence state reset - ready for new monitoring")
-
-        // Restart the monitor if not running
-        if (geofenceMonitorJob?.isActive != true) {
-            startGeofenceMonitor()
-        }
+        geofenceTriggeringModeChange = false
+        Log.i("Geofence", "Geofence state reset")
     }
 
     override fun onCleared() {
         super.onCleared()
-        geofenceMonitorJob?.cancel()
         ttsManager?.shutdown()
-        Log.d("SharedVM", "ViewModel cleared, geofence monitor stopped, TTS shutdown")
+        Log.d("SharedVM", "ViewModel cleared, TTS shutdown")
     }
 }

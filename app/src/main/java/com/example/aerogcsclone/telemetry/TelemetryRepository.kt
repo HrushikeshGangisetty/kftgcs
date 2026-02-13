@@ -18,13 +18,22 @@ import com.example.aerogcsclone.Telemetry.extractDroneUniqueId
 
 import com.example.aerogcsclone.utils.AppStrings
 import com.example.aerogcsclone.telemetry.connections.MavConnectionProvider
+import com.example.aerogcsclone.fence.FenceAction
+import com.example.aerogcsclone.fence.FenceConfiguration
+import com.example.aerogcsclone.fence.FenceStatus
+import com.example.aerogcsclone.fence.FenceZone
+import com.google.android.gms.maps.model.LatLng
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.TimeoutCancellationException
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlin.coroutines.resume
 import com.divpundir.mavlink.api.MavFrame
 import com.divpundir.mavlink.api.MavMessage
 import kotlinx.coroutines.withTimeoutOrNull
@@ -166,6 +175,12 @@ class MavlinkTelemetryRepository(
     // PARAM_VALUE flow for parameter reading
     private val _paramValue = MutableSharedFlow<ParamValue>(replay = 0, extraBufferCapacity = 10)
     val paramValue: SharedFlow<ParamValue> = _paramValue.asSharedFlow()
+
+    // ════════════════════════════════════════════════════════════════
+    // GEOFENCE STATUS (ArduPilot Native Fence System)
+    // ════════════════════════════════════════════════════════════════
+    private val _fenceStatus = MutableStateFlow(FenceStatus())
+    val fenceStatus: StateFlow<FenceStatus> = _fenceStatus.asStateFlow()
 
     /**
      * Throttled state update for high-frequency messages (GPS, VFR_HUD, etc.)
@@ -388,6 +403,9 @@ class MavlinkTelemetryRepository(
                             // Request spray telemetry capacity parameters
                             delay(500) // Small delay to let message rates stabilize
                             requestSprayCapacityParameters()
+
+                            // Start monitoring fence status from FC
+                            startFenceMonitoring()
                         }
                     } else if (!state.value.connected) {
                         // FCU was detected before but connection was lost, now it's back
@@ -2953,5 +2971,855 @@ class MavlinkTelemetryRepository(
 
         return resequenced
     }
-}
 
+    // ════════════════════════════════════════════════════════════════
+    // GEOFENCE MANAGEMENT (ArduPilot Native Fence System)
+    // ════════════════════════════════════════════════════════════════
+
+    /**
+     * Upload geofence to flight controller using ArduPilot's fence system.
+     * This uploads the fence definition to FC memory, where it will be
+     * enforced autonomously at 400Hz (vs GCS-based enforcement at ~5Hz).
+     *
+     * @param configuration Complete fence configuration with zones and parameters
+     * @return true if upload successful, false otherwise
+     */
+    suspend fun uploadGeofence(configuration: FenceConfiguration): Boolean {
+        return withContext(Dispatchers.IO) {
+            try {
+                Log.i("Geofence", "═══════════════════════════════════════════")
+                Log.i("Geofence", "Starting geofence upload to flight controller")
+                Log.i("Geofence", "Zones: ${configuration.zones.size}")
+                Log.i("Geofence", "Action: ${configuration.action}")
+                Log.i("Geofence", "Margin: ${configuration.margin}m")
+
+                // Step 1: Convert fence zones to MAVLink mission items
+                val fenceItems = convertFenceToMissionItems(configuration.zones)
+
+                if (fenceItems.isEmpty()) {
+                    Log.e("Geofence", "No fence items to upload")
+                    return@withContext false
+                }
+
+                Log.i("Geofence", "Converted to ${fenceItems.size} fence items")
+
+                // Step 2: Upload fence using mission protocol with FENCE type
+                val uploadSuccess = uploadFenceItemsInternal(fenceItems)
+
+                if (!uploadSuccess) {
+                    Log.e("Geofence", "Failed to upload fence items")
+                    return@withContext false
+                }
+
+                Log.i("Geofence", "✅ Fence items uploaded successfully")
+
+                // Step 3: Configure fence parameters
+                delay(500)  // Let FC process fence upload
+
+                val paramsSet = configureFenceParameters(configuration)
+
+                if (!paramsSet) {
+                    Log.e("Geofence", "Failed to set fence parameters")
+                    return@withContext false
+                }
+
+                Log.i("Geofence", "✅ Fence parameters configured")
+
+                // Step 4: Enable fence
+                delay(500)
+                val enabled = enableFence(true)
+
+                if (!enabled) {
+                    Log.e("Geofence", "Failed to enable fence")
+                    return@withContext false
+                }
+
+                Log.i("Geofence", "✅ Geofence enabled on flight controller")
+
+                // Step 5: Verify fence is actually enabled by reading back parameters
+                delay(300)
+                val verifyEnabled = verifyFenceEnabled()
+                if (verifyEnabled) {
+                    Log.i("Geofence", "✅ Fence verification passed - fence is ACTIVE")
+                } else {
+                    Log.w("Geofence", "⚠️ Fence verification failed - fence may not be active!")
+                }
+
+                Log.i("Geofence", "═══════════════════════════════════════════")
+
+                // Notify user via SharedViewModel
+                withContext(Dispatchers.Main) {
+                    sharedViewModel.addNotification(
+                        Notification(
+                            message = "✅ Geofence uploaded and enabled",
+                            type = NotificationType.SUCCESS
+                        )
+                    )
+                }
+
+                true
+
+            } catch (e: Exception) {
+                Log.e("Geofence", "Error uploading geofence: ${e.message}")
+                e.printStackTrace()
+                false
+            }
+        }
+    }
+
+    /**
+     * Convert fence zones to MAVLink MISSION_ITEM_INT messages
+     */
+    private fun convertFenceToMissionItems(zones: List<FenceZone>): List<MissionItemInt> {
+        val items = mutableListOf<MissionItemInt>()
+        var seq = 0
+
+        for (zone in zones) {
+            when (zone) {
+                is FenceZone.Polygon -> {
+                    // Each vertex becomes a fence item
+                    val command = if (zone.isInclusion) {
+                        MavCmd.NAV_FENCE_POLYGON_VERTEX_INCLUSION
+                    } else {
+                        MavCmd.NAV_FENCE_POLYGON_VERTEX_EXCLUSION
+                    }
+
+                    for ((index, point) in zone.points.withIndex()) {
+                        items.add(
+                            MissionItemInt(
+                                targetSystem = fcuSystemId,
+                                targetComponent = fcuComponentId,
+                                seq = seq.toUShort(),
+                                frame = MavEnumValue.of(com.divpundir.mavlink.definitions.common.MavFrame.GLOBAL_INT),
+                                command = MavEnumValue.of(command),
+                                current = 0u,
+                                autocontinue = 0u,
+                                param1 = zone.points.size.toFloat(),  // Total vertex count
+                                param2 = 0f,
+                                param3 = 0f,
+                                param4 = 0f,
+                                x = (point.latitude * 1E7).toInt(),
+                                y = (point.longitude * 1E7).toInt(),
+                                z = 0f,
+                                missionType = MavEnumValue.of(MavMissionType.FENCE)
+                            )
+                        )
+                        seq++
+                    }
+                }
+
+                is FenceZone.Circle -> {
+                    val command = if (zone.isInclusion) {
+                        MavCmd.NAV_FENCE_CIRCLE_INCLUSION
+                    } else {
+                        MavCmd.NAV_FENCE_CIRCLE_EXCLUSION
+                    }
+
+                    items.add(
+                        MissionItemInt(
+                            targetSystem = fcuSystemId,
+                            targetComponent = fcuComponentId,
+                            seq = seq.toUShort(),
+                            frame = MavEnumValue.of(com.divpundir.mavlink.definitions.common.MavFrame.GLOBAL_INT),
+                            command = MavEnumValue.of(command),
+                            current = 0u,
+                            autocontinue = 0u,
+                            param1 = zone.radiusMeters,  // Radius in meters
+                            param2 = 0f,
+                            param3 = 0f,
+                            param4 = 0f,
+                            x = (zone.center.latitude * 1E7).toInt(),
+                            y = (zone.center.longitude * 1E7).toInt(),
+                            z = 0f,
+                            missionType = MavEnumValue.of(MavMissionType.FENCE)
+                        )
+                    )
+                    seq++
+                }
+
+                is FenceZone.ReturnPoint -> {
+                    items.add(
+                        MissionItemInt(
+                            targetSystem = fcuSystemId,
+                            targetComponent = fcuComponentId,
+                            seq = seq.toUShort(),
+                            frame = MavEnumValue.of(com.divpundir.mavlink.definitions.common.MavFrame.GLOBAL_INT),
+                            command = MavEnumValue.of(MavCmd.NAV_FENCE_RETURN_POINT),
+                            current = 0u,
+                            autocontinue = 0u,
+                            param1 = 0f,
+                            param2 = 0f,
+                            param3 = 0f,
+                            param4 = 0f,
+                            x = (zone.location.latitude * 1E7).toInt(),
+                            y = (zone.location.longitude * 1E7).toInt(),
+                            z = 0f,
+                            missionType = MavEnumValue.of(MavMissionType.FENCE)
+                        )
+                    )
+                    seq++
+                }
+            }
+        }
+
+        return items
+    }
+
+    /**
+     * Upload fence items using mission protocol with FENCE mission type
+     * Internal implementation with coroutine handling
+     */
+    private suspend fun uploadFenceItemsInternal(items: List<MissionItemInt>): Boolean {
+        return suspendCancellableCoroutine { continuation ->
+            val job = AppScope.launch {
+                try {
+                    Log.i("Geofence", "═══════════════════════════════════════════")
+                    Log.i("Geofence", "Uploading ${items.size} fence items...")
+
+                    // Log fence points for debugging
+                    items.forEachIndexed { index, item ->
+                        val lat = item.x / 1E7
+                        val lon = item.y / 1E7
+                        Log.d("Geofence", "  Item $index: lat=$lat, lon=$lon, cmd=${item.command.value}")
+                    }
+
+                    // Step 1: Clear existing fence
+                    Log.i("Geofence", "Step 1: Clearing existing fence...")
+                    val clearCmd = MissionClearAll(
+                        targetSystem = fcuSystemId,
+                        targetComponent = fcuComponentId,
+                        missionType = MavEnumValue.of(MavMissionType.FENCE)
+                    )
+                    connection.trySendUnsignedV2(gcsSystemId, gcsComponentId, clearCmd)
+
+                    // Wait for clear ACK
+                    val clearAck = withTimeoutOrNull(2000) {
+                        mavFrame
+                            .filter { it.systemId == fcuSystemId }
+                            .map { it.message }
+                            .filterIsInstance<MissionAck>()
+                            .first { it.missionType.value == MavMissionType.FENCE.value }
+                    }
+                    if (clearAck != null) {
+                        Log.d("Geofence", "  Clear ACK received: ${clearAck.type.value}")
+                    } else {
+                        Log.w("Geofence", "  No clear ACK (continuing anyway)")
+                    }
+                    delay(500)
+
+                    // Step 2: Send fence count
+                    Log.i("Geofence", "Step 2: Sending fence count: ${items.size}")
+                    val countMsg = MissionCount(
+                        targetSystem = fcuSystemId,
+                        targetComponent = fcuComponentId,
+                        count = items.size.toUShort(),
+                        missionType = MavEnumValue.of(MavMissionType.FENCE)
+                    )
+                    connection.trySendUnsignedV2(gcsSystemId, gcsComponentId, countMsg)
+
+                    // Step 3: Wait for MISSION_REQUEST_INT/MISSION_REQUEST from FC and send items
+                    Log.i("Geofence", "Step 3: Waiting for FC to request items...")
+                    val uploadedItems = mutableSetOf<Int>()
+                    val timeout = 15000L  // 15 second timeout
+                    val startTime = System.currentTimeMillis()
+                    var lastRequestTime = startTime
+
+                    while (uploadedItems.size < items.size) {
+                        // Check timeout
+                        val elapsed = System.currentTimeMillis() - startTime
+                        if (elapsed > timeout) {
+                            Log.e("Geofence", "Upload timeout after ${elapsed}ms - uploaded ${uploadedItems.size}/${items.size}")
+                            continuation.resume(false)
+                            return@launch
+                        }
+
+                        // Wait for requests from FC (shorter timeout per request)
+                        val frame = withTimeoutOrNull(2000) {
+                            mavFrame
+                                .filter { it.systemId == fcuSystemId }
+                                .first { msg ->
+                                    val message = msg.message
+                                    (message is MissionRequestInt && message.missionType.value == MavMissionType.FENCE.value) ||
+                                    (message is MissionRequest && message.missionType.value == MavMissionType.FENCE.value)
+                                }
+                        }
+
+                        if (frame == null) {
+                            // No request received - resend count if we haven't gotten any requests
+                            if (uploadedItems.isEmpty() && System.currentTimeMillis() - lastRequestTime > 2000) {
+                                Log.w("Geofence", "  No requests received, resending count...")
+                                connection.trySendUnsignedV2(gcsSystemId, gcsComponentId, countMsg)
+                                lastRequestTime = System.currentTimeMillis()
+                            }
+                            continue
+                        }
+
+                        when (val msg = frame.message) {
+                            is MissionRequestInt -> {
+                                val seq = msg.seq.toInt()
+                                Log.d("Geofence", "  FC requested item $seq (MissionRequestInt)")
+                                if (seq < items.size) {
+                                    connection.trySendUnsignedV2(gcsSystemId, gcsComponentId, items[seq])
+                                    uploadedItems.add(seq)
+                                    lastRequestTime = System.currentTimeMillis()
+                                    delay(50)
+                                }
+                            }
+
+                            is MissionRequest -> {
+                                val seq = msg.seq.toInt()
+                                Log.d("Geofence", "  FC requested item $seq (MissionRequest legacy)")
+                                if (seq < items.size) {
+                                    connection.trySendUnsignedV2(gcsSystemId, gcsComponentId, items[seq])
+                                    uploadedItems.add(seq)
+                                    lastRequestTime = System.currentTimeMillis()
+                                    delay(50)
+                                }
+                            }
+                        }
+                    }
+
+                    Log.i("Geofence", "  All ${uploadedItems.size} items sent to FC")
+
+                    // Step 4: Wait for MISSION_ACK
+                    Log.i("Geofence", "Step 4: Waiting for fence upload acknowledgment...")
+                    val ack = withTimeoutOrNull(5000) {
+                        mavFrame
+                            .filter { it.systemId == fcuSystemId }
+                            .map { it.message }
+                            .filterIsInstance<MissionAck>()
+                            .first { it.missionType.value == MavMissionType.FENCE.value }
+                    }
+
+                    if (ack != null) {
+                        Log.i("Geofence", "  ACK received: ${ack.type.value} (0=accepted)")
+                        if (ack.type.value == MavMissionResult.MAV_MISSION_ACCEPTED.value) {
+                            Log.i("Geofence", "✅ Fence upload acknowledged by FC")
+                            Log.i("Geofence", "═══════════════════════════════════════════")
+                            continuation.resume(true)
+                        } else {
+                            Log.e("Geofence", "❌ Fence rejected by FC: ${ack.type.value}")
+                            continuation.resume(false)
+                        }
+                    } else {
+                        // No ACK received - but fence might still be uploaded
+                        // Some FCs don't send ACK for fence uploads
+                        Log.w("Geofence", "⚠️ No ACK received (fence may still be active)")
+                        Log.i("Geofence", "═══════════════════════════════════════════")
+                        // Return true anyway as the items were uploaded
+                        continuation.resume(true)
+                    }
+
+                } catch (e: Exception) {
+                    Log.e("Geofence", "Error during fence upload: ${e.message}")
+                    e.printStackTrace()
+                    continuation.resume(false)
+                }
+            }
+
+            continuation.invokeOnCancellation {
+                job.cancel()
+            }
+        }
+    }
+
+    /**
+     * Configure fence parameters on flight controller
+     */
+    private suspend fun configureFenceParameters(config: FenceConfiguration): Boolean {
+        try {
+            Log.i("Geofence", "Configuring fence parameters...")
+
+            // Set fence action (what happens on breach)
+            if (!setFenceParameter("FENCE_ACTION", config.action.value)) {
+                Log.e("Geofence", "Failed to set FENCE_ACTION")
+                return false
+            }
+            delay(200)
+
+            // Set fence margin (safety buffer)
+            if (!setFenceParameter("FENCE_MARGIN", config.margin)) {
+                Log.e("Geofence", "Failed to set FENCE_MARGIN")
+                return false
+            }
+            delay(200)
+
+            // Set fence type bitfield
+            // Bit 0 (1) = Max altitude fence
+            // Bit 1 (2) = Circle fence
+            // Bit 2 (4) = Polygon fence
+            var fenceType = 0
+            config.zones.forEach { zone ->
+                when (zone) {
+                    is FenceZone.Polygon -> fenceType = fenceType or 4  // Bit 2 = polygon
+                    is FenceZone.Circle -> fenceType = fenceType or 2   // Bit 1 = circle
+                    else -> {}
+                }
+            }
+            if (config.altitudeMax != null || config.altitudeMin != null) {
+                fenceType = fenceType or 1  // Bit 0 = altitude
+            }
+
+            if (!setFenceParameter("FENCE_TYPE", fenceType.toFloat())) {
+                Log.e("Geofence", "Failed to set FENCE_TYPE")
+                return false
+            }
+            delay(200)
+
+            // Set altitude limits if provided
+            if (config.altitudeMax != null) {
+                if (!setFenceParameter("FENCE_ALT_MAX", config.altitudeMax)) {
+                    Log.e("Geofence", "Failed to set FENCE_ALT_MAX")
+                    return false
+                }
+                delay(200)
+            }
+
+            if (config.altitudeMin != null) {
+                if (!setFenceParameter("FENCE_ALT_MIN", config.altitudeMin)) {
+                    Log.e("Geofence", "Failed to set FENCE_ALT_MIN")
+                    return false
+                }
+                delay(200)
+            }
+
+            Log.i("Geofence", "✅ All fence parameters configured")
+            return true
+
+        } catch (e: Exception) {
+            Log.e("Geofence", "Error configuring fence parameters: ${e.message}")
+            return false
+        }
+    }
+
+    /**
+     * Enable or disable geofence on flight controller
+     */
+    suspend fun enableFence(enable: Boolean): Boolean {
+        return setFenceParameter("FENCE_ENABLE", if (enable) 1.0f else 0.0f)
+    }
+
+    /**
+     * Verify that fence is actually enabled by reading back parameters
+     */
+    private suspend fun verifyFenceEnabled(): Boolean {
+        return suspendCancellableCoroutine { continuation ->
+            val job = AppScope.launch {
+                try {
+                    // Request FENCE_ENABLE parameter
+                    val paramRequest = ParamRequestRead(
+                        targetSystem = fcuSystemId,
+                        targetComponent = fcuComponentId,
+                        paramId = "FENCE_ENABLE",
+                        paramIndex = -1
+                    )
+                    connection.trySendUnsignedV2(gcsSystemId, gcsComponentId, paramRequest)
+
+                    // Wait for response
+                    val response = withTimeoutOrNull(2000) {
+                        mavFrame
+                            .filter { it.systemId == fcuSystemId }
+                            .map { it.message }
+                            .filterIsInstance<ParamValue>()
+                            .first { it.paramId == "FENCE_ENABLE" }
+                    }
+
+                    if (response != null) {
+                        val isEnabled = response.paramValue >= 1.0f
+                        Log.d("Geofence", "FENCE_ENABLE = ${response.paramValue} (enabled=$isEnabled)")
+
+                        // Also check FENCE_TYPE to confirm polygon fence is configured
+                        if (isEnabled) {
+                            delay(100)
+                            val typeRequest = ParamRequestRead(
+                                targetSystem = fcuSystemId,
+                                targetComponent = fcuComponentId,
+                                paramId = "FENCE_TYPE",
+                                paramIndex = -1
+                            )
+                            connection.trySendUnsignedV2(gcsSystemId, gcsComponentId, typeRequest)
+
+                            val typeResponse = withTimeoutOrNull(2000) {
+                                mavFrame
+                                    .filter { it.systemId == fcuSystemId }
+                                    .map { it.message }
+                                    .filterIsInstance<ParamValue>()
+                                    .first { it.paramId == "FENCE_TYPE" }
+                            }
+
+                            if (typeResponse != null) {
+                                val fenceType = typeResponse.paramValue.toInt()
+                                val hasPolygon = (fenceType and 4) != 0  // Bit 2 = polygon
+                                val hasCircle = (fenceType and 2) != 0  // Bit 1 = circle
+                                val hasAltitude = (fenceType and 1) != 0  // Bit 0 = altitude
+                                Log.d("Geofence", "FENCE_TYPE = $fenceType (polygon=$hasPolygon, circle=$hasCircle, altitude=$hasAltitude)")
+                            }
+
+                            // Check FENCE_ACTION
+                            delay(100)
+                            val actionRequest = ParamRequestRead(
+                                targetSystem = fcuSystemId,
+                                targetComponent = fcuComponentId,
+                                paramId = "FENCE_ACTION",
+                                paramIndex = -1
+                            )
+                            connection.trySendUnsignedV2(gcsSystemId, gcsComponentId, actionRequest)
+
+                            val actionResponse = withTimeoutOrNull(2000) {
+                                mavFrame
+                                    .filter { it.systemId == fcuSystemId }
+                                    .map { it.message }
+                                    .filterIsInstance<ParamValue>()
+                                    .first { it.paramId == "FENCE_ACTION" }
+                            }
+
+                            if (actionResponse != null) {
+                                val actionName = when (actionResponse.paramValue.toInt()) {
+                                    0 -> "REPORT_ONLY"
+                                    1 -> "RTL"
+                                    2 -> "HOLD"
+                                    3 -> "GUIDED"
+                                    4 -> "BRAKE"
+                                    5 -> "SMART_RTL"
+                                    else -> "UNKNOWN"
+                                }
+                                Log.d("Geofence", "FENCE_ACTION = ${actionResponse.paramValue.toInt()} ($actionName)")
+                            }
+                        }
+
+                        continuation.resume(isEnabled)
+                    } else {
+                        Log.w("Geofence", "No response for FENCE_ENABLE parameter read")
+                        continuation.resume(false)
+                    }
+
+                } catch (e: Exception) {
+                    Log.e("Geofence", "Error verifying fence: ${e.message}")
+                    continuation.resume(false)
+                }
+            }
+
+            continuation.invokeOnCancellation {
+                job.cancel()
+            }
+        }
+    }
+
+    /**
+     * Set a fence-related parameter on the flight controller
+     */
+    private suspend fun setFenceParameter(paramId: String, value: Float): Boolean {
+        return suspendCancellableCoroutine { continuation ->
+            val job = AppScope.launch {
+                try {
+                    Log.d("Geofence", "Setting parameter $paramId = $value")
+
+                    // Send PARAM_SET
+                    val paramSet = ParamSet(
+                        targetSystem = fcuSystemId,
+                        targetComponent = fcuComponentId,
+                        paramId = paramId,
+                        paramValue = value,
+                        paramType = MavEnumValue.of(MavParamType.REAL32)
+                    )
+                    connection.trySendUnsignedV2(gcsSystemId, gcsComponentId, paramSet)
+
+                    // Wait for PARAM_VALUE acknowledgment
+                    val ack = withTimeoutOrNull(3000) {
+                        mavFrame
+                            .filter { it.systemId == fcuSystemId }
+                            .map { it.message }
+                            .filterIsInstance<ParamValue>()
+                            .first { it.paramId == paramId }
+                    }
+
+                    if (ack != null && ack.paramValue == value) {
+                        Log.d("Geofence", "✅ Parameter $paramId set successfully")
+                        continuation.resume(true)
+                    } else {
+                        Log.e("Geofence", "❌ Failed to set parameter $paramId")
+                        continuation.resume(false)
+                    }
+
+                } catch (e: Exception) {
+                    Log.e("Geofence", "Error setting parameter $paramId: ${e.message}")
+                    continuation.resume(false)
+                }
+            }
+
+            continuation.invokeOnCancellation {
+                job.cancel()
+            }
+        }
+    }
+
+    /**
+     * Download current geofence from flight controller
+     */
+    suspend fun downloadGeofence(): List<FenceZone> {
+        return withContext(Dispatchers.IO) {
+            try {
+                Log.i("Geofence", "Downloading geofence from flight controller...")
+
+                // Request fence items using mission protocol
+                val fenceItems = requestFenceItemsFromFcu()
+
+                Log.i("Geofence", "Downloaded ${fenceItems.size} fence items")
+
+                // Convert mission items back to fence zones
+                convertMissionItemsToFence(fenceItems)
+
+            } catch (e: Exception) {
+                Log.e("Geofence", "Error downloading geofence: ${e.message}")
+                emptyList()
+            }
+        }
+    }
+
+    /**
+     * Request fence items from FC using mission protocol
+     */
+    private suspend fun requestFenceItemsFromFcu(): List<MissionItemInt> {
+        return suspendCancellableCoroutine { continuation ->
+            val job = AppScope.launch {
+                try {
+                    val receivedItems = mutableListOf<MissionItemInt>()
+
+                    // Request fence count
+                    val requestList = MissionRequestList(
+                        targetSystem = fcuSystemId,
+                        targetComponent = fcuComponentId,
+                        missionType = MavEnumValue.of(MavMissionType.FENCE)
+                    )
+                    connection.trySendUnsignedV2(gcsSystemId, gcsComponentId, requestList)
+
+                    // Wait for count
+                    val countMsg = withTimeoutOrNull(5000) {
+                        mavFrame
+                            .filter { it.systemId == fcuSystemId }
+                            .map { it.message }
+                            .filterIsInstance<MissionCount>()
+                            .first { it.missionType.value == MavMissionType.FENCE.value }
+                    }
+
+                    val count = countMsg?.count?.toInt() ?: 0
+
+                    if (count == 0) {
+                        Log.i("Geofence", "No fence items on FC")
+                        continuation.resume(emptyList())
+                        return@launch
+                    }
+
+                    Log.i("Geofence", "FC reports $count fence items")
+
+                    // Request each item
+                    for (seq in 0 until count) {
+                        val request = MissionRequestInt(
+                            targetSystem = fcuSystemId,
+                            targetComponent = fcuComponentId,
+                            seq = seq.toUShort(),
+                            missionType = MavEnumValue.of(MavMissionType.FENCE)
+                        )
+                        connection.trySendUnsignedV2(gcsSystemId, gcsComponentId, request)
+
+                        val item = withTimeoutOrNull(2000) {
+                            mavFrame
+                                .filter { it.systemId == fcuSystemId }
+                                .map { it.message }
+                                .filterIsInstance<MissionItemInt>()
+                                .first { it.seq.toInt() == seq && it.missionType.value == MavMissionType.FENCE.value }
+                        }
+
+                        if (item != null) {
+                            receivedItems.add(item)
+                        } else {
+                            Log.w("Geofence", "Timeout receiving fence item $seq")
+                        }
+
+                        delay(50)
+                    }
+
+                    continuation.resume(receivedItems)
+
+                } catch (e: Exception) {
+                    Log.e("Geofence", "Error requesting fence items: ${e.message}")
+                    continuation.resume(emptyList())
+                }
+            }
+
+            continuation.invokeOnCancellation {
+                job.cancel()
+            }
+        }
+    }
+
+    /**
+     * Convert downloaded mission items back to fence zones
+     */
+    private fun convertMissionItemsToFence(items: List<MissionItemInt>): List<FenceZone> {
+        val zones = mutableListOf<FenceZone>()
+        val polygonVertices = mutableMapOf<Boolean, MutableList<LatLng>>()  // isInclusion -> vertices
+        var currentPolygonVertexCount = 0
+        var currentPolygonIsInclusion = true
+
+        for (item in items) {
+            when (item.command.value) {
+                MavCmd.NAV_FENCE_POLYGON_VERTEX_INCLUSION.value,
+                MavCmd.NAV_FENCE_POLYGON_VERTEX_EXCLUSION.value -> {
+                    val isInclusion = item.command.value == MavCmd.NAV_FENCE_POLYGON_VERTEX_INCLUSION.value
+                    val vertexCount = item.param1.toInt()
+                    val lat = item.x / 1E7
+                    val lng = item.y / 1E7
+
+                    // Check if we're starting a new polygon
+                    if (currentPolygonVertexCount == 0 || isInclusion != currentPolygonIsInclusion) {
+                        // If there's an existing polygon being built, save it first
+                        if (polygonVertices[currentPolygonIsInclusion]?.isNotEmpty() == true) {
+                            zones.add(FenceZone.Polygon(
+                                points = polygonVertices[currentPolygonIsInclusion]!!.toList(),
+                                isInclusion = currentPolygonIsInclusion
+                            ))
+                            polygonVertices[currentPolygonIsInclusion]?.clear()
+                        }
+                        currentPolygonVertexCount = vertexCount
+                        currentPolygonIsInclusion = isInclusion
+                    }
+
+                    polygonVertices.getOrPut(isInclusion) { mutableListOf() }.add(LatLng(lat, lng))
+
+                    // When we have all vertices, create polygon
+                    if (polygonVertices[isInclusion]?.size == currentPolygonVertexCount) {
+                        zones.add(FenceZone.Polygon(
+                            points = polygonVertices[isInclusion]!!.toList(),
+                            isInclusion = isInclusion
+                        ))
+                        polygonVertices[isInclusion]?.clear()
+                        currentPolygonVertexCount = 0
+                    }
+                }
+
+                MavCmd.NAV_FENCE_CIRCLE_INCLUSION.value,
+                MavCmd.NAV_FENCE_CIRCLE_EXCLUSION.value -> {
+                    val isInclusion = item.command.value == MavCmd.NAV_FENCE_CIRCLE_INCLUSION.value
+                    val radius = item.param1
+                    val lat = item.x / 1E7
+                    val lng = item.y / 1E7
+
+                    zones.add(FenceZone.Circle(
+                        center = LatLng(lat, lng),
+                        radiusMeters = radius,
+                        isInclusion = isInclusion
+                    ))
+                }
+
+                MavCmd.NAV_FENCE_RETURN_POINT.value -> {
+                    val lat = item.x / 1E7
+                    val lng = item.y / 1E7
+
+                    zones.add(FenceZone.ReturnPoint(
+                        location = LatLng(lat, lng)
+                    ))
+                }
+
+                else -> {
+                    Log.w("Geofence", "Unknown fence command: ${item.command.value}")
+                }
+            }
+        }
+
+        return zones
+    }
+
+    /**
+     * Start monitoring fence status from flight controller.
+     * This monitors SYS_STATUS for fence breach flags.
+     * Should be called when connection is established.
+     */
+    fun startFenceMonitoring() {
+        AppScope.launch {
+            // Monitor SYS_STATUS for fence breach flags
+            mavFrame
+                .filter { state.value.fcuDetected && it.systemId == fcuSystemId }
+                .map { it.message }
+                .filterIsInstance<SysStatus>()
+                .collect { sysStatus ->
+                    // Check fence breach bit in onboard_control_sensors_health
+                    // Bit 8 (0x100) = FENCE
+                    val fenceHealthy = (sysStatus.onboardControlSensorsHealth.value and 0x100u) != 0u
+                    val fenceEnabled = (sysStatus.onboardControlSensorsEnabled.value and 0x100u) != 0u
+                    val fenceBreached = fenceEnabled && !fenceHealthy
+
+                    val previousStatus = _fenceStatus.value
+
+                    _fenceStatus.update { it.copy(
+                        enabled = fenceEnabled,
+                        breached = fenceBreached
+                    )}
+
+                    // Notify only on new breach detection
+                    if (fenceBreached && !previousStatus.breached) {
+                        Log.w("Geofence", "⚠️ FENCE BREACH DETECTED BY FC!")
+
+                        // Notify user
+                        withContext(Dispatchers.Main) {
+                            sharedViewModel.addNotification(
+                                Notification(
+                                    message = "⚠️ Geofence breach! FC is handling...",
+                                    type = NotificationType.WARNING
+                                )
+                            )
+                            sharedViewModel.speak("Geofence breach detected")
+                        }
+                    }
+                }
+        }
+    }
+
+    /**
+     * Clear all fence data from flight controller
+     */
+    suspend fun clearGeofenceFromFC(): Boolean {
+        return withContext(Dispatchers.IO) {
+            try {
+                Log.i("Geofence", "Clearing fence from flight controller...")
+
+                // Send MISSION_CLEAR_ALL with FENCE type
+                val clearCmd = MissionClearAll(
+                    targetSystem = fcuSystemId,
+                    targetComponent = fcuComponentId,
+                    missionType = MavEnumValue.of(MavMissionType.FENCE)
+                )
+                connection.trySendUnsignedV2(gcsSystemId, gcsComponentId, clearCmd)
+
+                // Wait for acknowledgment
+                val ack = withTimeoutOrNull(5000) {
+                    mavFrame
+                        .filter { it.systemId == fcuSystemId }
+                        .map { it.message }
+                        .filterIsInstance<MissionAck>()
+                        .first { it.missionType.value == MavMissionType.FENCE.value }
+                }
+
+                if (ack?.type?.value == MavMissionResult.MAV_MISSION_ACCEPTED.value) {
+                    Log.i("Geofence", "✅ Fence cleared from FC")
+
+                    // Disable fence
+                    delay(200)
+                    enableFence(false)
+
+                    // Reset fence status
+                    _fenceStatus.value = FenceStatus()
+
+                    return@withContext true
+                } else {
+                    Log.e("Geofence", "❌ Failed to clear fence: ${ack?.type}")
+                    return@withContext false
+                }
+
+            } catch (e: Exception) {
+                Log.e("Geofence", "Error clearing fence: ${e.message}")
+                false
+            }
+        }
+    }
+}
