@@ -32,5 +32,6 @@ data class GridParameters(
     val gridAngle: Float,
     val surveySpeed: Float,
     val surveyAltitude: Float,
-    val surveyPolygon: List<LatLng>
+    val surveyPolygon: List<LatLng>,
+    val obstacles: List<List<LatLng>> = emptyList()
 )

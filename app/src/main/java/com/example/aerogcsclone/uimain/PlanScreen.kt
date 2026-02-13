@@ -515,6 +515,7 @@ fun PlanScreen(
                 surveySpeed = gridParams.surveySpeed
                 surveyAltitude = gridParams.surveyAltitude
                 surveyPolygon = gridParams.surveyPolygon
+                obstacles = gridParams.obstacles
 
                 if (surveyPolygon.size >= 3) {
                     regenerateGrid()
@@ -1793,8 +1794,8 @@ fun PlanScreen(
                                 Slider(
                                     value = gridAngle,
                                     onValueChange = { gridAngle = it },
-                                    valueRange = 0f..180f,
-                                    steps = 35,
+                                    valueRange = 0f..360f,
+                                    steps = 71,
                                     modifier = Modifier.weight(1f),
                                     colors = SliderDefaults.colors(
                                         thumbColor = MaterialTheme.colorScheme.primary,
@@ -1803,7 +1804,7 @@ fun PlanScreen(
                                     )
                                 )
                                 IconButton(
-                                    onClick = { gridAngle = (gridAngle + 5f).coerceAtMost(180f) },
+                                    onClick = { gridAngle = (gridAngle + 5f).coerceAtMost(360f) },
                                     modifier = Modifier.size(32.dp)
                                 ) {
                                     Icon(
@@ -2594,7 +2595,8 @@ fun PlanScreen(
                                 gridAngle = gridAngle,
                                 surveySpeed = surveySpeed,
                                 surveyAltitude = surveyAltitude,
-                                surveyPolygon = surveyPolygon
+                                surveyPolygon = surveyPolygon,
+                                obstacles = obstacles
                             )
                         } else null
 
