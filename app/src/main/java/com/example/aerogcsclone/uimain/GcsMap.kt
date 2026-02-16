@@ -414,10 +414,6 @@ fun GcsMap(
                 visitedPathPoints.last().position != pos ||
                 visitedPathPoints.last().isSpraying != isSpraying) {
 
-                // Log spray status changes for debugging
-                if (visitedPathPoints.isNotEmpty() && visitedPathPoints.last().isSpraying != isSpraying) {
-                    android.util.Log.i("GcsMap", "🚁 Spray status changed: ${if (isSpraying) "SPRAYING" else "NOT_SPRAYING"} (active=$sprayActive, flow=$flowRate L/min)")
-                }
 
                 visitedPathPoints.add(newPoint)
 
@@ -1131,7 +1127,6 @@ fun GcsMap(
             // Draw polylines for each segment
             segments.forEach { (points, isSpraying) ->
                 if (points.size > 1) {
-                    android.util.Log.d("GcsMap", "🎨 Drawing ${if (isSpraying) "GREEN" else "RED"} polyline segment with ${points.size} points")
                     Polyline(
                         points = points,
                         width = 6f,

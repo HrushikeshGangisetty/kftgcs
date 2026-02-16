@@ -1,6 +1,5 @@
 ﻿package com.example.aerogcsclone.telemetry
 
-import android.util.Log
 import com.divpundir.mavlink.adapters.coroutines.asCoroutine
 import com.divpundir.mavlink.adapters.coroutines.tryConnect
 import com.divpundir.mavlink.adapters.coroutines.trySendUnsignedV2
@@ -657,7 +656,6 @@ class MavlinkTelemetryRepository(
                             lastPositiveFlowTime = System.currentTimeMillis()
                             if (isInAutoMode && !autoModeSprayDetected) {
                                 autoModeSprayDetected = true
-                                Log.d("TankEmpty", "🚁 AUTO mode spray detected via flow sensor - flow rate: ${flowRateLiterPerMin} L/min")
                             }
                         }
 
@@ -711,8 +709,6 @@ class MavlinkTelemetryRepository(
                             // Track when sprayer was turned ON
                             if (pumpTurnedOnTime == null) {
                                 pumpTurnedOnTime = System.currentTimeMillis()
-                                val spraySource = if (rc7SprayEnabled) "RC7" else "AUTO mission (DO_SET_SERVO/DO_SPRAYER)"
-                                Log.d("TankEmpty", "⏱️ Sprayer active via $spraySource - waiting ${PUMP_STARTUP_DELAY_MS}ms before checking flow")
                             }
 
                             val timeSincePumpOn = System.currentTimeMillis() - (pumpTurnedOnTime ?: 0L)
@@ -722,12 +718,10 @@ class MavlinkTelemetryRepository(
                                 // Sprayer has been ON long enough and still no flow - start/continue timing
                                 if (zeroFlowStartTime == null) {
                                     zeroFlowStartTime = System.currentTimeMillis()
-                                    Log.d("TankEmpty", "⏱️ Zero flow timer started - spray command active for ${timeSincePumpOn}ms but no flow (mode: $currentMode)")
                                 } else {
                                     val zeroFlowDuration = System.currentTimeMillis() - zeroFlowStartTime!!
 
                                     if (zeroFlowDuration >= ZERO_FLOW_THRESHOLD_MS && !tankEmptyNotificationShown) {
-                                        Log.w("TankEmpty", "🚨 TANK EMPTY! Spray command active for ${timeSincePumpOn}ms with ${zeroFlowDuration}ms of zero flow (mode: $currentMode)")
                                         sharedViewModel.addNotification(
                                             Notification(
                                                 message = "Tank Empty! Sprayer is ON but no flow detected.",
@@ -739,7 +733,6 @@ class MavlinkTelemetryRepository(
 
                                         // If in AUTO mode, switch to LOITER and trigger resume popup
                                         if (isInAutoMode) {
-                                            Log.i("TankEmpty", "🚨 AUTO mode - switching to LOITER for tank refill")
                                             sharedViewModel.handleTankEmptyInAutoMode()
                                         }
                                     }
@@ -747,24 +740,17 @@ class MavlinkTelemetryRepository(
                             } else if (!flowIsZero) {
                                 // Flow detected - reset zero flow timer
                                 if (zeroFlowStartTime != null) {
-                                    Log.d("TankEmpty", "⏱️ Zero flow timer reset - flow detected (${String.format("%.2f", flowRateLiterPerMin ?: 0f)} L/min)")
                                     zeroFlowStartTime = null
                                 }
 
                                 // Reset tank empty notification if flow is detected again (tank refilled)
                                 if (tankEmptyNotificationShown) {
-                                    Log.i("TankEmpty", "✓ Flow restored - tank refilled")
                                     tankEmptyNotificationShown = false
                                 }
                             }
                         } else {
                             // Sprayer is OFF or config invalid - reset all timers
                             if (pumpTurnedOnTime != null || zeroFlowStartTime != null) {
-                                val reason = when {
-                                    !sprayCommandActive -> "spray command inactive"
-                                    else -> "config invalid"
-                                }
-                                Log.d("TankEmpty", "⏱️ All timers reset - $reason")
                                 pumpTurnedOnTime = null
                                 zeroFlowStartTime = null
                             }
@@ -772,7 +758,6 @@ class MavlinkTelemetryRepository(
 
                         // Reset AUTO mode spray detection when leaving AUTO mode
                         if (!isInAutoMode && autoModeSprayDetected) {
-                            Log.d("TankEmpty", "🔄 Leaving AUTO mode - resetting spray detection state")
                             autoModeSprayDetected = false
                             lastPositiveFlowTime = null
                         }
@@ -1587,13 +1572,10 @@ class MavlinkTelemetryRepository(
                 .filterIsInstance<OpenDroneIdBasicId>()
                 .collect { basicIdMessage ->
                     try {
-                        Log.i("TelemetryRepo", "📥 OPEN_DRONE_ID_BASIC_ID received from FC")
-
                         // Extract drone identifier using the new logic
                         val droneIdentifier = extractDroneUniqueId(basicIdMessage)
 
                         if (droneIdentifier != null) {
-                            Log.i("TelemetryRepo", "✅ Extracted Drone ID: ${droneIdentifier.serialNumber} (Type: ${droneIdentifier.idType})")
 
                             // Update telemetry state with the serial number as droneUid
                             _state.update { state ->
@@ -1612,21 +1594,17 @@ class MavlinkTelemetryRepository(
                             try {
                                 val wsManager = WebSocketManager.getInstance()
                                 wsManager.droneUid = droneIdentifier.serialNumber
-                                Log.i("TelemetryRepo", "✅ Updated WebSocketManager with droneUid: '${droneIdentifier.serialNumber}'")
                             } catch (e: Exception) {
-                                Log.e("TelemetryRepo", "❌ Failed to update WebSocketManager droneUid", e)
+                                // Ignore
                             }
 
                             // Announce drone ID via TTS
                             val shortUid = droneIdentifier.serialNumber.takeLast(8) // Last 8 characters for brevity
                             sharedViewModel.speak("Drone identified. Serial number ending in $shortUid")
-                            Log.i("TelemetryRepo", "🎤 Announced drone serial number via TTS")
-                        } else {
-                            Log.w("TelemetryRepo", "⚠️ No valid drone identifier found in OPEN_DRONE_ID_BASIC_ID message")
                         }
 
                     } catch (e: Exception) {
-                        Log.e("TelemetryRepo", "❌ Error processing OPEN_DRONE_ID_BASIC_ID", e)
+                        // Ignore
                     }
                 }
         }
@@ -1639,8 +1617,6 @@ class MavlinkTelemetryRepository(
                 .filterIsInstance<AutopilotVersion>()
                 .collect { autopilotVersion ->
                     try {
-                        Log.i("TelemetryRepo", "📥 AUTOPILOT_VERSION received from FC (for firmware info only)")
-
                         // Format firmware version (4 bytes: major.minor.patch.type)
                         val fwVersion = autopilotVersion.flightSwVersion
                         val major = (fwVersion shr 24) and 0xFFu
@@ -1679,15 +1655,14 @@ class MavlinkTelemetryRepository(
                             try {
                                 val wsManager = WebSocketManager.getInstance()
                                 wsManager.droneUid = currentState.droneUid!!
-                                Log.i("TelemetryRepo", "✅ Updated WebSocketManager with droneUid from AUTOPILOT_VERSION: '${currentState.droneUid}'")
                             } catch (e: Exception) {
-                                Log.e("TelemetryRepo", "❌ Failed to update WebSocketManager droneUid from AUTOPILOT_VERSION", e)
+                                // Ignore
                             }
                         }
 
 
                     } catch (e: Exception) {
-                        Log.e("TelemetryRepo", "❌ Error processing AUTOPILOT_VERSION", e)
+                        // Ignore
                     }
                 }
         }
@@ -2330,18 +2305,14 @@ class MavlinkTelemetryRepository(
      */
     suspend fun uploadFenceItems(fenceItems: List<MissionItemInt>, timeoutMs: Long = 30000): Boolean {
         if (!state.value.fcuDetected) {
-            Log.e("TelemetryRepo", "❌ Cannot upload fence: FCU not detected")
             return false
         }
 
         if (fenceItems.isEmpty()) {
-            Log.w("TelemetryRepo", "❌ Cannot upload fence: No fence items")
             return false
         }
 
         try {
-            Log.i("TelemetryRepo", "🔥 Uploading ${fenceItems.size} fence points to FC")
-
             // Step 1: Send mission count for fence items
             val missionCount = MissionCount(
                 targetSystem = fcuSystemId,
@@ -2351,7 +2322,6 @@ class MavlinkTelemetryRepository(
             )
 
             connection.trySendUnsignedV2(gcsSystemId, gcsComponentId, missionCount)
-            Log.i("TelemetryRepo", "📤 Sent fence mission count: ${fenceItems.size}")
 
             // Step 2: Wait for mission requests and send fence items
             val finalAckDeferred = CompletableDeferred<Pair<Boolean, String>>()
@@ -2377,8 +2347,6 @@ class MavlinkTelemetryRepository(
                             delay(50L) // Small delay for stability
                             connection.trySendUnsignedV2(gcsSystemId, gcsComponentId, fenceItem)
                             sentSeqs.add(seq)
-
-                            Log.d("TelemetryRepo", "📤 Sent fence point $seq/${fenceItems.size}")
                         }
 
                         is MissionAck -> {
@@ -2410,16 +2378,11 @@ class MavlinkTelemetryRepository(
 
             job.cancel()
 
-            val success = result.first
-            val message = result.second
-            Log.i("TelemetryRepo", if (success) "✅ $message" else "❌ $message")
-            return success
+            return result.first
 
         } catch (e: TimeoutCancellationException) {
-            Log.e("TelemetryRepo", "❌ Fence upload timeout after ${timeoutMs}ms")
             return false
         } catch (e: Exception) {
-            Log.e("TelemetryRepo", "❌ Fence upload failed", e)
             return false
         }
     }
@@ -2986,31 +2949,19 @@ class MavlinkTelemetryRepository(
     suspend fun uploadGeofence(configuration: FenceConfiguration): Boolean {
         return withContext(Dispatchers.IO) {
             try {
-                Log.i("Geofence", "═══════════════════════════════════════════")
-                Log.i("Geofence", "Starting geofence upload to flight controller")
-                Log.i("Geofence", "Zones: ${configuration.zones.size}")
-                Log.i("Geofence", "Action: ${configuration.action}")
-                Log.i("Geofence", "Margin: ${configuration.margin}m")
-
                 // Step 1: Convert fence zones to MAVLink mission items
                 val fenceItems = convertFenceToMissionItems(configuration.zones)
 
                 if (fenceItems.isEmpty()) {
-                    Log.e("Geofence", "No fence items to upload")
                     return@withContext false
                 }
-
-                Log.i("Geofence", "Converted to ${fenceItems.size} fence items")
 
                 // Step 2: Upload fence using mission protocol with FENCE type
                 val uploadSuccess = uploadFenceItemsInternal(fenceItems)
 
                 if (!uploadSuccess) {
-                    Log.e("Geofence", "Failed to upload fence items")
                     return@withContext false
                 }
-
-                Log.i("Geofence", "✅ Fence items uploaded successfully")
 
                 // Step 3: Configure fence parameters
                 delay(500)  // Let FC process fence upload
@@ -3018,33 +2969,20 @@ class MavlinkTelemetryRepository(
                 val paramsSet = configureFenceParameters(configuration)
 
                 if (!paramsSet) {
-                    Log.e("Geofence", "Failed to set fence parameters")
                     return@withContext false
                 }
-
-                Log.i("Geofence", "✅ Fence parameters configured")
 
                 // Step 4: Enable fence
                 delay(500)
                 val enabled = enableFence(true)
 
                 if (!enabled) {
-                    Log.e("Geofence", "Failed to enable fence")
                     return@withContext false
                 }
 
-                Log.i("Geofence", "✅ Geofence enabled on flight controller")
-
                 // Step 5: Verify fence is actually enabled by reading back parameters
                 delay(300)
-                val verifyEnabled = verifyFenceEnabled()
-                if (verifyEnabled) {
-                    Log.i("Geofence", "✅ Fence verification passed - fence is ACTIVE")
-                } else {
-                    Log.w("Geofence", "⚠️ Fence verification failed - fence may not be active!")
-                }
-
-                Log.i("Geofence", "═══════════════════════════════════════════")
+                verifyFenceEnabled()
 
                 // NOTE: Removed geofence upload notification from notification panel
                 // The upload status is communicated via logs and TTS
@@ -3052,7 +2990,6 @@ class MavlinkTelemetryRepository(
                 true
 
             } catch (e: Exception) {
-                Log.e("Geofence", "Error uploading geofence: ${e.message}")
                 e.printStackTrace()
                 false
             }
@@ -3165,18 +3102,7 @@ class MavlinkTelemetryRepository(
         return suspendCancellableCoroutine { continuation ->
             val job = AppScope.launch {
                 try {
-                    Log.i("Geofence", "═══════════════════════════════════════════")
-                    Log.i("Geofence", "Uploading ${items.size} fence items...")
-
-                    // Log fence points for debugging
-                    items.forEachIndexed { index, item ->
-                        val lat = item.x / 1E7
-                        val lon = item.y / 1E7
-                        Log.d("Geofence", "  Item $index: lat=$lat, lon=$lon, cmd=${item.command.value}")
-                    }
-
                     // Step 1: Clear existing fence
-                    Log.i("Geofence", "Step 1: Clearing existing fence...")
                     val clearCmd = MissionClearAll(
                         targetSystem = fcuSystemId,
                         targetComponent = fcuComponentId,
@@ -3185,22 +3111,16 @@ class MavlinkTelemetryRepository(
                     connection.trySendUnsignedV2(gcsSystemId, gcsComponentId, clearCmd)
 
                     // Wait for clear ACK
-                    val clearAck = withTimeoutOrNull(2000) {
+                    withTimeoutOrNull(2000) {
                         mavFrame
                             .filter { it.systemId == fcuSystemId }
                             .map { it.message }
                             .filterIsInstance<MissionAck>()
                             .first { it.missionType.value == MavMissionType.FENCE.value }
                     }
-                    if (clearAck != null) {
-                        Log.d("Geofence", "  Clear ACK received: ${clearAck.type.value}")
-                    } else {
-                        Log.w("Geofence", "  No clear ACK (continuing anyway)")
-                    }
                     delay(500)
 
                     // Step 2: Send fence count
-                    Log.i("Geofence", "Step 2: Sending fence count: ${items.size}")
                     val countMsg = MissionCount(
                         targetSystem = fcuSystemId,
                         targetComponent = fcuComponentId,
@@ -3210,7 +3130,6 @@ class MavlinkTelemetryRepository(
                     connection.trySendUnsignedV2(gcsSystemId, gcsComponentId, countMsg)
 
                     // Step 3: Wait for MISSION_REQUEST_INT/MISSION_REQUEST from FC and send items
-                    Log.i("Geofence", "Step 3: Waiting for FC to request items...")
                     val uploadedItems = mutableSetOf<Int>()
                     val timeout = 15000L  // 15 second timeout
                     val startTime = System.currentTimeMillis()
@@ -3220,7 +3139,6 @@ class MavlinkTelemetryRepository(
                         // Check timeout
                         val elapsed = System.currentTimeMillis() - startTime
                         if (elapsed > timeout) {
-                            Log.e("Geofence", "Upload timeout after ${elapsed}ms - uploaded ${uploadedItems.size}/${items.size}")
                             continuation.resume(false)
                             return@launch
                         }
@@ -3239,7 +3157,6 @@ class MavlinkTelemetryRepository(
                         if (frame == null) {
                             // No request received - resend count if we haven't gotten any requests
                             if (uploadedItems.isEmpty() && System.currentTimeMillis() - lastRequestTime > 2000) {
-                                Log.w("Geofence", "  No requests received, resending count...")
                                 connection.trySendUnsignedV2(gcsSystemId, gcsComponentId, countMsg)
                                 lastRequestTime = System.currentTimeMillis()
                             }
@@ -3249,7 +3166,6 @@ class MavlinkTelemetryRepository(
                         when (val msg = frame.message) {
                             is MissionRequestInt -> {
                                 val seq = msg.seq.toInt()
-                                Log.d("Geofence", "  FC requested item $seq (MissionRequestInt)")
                                 if (seq < items.size) {
                                     connection.trySendUnsignedV2(gcsSystemId, gcsComponentId, items[seq])
                                     uploadedItems.add(seq)
@@ -3260,7 +3176,6 @@ class MavlinkTelemetryRepository(
 
                             is MissionRequest -> {
                                 val seq = msg.seq.toInt()
-                                Log.d("Geofence", "  FC requested item $seq (MissionRequest legacy)")
                                 if (seq < items.size) {
                                     connection.trySendUnsignedV2(gcsSystemId, gcsComponentId, items[seq])
                                     uploadedItems.add(seq)
@@ -3271,10 +3186,7 @@ class MavlinkTelemetryRepository(
                         }
                     }
 
-                    Log.i("Geofence", "  All ${uploadedItems.size} items sent to FC")
-
                     // Step 4: Wait for MISSION_ACK
-                    Log.i("Geofence", "Step 4: Waiting for fence upload acknowledgment...")
                     val ack = withTimeoutOrNull(5000) {
                         mavFrame
                             .filter { it.systemId == fcuSystemId }
@@ -3284,26 +3196,19 @@ class MavlinkTelemetryRepository(
                     }
 
                     if (ack != null) {
-                        Log.i("Geofence", "  ACK received: ${ack.type.value} (0=accepted)")
                         if (ack.type.value == MavMissionResult.MAV_MISSION_ACCEPTED.value) {
-                            Log.i("Geofence", "✅ Fence upload acknowledged by FC")
-                            Log.i("Geofence", "═══════════════════════════════════════════")
                             continuation.resume(true)
                         } else {
-                            Log.e("Geofence", "❌ Fence rejected by FC: ${ack.type.value}")
                             continuation.resume(false)
                         }
                     } else {
                         // No ACK received - but fence might still be uploaded
                         // Some FCs don't send ACK for fence uploads
-                        Log.w("Geofence", "⚠️ No ACK received (fence may still be active)")
-                        Log.i("Geofence", "═══════════════════════════════════════════")
                         // Return true anyway as the items were uploaded
                         continuation.resume(true)
                     }
 
                 } catch (e: Exception) {
-                    Log.e("Geofence", "Error during fence upload: ${e.message}")
                     e.printStackTrace()
                     continuation.resume(false)
                 }
@@ -3320,18 +3225,14 @@ class MavlinkTelemetryRepository(
      */
     private suspend fun configureFenceParameters(config: FenceConfiguration): Boolean {
         try {
-            Log.i("Geofence", "Configuring fence parameters...")
-
             // Set fence action (what happens on breach)
             if (!setFenceParameter("FENCE_ACTION", config.action.value)) {
-                Log.e("Geofence", "Failed to set FENCE_ACTION")
                 return false
             }
             delay(200)
 
             // Set fence margin (safety buffer)
             if (!setFenceParameter("FENCE_MARGIN", config.margin)) {
-                Log.e("Geofence", "Failed to set FENCE_MARGIN")
                 return false
             }
             delay(200)
@@ -3353,7 +3254,6 @@ class MavlinkTelemetryRepository(
             }
 
             if (!setFenceParameter("FENCE_TYPE", fenceType.toFloat())) {
-                Log.e("Geofence", "Failed to set FENCE_TYPE")
                 return false
             }
             delay(200)
@@ -3361,7 +3261,6 @@ class MavlinkTelemetryRepository(
             // Set altitude limits if provided
             if (config.altitudeMax != null) {
                 if (!setFenceParameter("FENCE_ALT_MAX", config.altitudeMax)) {
-                    Log.e("Geofence", "Failed to set FENCE_ALT_MAX")
                     return false
                 }
                 delay(200)
@@ -3369,17 +3268,14 @@ class MavlinkTelemetryRepository(
 
             if (config.altitudeMin != null) {
                 if (!setFenceParameter("FENCE_ALT_MIN", config.altitudeMin)) {
-                    Log.e("Geofence", "Failed to set FENCE_ALT_MIN")
                     return false
                 }
                 delay(200)
             }
 
-            Log.i("Geofence", "✅ All fence parameters configured")
             return true
 
         } catch (e: Exception) {
-            Log.e("Geofence", "Error configuring fence parameters: ${e.message}")
             return false
         }
     }
@@ -3418,7 +3314,6 @@ class MavlinkTelemetryRepository(
 
                     if (response != null) {
                         val isEnabled = response.paramValue >= 1.0f
-                        Log.d("Geofence", "FENCE_ENABLE = ${response.paramValue} (enabled=$isEnabled)")
 
                         // Also check FENCE_TYPE to confirm polygon fence is configured
                         if (isEnabled) {
@@ -3431,20 +3326,12 @@ class MavlinkTelemetryRepository(
                             )
                             connection.trySendUnsignedV2(gcsSystemId, gcsComponentId, typeRequest)
 
-                            val typeResponse = withTimeoutOrNull(2000) {
+                            withTimeoutOrNull(2000) {
                                 mavFrame
                                     .filter { it.systemId == fcuSystemId }
                                     .map { it.message }
                                     .filterIsInstance<ParamValue>()
                                     .first { it.paramId == "FENCE_TYPE" }
-                            }
-
-                            if (typeResponse != null) {
-                                val fenceType = typeResponse.paramValue.toInt()
-                                val hasPolygon = (fenceType and 4) != 0  // Bit 2 = polygon
-                                val hasCircle = (fenceType and 2) != 0  // Bit 1 = circle
-                                val hasAltitude = (fenceType and 1) != 0  // Bit 0 = altitude
-                                Log.d("Geofence", "FENCE_TYPE = $fenceType (polygon=$hasPolygon, circle=$hasCircle, altitude=$hasAltitude)")
                             }
 
                             // Check FENCE_ACTION
@@ -3457,36 +3344,21 @@ class MavlinkTelemetryRepository(
                             )
                             connection.trySendUnsignedV2(gcsSystemId, gcsComponentId, actionRequest)
 
-                            val actionResponse = withTimeoutOrNull(2000) {
+                            withTimeoutOrNull(2000) {
                                 mavFrame
                                     .filter { it.systemId == fcuSystemId }
                                     .map { it.message }
                                     .filterIsInstance<ParamValue>()
                                     .first { it.paramId == "FENCE_ACTION" }
                             }
-
-                            if (actionResponse != null) {
-                                val actionName = when (actionResponse.paramValue.toInt()) {
-                                    0 -> "REPORT_ONLY"
-                                    1 -> "RTL"
-                                    2 -> "HOLD"
-                                    3 -> "GUIDED"
-                                    4 -> "BRAKE"
-                                    5 -> "SMART_RTL"
-                                    else -> "UNKNOWN"
-                                }
-                                Log.d("Geofence", "FENCE_ACTION = ${actionResponse.paramValue.toInt()} ($actionName)")
-                            }
                         }
 
                         continuation.resume(isEnabled)
                     } else {
-                        Log.w("Geofence", "No response for FENCE_ENABLE parameter read")
                         continuation.resume(false)
                     }
 
                 } catch (e: Exception) {
-                    Log.e("Geofence", "Error verifying fence: ${e.message}")
                     continuation.resume(false)
                 }
             }
@@ -3504,8 +3376,6 @@ class MavlinkTelemetryRepository(
         return suspendCancellableCoroutine { continuation ->
             val job = AppScope.launch {
                 try {
-                    Log.d("Geofence", "Setting parameter $paramId = $value")
-
                     // Send PARAM_SET
                     val paramSet = ParamSet(
                         targetSystem = fcuSystemId,
@@ -3526,15 +3396,12 @@ class MavlinkTelemetryRepository(
                     }
 
                     if (ack != null && ack.paramValue == value) {
-                        Log.d("Geofence", "✅ Parameter $paramId set successfully")
                         continuation.resume(true)
                     } else {
-                        Log.e("Geofence", "❌ Failed to set parameter $paramId")
                         continuation.resume(false)
                     }
 
                 } catch (e: Exception) {
-                    Log.e("Geofence", "Error setting parameter $paramId: ${e.message}")
                     continuation.resume(false)
                 }
             }
@@ -3551,18 +3418,13 @@ class MavlinkTelemetryRepository(
     suspend fun downloadGeofence(): List<FenceZone> {
         return withContext(Dispatchers.IO) {
             try {
-                Log.i("Geofence", "Downloading geofence from flight controller...")
-
                 // Request fence items using mission protocol
                 val fenceItems = requestFenceItemsFromFcu()
-
-                Log.i("Geofence", "Downloaded ${fenceItems.size} fence items")
 
                 // Convert mission items back to fence zones
                 convertMissionItemsToFence(fenceItems)
 
             } catch (e: Exception) {
-                Log.e("Geofence", "Error downloading geofence: ${e.message}")
                 emptyList()
             }
         }
@@ -3597,12 +3459,9 @@ class MavlinkTelemetryRepository(
                     val count = countMsg?.count?.toInt() ?: 0
 
                     if (count == 0) {
-                        Log.i("Geofence", "No fence items on FC")
                         continuation.resume(emptyList())
                         return@launch
                     }
-
-                    Log.i("Geofence", "FC reports $count fence items")
 
                     // Request each item
                     for (seq in 0 until count) {
@@ -3624,8 +3483,6 @@ class MavlinkTelemetryRepository(
 
                         if (item != null) {
                             receivedItems.add(item)
-                        } else {
-                            Log.w("Geofence", "Timeout receiving fence item $seq")
                         }
 
                         delay(50)
@@ -3634,7 +3491,6 @@ class MavlinkTelemetryRepository(
                     continuation.resume(receivedItems)
 
                 } catch (e: Exception) {
-                    Log.e("Geofence", "Error requesting fence items: ${e.message}")
                     continuation.resume(emptyList())
                 }
             }
@@ -3714,7 +3570,7 @@ class MavlinkTelemetryRepository(
                 }
 
                 else -> {
-                    Log.w("Geofence", "Unknown fence command: ${item.command.value}")
+                    // Unknown fence command
                 }
             }
         }
@@ -3750,8 +3606,6 @@ class MavlinkTelemetryRepository(
 
                     // Notify only on new breach detection
                     if (fenceBreached && !previousStatus.breached) {
-                        Log.w("Geofence", "⚠️ FENCE BREACH DETECTED BY FC!")
-
                         // Notify user
                         withContext(Dispatchers.Main) {
                             sharedViewModel.addNotification(
@@ -3773,8 +3627,6 @@ class MavlinkTelemetryRepository(
     suspend fun clearGeofenceFromFC(): Boolean {
         return withContext(Dispatchers.IO) {
             try {
-                Log.i("Geofence", "Clearing fence from flight controller...")
-
                 // Send MISSION_CLEAR_ALL with FENCE type
                 val clearCmd = MissionClearAll(
                     targetSystem = fcuSystemId,
@@ -3793,8 +3645,6 @@ class MavlinkTelemetryRepository(
                 }
 
                 if (ack?.type?.value == MavMissionResult.MAV_MISSION_ACCEPTED.value) {
-                    Log.i("Geofence", "✅ Fence cleared from FC")
-
                     // Disable fence
                     delay(200)
                     enableFence(false)
@@ -3804,12 +3654,10 @@ class MavlinkTelemetryRepository(
 
                     return@withContext true
                 } else {
-                    Log.e("Geofence", "❌ Failed to clear fence: ${ack?.type}")
                     return@withContext false
                 }
 
             } catch (e: Exception) {
-                Log.e("Geofence", "Error clearing fence: ${e.message}")
                 false
             }
         }

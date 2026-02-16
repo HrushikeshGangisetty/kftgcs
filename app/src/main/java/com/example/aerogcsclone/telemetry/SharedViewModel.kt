@@ -2845,11 +2845,11 @@ class SharedViewModel : ViewModel() {
                 val result = repo?.changeMode(MavMode.AUTO) ?: false
 
                 if (result) {
-                    _telemetryState.update { 
+                    _telemetryState.update {
                         it.copy(
                             missionPaused = false,
                             pausedAtWaypoint = null
-                        ) 
+                        )
                     }
 
                     // ✅ Send mission status RESUMED to backend (crash-safe)

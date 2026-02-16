@@ -1,6 +1,5 @@
 package com.example.aerogcsclone.telemetry
 
-import android.util.Log
 import okhttp3.*
 import okhttp3.CertificatePinner
 import org.json.JSONObject
@@ -126,9 +125,6 @@ class WebSocketManager {
                 .build()
 
             builder.certificatePinner(certificatePinner)
-            Log.d("WebSocketManager", "🔒 Certificate pinning enabled for ${getProductionHost()}")
-        } else if (isSecureConnectionEnabled()) {
-            Log.w("WebSocketManager", "⚠️ Production mode enabled but certificate pin not configured!")
         }
 
         return builder.build()
@@ -164,16 +160,8 @@ class WebSocketManager {
             val oldValue = field
             field = value
 
-            // 🔥 LOG ALL DRONE UID UPDATES
-            Log.e("WS_DRONE_UID", "🔥 DRONE UID UPDATED:")
-            Log.e("WS_DRONE_UID", "   Old: '$oldValue'")
-            Log.e("WS_DRONE_UID", "   New: '$value'")
-            Log.e("WS_DRONE_UID", "   IsConnected: $isConnected")
-            Log.e("WS_DRONE_UID", "   MissionId: $missionId")
-
             // 🔥 If droneUid was updated while connected, send update to backend
             if (value.isNotBlank() && oldValue != value && isConnected && missionId != null) {
-                Log.e("WS_DRONE_UID", "   📤 Sending drone_uid_update to backend")
                 sendDroneUidUpdate(value)
             }
         }
@@ -249,17 +237,11 @@ class WebSocketManager {
         private set
 
     fun connect() {
-        Log.e("WS_DEBUG", "🔥🔥🔥 connect() method CALLED 🔥🔥🔥")
-        Log.e("WS_DEBUG", "📋 Thread: ${Thread.currentThread().name}")
-
         // ✅ Validate pilotId and adminId are set from SessionManager
         if (pilotId <= 0) {
-            Log.e(TAG, "⛔ Cannot connect - pilotId not set! Please login first.")
-            Log.e("WS_DEBUG", "❌ ABORT: pilotId=$pilotId is invalid")
             return
         }
         if (adminId <= 0) {
-            Log.w(TAG, "⚠️ adminId not set, using default value 1")
             adminId = 1
         }
 
@@ -270,40 +252,13 @@ class WebSocketManager {
         }
         isReconnecting = false
 
-        Log.e("WS_DEBUG", "📋 pilotId=$pilotId, adminId=$adminId, droneUid='$droneUid'")
-        Log.d(TAG, "📋 Connecting with pilotId=$pilotId, adminId=$adminId")
-
-        // 🔥 IMMEDIATE DRONE UID STATUS CHECK
-        val currentDroneUid = resolveDroneUid()
-        val isRealDrone = droneUid.isNotBlank()
-        Log.e("WS_DRONE_UID", "🔥 DRONE UID STATUS ON CONNECT:")
-        Log.e("WS_DRONE_UID", "   Raw droneUid: '$droneUid'")
-        Log.e("WS_DRONE_UID", "   Resolved droneUid: '$currentDroneUid'")
-        Log.e("WS_DRONE_UID", "   Is Real Drone: $isRealDrone")
-        Log.e("WS_DRONE_UID", "   ${if (isRealDrone) "✅ USING REAL DRONE UID" else "⚠️ USING FALLBACK (SITL_DRONE_001)"}")
-
-        // Log security status
-        if (isSecureConnectionEnabled()) {
-            Log.d(TAG, "🔒 Using SECURE WebSocket connection (WSS)")
-        } else {
-            Log.w(TAG, "⚠️ Using INSECURE WebSocket (WS) - OK for local drone connections only")
-        }
-
         try {
-            Log.e("WS_DEBUG", "📡 Target URL: $wsUrl")
-            Log.d(TAG, "Building WebSocket request for URL: $wsUrl")
             val request = Request.Builder()
                 .url(wsUrl)
                 .build()
 
-            Log.e("WS_DEBUG", "📡 Request built, calling client.newWebSocket()...")
-            Log.d(TAG, "Creating WebSocket connection...")
             webSocket = client.newWebSocket(request, socketListener)
-            Log.e("WS_DEBUG", "✅ client.newWebSocket() called - waiting for onOpen/onFailure")
-            Log.e(TAG, "✅ Attempting to connect to WebSocket at $wsUrl")
         } catch (e: Exception) {
-            Log.e("WS_DEBUG", "❌❌❌ EXCEPTION in connect(): ${e.message}", e)
-            Log.e(TAG, "❌ Failed to connect to WebSocket: ${e.message}", e)
             e.printStackTrace()
         }
     }
@@ -312,132 +267,64 @@ class WebSocketManager {
 
         // ✅ STEP 2 — Send session_start on connection
         override fun onOpen(webSocket: WebSocket, response: Response) {
-            // 🔥 CRITICAL DEBUG LOG - MUST SEE THIS IN LOGCAT
-            Log.e("WS_DEBUG", "🔥🔥🔥 onOpen() CALLED — preparing session_start 🔥🔥🔥")
-
             isConnected = true
             sessionStarted = false
             readyForTelemetry = false
             connectionOpenedTime = System.currentTimeMillis()
             sessionAckReceivedTime = 0
 
-            // 🔥 Enhanced logging for debugging backend connection
-            Log.e(TAG, "🔥🔥🔥 WebSocket CONNECTED to: $wsUrl 🔥🔥🔥")
-            Log.e(TAG, "📡 Response Code: ${response.code}")
-            Log.e(TAG, "📡 Response Message: ${response.message}")
-            Log.e(TAG, "📡 Response Protocol: ${response.protocol}")
-            Log.e(TAG, "📡 This should trigger TelemetryConsumer.connect() in Django backend!")
-
             // 🔥 Reset mission statistics when new session starts
             missionAlertsCount = 0
             missionBatteryStart = batteryRemaining  // Capture current battery as start
-            Log.d(TAG, "📊 Mission stats reset - Battery start: $missionBatteryStart%")
 
-            // 🔥 Resolve drone UID and log details
+            // 🔥 Resolve drone UID
             val droneUidToSend = resolveDroneUid()
-            val isFallback = droneUid.isBlank()
-            Log.d(TAG, "📋 Session Details:")
-            Log.d(TAG, "   - Admin ID: $adminId")
-            Log.d(TAG, "   - Pilot ID: $pilotId")
-            Log.d(TAG, "   - Drone UID: $droneUidToSend ${if (isFallback) "(⚠️ FALLBACK - FC not yet identified)" else "(✅ REAL FC UID)"}")
-            Log.d(TAG, "   - Plot: $selectedPlotName")
-            Log.d(TAG, "   - Flight Mode: $selectedFlightMode")
-            Log.d(TAG, "   - Mission Type: $selectedMissionType")
 
             try {
                 // 🔥 FIX: Generate unique vehicle name to avoid database constraint violations
-                // Use drone UID as vehicle name, or fallback to timestamp-based unique name
                 val uniqueVehicleName = if (droneUidToSend.isNotBlank() && droneUidToSend != "SITL_DRONE_001") {
                     droneUidToSend.take(50) // Limit length to avoid DB field size issues
                 } else {
                     "DRONE_${System.currentTimeMillis()}" // Timestamp-based fallback
                 }
 
-                Log.d(TAG, "🔥 Using unique vehicle name: '$uniqueVehicleName' (was: DRONE_01)")
-
                 val sessionStart = JSONObject().apply {
                     put("type", "session_start")
-                    put("vehicle_name", uniqueVehicleName) // 🔥 UNIQUE vehicle name
+                    put("vehicle_name", uniqueVehicleName)
                     put("admin_id", adminId)
                     put("pilot_id", pilotId)
-                    // 🔥 REAL DRONE ID from Flight Controller (with SITL fallback)
                     put("drone_uid", droneUidToSend)
-                    // 🔥 Plot name from UI
                     put("plot_name", selectedPlotName)
-                    // 🔥 Flight mode - Automatic or Manual
                     put("flight_mode", selectedFlightMode)
-                    // 🔥 Mission type - Grid or Waypoint
                     put("mission_type", selectedMissionType)
-                    // 🔥 Grid setup source - How grid boundary was created
                     put("grid_setup_source", gridSetupSource)
                 }
 
                 val payload = sessionStart.toString()
-
-                // 🔥 CRITICAL: Log BEFORE sending
-                Log.e("WS_DEBUG", "📤 About to send session_start payload: $payload")
-
-                // 🔥 EXTRA DRONE UID VERIFICATION
-                Log.e("WS_DRONE_UID", "🔥 SESSION_START DRONE UID VERIFICATION:")
-                Log.e("WS_DRONE_UID", "   Raw droneUid field: '$droneUid'")
-                Log.e("WS_DRONE_UID", "   droneUidToSend: '$droneUidToSend'")
-                Log.e("WS_DRONE_UID", "   Is fallback: $isFallback")
-                Log.e("WS_DRONE_UID", "   Final payload drone_uid: '${sessionStart.getString("drone_uid")}'")
-
-                val sent = webSocket?.send(payload) == true
-
-                // 🔥 CRITICAL DEBUG LOG - Check if send() succeeded
-                Log.e("WS_DEBUG", "📤📤📤 session_start send result = $sent 📤📤📤")
-
-                if (!sent) {
-                    Log.e("WS_DEBUG", "❌❌❌ CRITICAL: send() returned FALSE - message NOT sent! ❌❌❌")
-                } else {
-                    Log.e("WS_DEBUG", "✅ send() returned TRUE - message should reach server")
-                }
-
-                Log.e(TAG, "📤📤📤 Sending session_start to Django backend 📤📤📤")
-                Log.e(TAG, "📤 Payload: $payload")
-                Log.e(TAG, "📤 Send result: $sent")
-                Log.e(TAG, "📤 Waiting for session_ack from TelemetryConsumer...")
+                webSocket?.send(payload)
             } catch (e: Exception) {
-                Log.e("WS_DEBUG", "❌❌❌ EXCEPTION in onOpen while sending session_start: ${e.message}", e)
                 e.printStackTrace()
             }
 
             // 🔥 FALLBACK: Enable telemetry after timeout if backend doesn't send session_ack
-            // Cancel any existing timeout
             sessionAckTimeoutRunnable?.let { handler.removeCallbacks(it) }
 
-            // Create new timeout runnable
             sessionAckTimeoutRunnable = Runnable {
                 if (!readyForTelemetry && isConnected) {
-                    Log.w(TAG, "⚠️ Backend didn't send session_ack within ${sessionAckTimeout}ms")
-                    Log.w(TAG, "🔄 Enabling telemetry anyway (fallback mode)")
                     sessionStarted = true
                     readyForTelemetry = true
                     telemetryEnabled = true
-                    Log.d(TAG, "✅ Telemetry enabled via FALLBACK mechanism")
                 }
             }
 
-            // Schedule timeout
             handler.postDelayed(sessionAckTimeoutRunnable!!, sessionAckTimeout)
-            Log.d(TAG, "⏱️ Started ${sessionAckTimeout}ms timeout for session_ack")
         }
 
         // ✅ STEP 3 — Android MUST wait for ACK
         override fun onMessage(webSocket: WebSocket, text: String) {
-            // 🔥 CRITICAL DEBUG - Log ALL incoming messages
-            Log.e("WS_DEBUG", "🔥 onMessage() CALLED - received data from server")
-            Log.e("WS_DEBUG", "📩 Raw text length: ${text.length}")
-            Log.e(TAG, "📩📩📩 MESSAGE FROM DJANGO BACKEND 📩📩📩")
-            Log.e(TAG, "📩 Raw message: $text")
-
             try {
                 val msg = JSONObject(text)
                 val messageType = msg.getString("type")
-
-                Log.e(TAG, "📩 Message type: $messageType")
 
                 when (messageType) {
                     "session_ack" -> {
@@ -449,25 +336,14 @@ class WebSocketManager {
                         telemetryEnabled = true
                         sessionAckReceivedTime = System.currentTimeMillis()
 
-                        Log.e(TAG, "✅✅✅ SESSION_ACK RECEIVED FROM BACKEND - TELEMETRY ENABLED ✅✅✅")
-                        Log.e(TAG, "✅ TelemetryConsumer.receive() was triggered successfully!")
-                        Log.e(TAG, "✅ Backend is properly configured and responding correctly")
-                        Log.e(TAG, "⏳ Waiting for mission_created message from backend...")
-
                         // 🔥 CHECK FOR DRONE UID UPDATE AFTER SESSION_ACK
-                        // This handles cases where drone ID becomes available after initial connection
                         val currentDroneUid = droneUid.trim()
                         if (currentDroneUid.isNotBlank() && currentDroneUid != "SITL_DRONE_001") {
-                            Log.i(TAG, "🔥 Real drone UID available after session_ack: '$currentDroneUid'")
-                            // Send drone_uid_update since we now have a real UID
                             try {
                                 sendDroneUidUpdate(currentDroneUid)
-                                Log.i(TAG, "✅ Sent post-session drone_uid_update: '$currentDroneUid'")
                             } catch (e: Exception) {
-                                Log.e(TAG, "❌ Failed to send post-session drone_uid_update", e)
+                                // Ignore
                             }
-                        } else {
-                            Log.w(TAG, "⚠️ Still using fallback drone UID: '$currentDroneUid'")
                         }
                     }
                     "mission_created" -> {
@@ -475,36 +351,23 @@ class WebSocketManager {
                         readyForTelemetry = true
                         // 🔥 Reset reconnect attempts on successful mission creation
                         reconnectAttempts = 0
-                        Log.e(TAG, "🚀🚀🚀 MISSION CREATED BY BACKEND 🚀🚀🚀")
-                        Log.e(TAG, "🚀 Mission ID: $missionId")
-                        Log.e(TAG, "🚀 Mission was inserted into PostgreSQL database!")
 
                         // 🔥 START DELAYED DRONE UID MONITORING
-                        // Check for real drone UID updates in the next 10 seconds
                         startDelayedDroneUidMonitoring()
                     }
                     "error" -> {
-                        // 🔥 Handle error messages from backend
-                        val errorMessage = msg.optString("message", "Unknown error")
-                        Log.e(TAG, "❌❌❌ ERROR FROM BACKEND ❌❌❌")
-                        Log.e(TAG, "❌ Error message: $errorMessage")
-                        Log.e(TAG, "❌ Check: Admin(id=$adminId) and Pilot(id=$pilotId) must exist in database!")
+                        // Handle error silently
                     }
                     else -> {
-                        Log.d(TAG, "📨 Received message type: $messageType")
+                        // Other message types
                     }
                 }
             } catch (e: Exception) {
-                Log.w(TAG, "Failed to parse message as JSON: ${e.message}")
+                // Failed to parse message
             }
         }
 
         override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
-            // 🔥 CRITICAL DEBUG - Connection failure tracking
-            Log.e("WS_DEBUG", "❌❌❌ onFailure() CALLED ❌❌❌")
-            Log.e("WS_DEBUG", "❌ Error: ${t.javaClass.simpleName}: ${t.message}")
-            Log.e("WS_DEBUG", "❌ Response code: ${response?.code}")
-
             // Cancel timeout
             sessionAckTimeoutRunnable?.let { handler.removeCallbacks(it) }
 
@@ -512,13 +375,6 @@ class WebSocketManager {
             sessionStarted = false
             telemetryEnabled = false
             readyForTelemetry = false
-            Log.e(TAG, "❌❌❌ WEBSOCKET CONNECTION FAILED ❌❌❌")
-            Log.e(TAG, "❌ Error: ${t.message}", t)
-            Log.e(TAG, "❌ Response: ${response?.toString()}")
-            Log.e(TAG, "❌ Response code: ${response?.code}")
-            Log.e(TAG, "❌ Error type: ${t.javaClass.simpleName}")
-            Log.e(TAG, "❌ URL attempted: $wsUrl")
-            Log.e(TAG, "❌ Check if Django server is running: daphne -b 0.0.0.0 -p 8000 pavaman_gcs.asgi:application")
             t.printStackTrace()
 
             // 🔥 Trigger auto-reconnection on failure
@@ -526,36 +382,15 @@ class WebSocketManager {
         }
 
         override fun onClosing(webSocket: WebSocket, code: Int, reason: String) {
-            // 🔥 CRITICAL DEBUG - Track when connection is closing
-            Log.e("WS_DEBUG", "⚠️⚠️⚠️ onClosing() CALLED ⚠️⚠️⚠️")
-            Log.e("WS_DEBUG", "⚠️ Close code: $code, reason: $reason")
-            Log.e("WS_DEBUG", "⚠️ sessionStarted=$sessionStarted, readyForTelemetry=$readyForTelemetry, missionId=$missionId")
-
             // Cancel timeout
             sessionAckTimeoutRunnable?.let { handler.removeCallbacks(it) }
-
-            // 🔥 Detect if connection closed immediately after session_ack (backend error!)
-            if (sessionAckReceivedTime > 0 && missionId == null) {
-                val timeSinceAck = System.currentTimeMillis() - sessionAckReceivedTime
-                if (timeSinceAck < 500) {
-                    Log.e(TAG, "🔴🔴🔴 CONNECTION CLOSED ${timeSinceAck}ms AFTER session_ack! 🔴🔴🔴")
-                    Log.e(TAG, "🔴 This means the BACKEND failed during database operations!")
-                    Log.e(TAG, "🔴 Check Django/Daphne logs for: Admin.DoesNotExist or Pilot.DoesNotExist")
-                    Log.e(TAG, "🔴 Verify Admin(id=$adminId) and Pilot(id=$pilotId) exist in database!")
-                }
-            }
 
             // 🔥 Mark as disconnected to prevent further sends, but keep session state for reconnect
             isConnected = false
             readyForTelemetry = false
-            Log.d(TAG, "WebSocket closing: $code / $reason")
         }
 
         override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
-            // 🔥 CRITICAL DEBUG - Track when connection is fully closed
-            Log.e("WS_DEBUG", "🔴🔴🔴 onClosed() CALLED 🔴🔴🔴")
-            Log.e("WS_DEBUG", "🔴 Close code: $code, reason: $reason")
-
             // Cancel timeout
             sessionAckTimeoutRunnable?.let { handler.removeCallbacks(it) }
 
@@ -563,11 +398,8 @@ class WebSocketManager {
             sessionStarted = false
             telemetryEnabled = false
             readyForTelemetry = false
-            Log.d(TAG, "WebSocket closed: $code / $reason")
 
             // 🔥 Auto-reconnect unless this was a deliberate disconnect (code 1000 from client)
-            // Code 1000 from server = unexpected close, should reconnect
-            // Code 1000 from disconnect() = deliberate, don't reconnect
             if (shouldReconnect) {
                 scheduleReconnect("server_closed_$code")
             }
@@ -576,11 +408,9 @@ class WebSocketManager {
 
     /**
      * Send drone UID update to backend when real UID becomes available after session_start
-     * This handles the timing issue where session_start is sent before AUTOPILOT_VERSION is received
      */
     private fun sendDroneUidUpdate(realDroneUid: String) {
         if (!isConnected || !::webSocket.isInitialized) {
-            Log.w(TAG, "⚠️ Cannot send drone_uid_update - not connected")
             return
         }
 
@@ -590,31 +420,25 @@ class WebSocketManager {
                 put("mission_id", missionId)
                 put("drone_uid", realDroneUid)
             }
-            val sent = webSocket.send(msg.toString())
-            Log.i(TAG, "📤🔥 Sent drone_uid_update: mission=$missionId, droneUid=$realDroneUid (sent=$sent)")
-            Log.i(TAG, "✅ Backend should now update vehicle_id from SITL_DRONE_001 to real UID: $realDroneUid")
+            webSocket.send(msg.toString())
         } catch (e: Exception) {
-            Log.e(TAG, "❌ Failed to send drone_uid_update: ${e.message}", e)
+            // Ignore
         }
     }
 
     fun sendTelemetry() {
         // ✅ STEP 4 — Final Telemetry Gate (DO NOT REMOVE)
-        // HARD GUARD - Check connection and session acknowledgment before sending
         if (!isConnected || !readyForTelemetry) {
-            Log.e(TAG, "⛔ Telemetry blocked — WebSocket not ready (connected=$isConnected, readyForTelemetry=$readyForTelemetry)")
             return
         }
 
         // Additional safety check for WebSocket initialization
         if (!sessionStarted || !::webSocket.isInitialized) {
-            Log.e(TAG, "⛔ Telemetry blocked — Session not started or WebSocket not initialized")
             return
         }
 
         // ✅ Check if we have mission_id from backend
         if (missionId == null) {
-            Log.e(TAG, "⛔ Telemetry blocked — No mission_id received from backend yet")
             return
         }
 
@@ -627,7 +451,6 @@ class WebSocketManager {
                 put("pilot_id", pilotId)
                 put("admin_id", adminId)
                 put("mission_id", missionId)
-                // 🔥 REAL DRONE ID (with SITL fallback)
                 put("drone_uid", resolveDroneUid())
 
                 put("position", JSONObject().apply {
@@ -669,13 +492,8 @@ class WebSocketManager {
             }
 
             webSocket.send(telemetry.toString())
-            Log.d(TAG, "📤 Sent telemetry: mission=$missionId, pilot=$pilotId, admin=$adminId, " +
-                    "lat=$lat, lng=$lng, alt=$alt, speed=$speed, " +
-                    "voltage=$voltage, current=$current, battery=$batteryRemaining%, " +
-                    "mode=$flightMode, armed=$isArmed, spray=${if(sprayOn) "ON" else "OFF"}, " +
-                    "rate=${sprayRate}L/min, tank=${tankLevel}%")
         } catch (e: Exception) {
-            Log.e(TAG, "Error sending telemetry: ${e.message}", e)
+            // Ignore
         }
     }
 
@@ -686,12 +504,10 @@ class WebSocketManager {
     fun sendMissionStatus(status: Int) {
         // Safety checks
         if (!isConnected || missionId == null) {
-            Log.e(TAG, "⛔ Cannot send mission status — socket not ready (connected=$isConnected, missionId=$missionId)")
             return
         }
 
         if (!::webSocket.isInitialized) {
-            Log.e(TAG, "⛔ Cannot send mission status — webSocket not initialized")
             return
         }
 
@@ -700,41 +516,25 @@ class WebSocketManager {
                 put("type", "mission_status")
                 put("mission_id", missionId)
                 put("status", status)
-                // 🔥 REAL DRONE ID (with SITL fallback)
                 put("drone_uid", resolveDroneUid())
             }
 
             webSocket.send(msg.toString())
-            val statusName = when (status) {
-                MISSION_STATUS_CREATED -> "CREATED"
-                MISSION_STATUS_STARTED -> "STARTED"
-                MISSION_STATUS_PAUSED -> "PAUSED"
-                MISSION_STATUS_RESUMED -> "RESUMED"
-                MISSION_STATUS_ENDED -> "ENDED"
-                else -> "UNKNOWN($status)"
-            }
-            Log.d(TAG, "📤 Sent mission status: $statusName (status=$status, mission_id=$missionId)")
-
         } catch (e: Exception) {
-            Log.e(TAG, "❌ Failed to send mission status", e)
+            // Ignore
         }
     }
 
     /**
      * Send mission event to backend
-     * @param eventType Type of event (e.g., "ARM", "DISARM", "TAKEOFF", "LAND", "RTL", etc.)
-     * @param eventStatus Event severity/status (e.g., "INFO", "WARNING", "ERROR", "CRITICAL")
-     * @param description Human-readable description of the event
      */
     fun sendMissionEvent(eventType: String, eventStatus: String, description: String) {
         // Safety checks
         if (!isConnected) {
-            Log.e(TAG, "⛔ Cannot send mission event — socket not connected")
             return
         }
 
         if (!::webSocket.isInitialized) {
-            Log.e(TAG, "⛔ Cannot send mission event — webSocket not initialized")
             return
         }
 
@@ -744,9 +544,7 @@ class WebSocketManager {
                 put("event_type", eventType)
                 put("event_status", eventStatus)
                 put("description", description)
-                // 🔥 REAL DRONE ID (with SITL fallback)
                 put("drone_uid", resolveDroneUid())
-                // Include mission_id if available
                 missionId?.let { put("mission_id", it) }
             }
 
@@ -755,30 +553,14 @@ class WebSocketManager {
             // 🔥 Auto-increment alerts count for WARNING/ERROR/CRITICAL events
             if (eventStatus in listOf("WARNING", "ERROR", "CRITICAL")) {
                 missionAlertsCount++
-                Log.d(TAG, "📊 Alert count incremented: $missionAlertsCount (event: $eventType)")
             }
-
-            Log.d(TAG, "📤 Sent mission event: type=$eventType, status=$eventStatus, desc=$description, drone_uid=${resolveDroneUid()}")
-
         } catch (e: Exception) {
-            Log.e(TAG, "❌ Failed to send mission event", e)
+            // Ignore
         }
     }
 
     /**
      * Send mission summary to backend when mission ends
-     * @param totalAcres Total area covered in acres
-     * @param totalSprayUsed Total spray/liquid used (liters)
-     * @param flyingTimeMinutes Total flying time in minutes
-     * @param averageSpeed Average speed during mission (m/s)
-     * @param batteryStart Battery percentage at mission start
-     * @param batteryEnd Battery percentage at mission end
-     * @param alertsCount Number of alerts/warnings during mission
-     * @param status Mission completion status ("COMPLETED" or "FAILED")
-     * @param projectName Project name entered by user
-     * @param plotName Plot name entered by user
-     * @param cropType Crop type entered by user (optional)
-     * @param totalSprayedAcres Total acres sprayed (distance with spray ON)
      */
     fun sendMissionSummary(
         totalAcres: Double,
@@ -788,19 +570,17 @@ class WebSocketManager {
         batteryStart: Int,
         batteryEnd: Int,
         alertsCount: Int,
-        status: String,  // "COMPLETED" or "FAILED"
+        status: String,
         projectName: String = "",
         plotName: String = "",
         cropType: String = "",
         totalSprayedAcres: Double = 0.0
     ) {
         if (!isConnected || missionId == null) {
-            Log.e(TAG, "⛔ Cannot send mission summary — socket not ready (connected=$isConnected, missionId=$missionId)")
             return
         }
 
         if (!::webSocket.isInitialized) {
-            Log.e(TAG, "⛔ Cannot send mission summary — webSocket not initialized")
             return
         }
 
@@ -820,9 +600,8 @@ class WebSocketManager {
                 put("battery_end", batteryEnd)
 
                 put("alerts_count", alertsCount)
-                put("status", status)  // COMPLETED / FAILED
+                put("status", status)
 
-                // Additional fields from completion dialog
                 put("project_name", projectName)
                 put("plot_name", plotName)
                 put("crop_type", cropType)
@@ -830,12 +609,8 @@ class WebSocketManager {
             }
 
             webSocket.send(msg.toString())
-            Log.d(TAG, "📤 Mission summary sent: acres=$totalAcres, spray=$totalSprayUsed, time=$flyingTimeMinutes min, " +
-                    "speed=$averageSpeed, battery=$batteryStart%→$batteryEnd%, alerts=$alertsCount, status=$status, " +
-                    "project=$projectName, plot=$plotName, crop=$cropType, sprayedAcres=$totalSprayedAcres")
-
         } catch (e: Exception) {
-            Log.e(TAG, "❌ Failed to send mission summary", e)
+            // Ignore
         }
     }
 
@@ -844,12 +619,10 @@ class WebSocketManager {
      */
     private fun scheduleReconnect(reason: String) {
         if (!shouldReconnect) {
-            Log.d(TAG, "🔌 Auto-reconnect disabled, skipping reconnection")
             return
         }
 
         if (reconnectAttempts >= maxReconnectAttempts) {
-            Log.e(TAG, "❌ Max reconnection attempts ($maxReconnectAttempts) reached. Giving up.")
             shouldReconnect = false
             return
         }
@@ -857,14 +630,11 @@ class WebSocketManager {
         reconnectAttempts++
         val delay = reconnectDelayMs * reconnectAttempts  // Exponential backoff
 
-        Log.w(TAG, "🔄 Scheduling reconnection attempt $reconnectAttempts/$maxReconnectAttempts in ${delay}ms (reason: $reason)")
-
         // Cancel any existing reconnect runnable
         reconnectRunnable?.let { handler.removeCallbacks(it) }
 
         reconnectRunnable = Runnable {
             if (shouldReconnect && !isConnected) {
-                Log.i(TAG, "🔄 Attempting reconnection ($reconnectAttempts/$maxReconnectAttempts)...")
                 isReconnecting = true
                 connect()
             }
@@ -887,9 +657,6 @@ class WebSocketManager {
 
             if (isConnected && ::webSocket.isInitialized) {
                 webSocket.close(1000, "Mission ended - Client disconnect")
-                Log.i(TAG, "🔌 WebSocket disconnecting - Mission ended")
-            } else {
-                Log.d(TAG, "🔌 WebSocket already disconnected")
             }
 
             // Reset state
@@ -899,13 +666,12 @@ class WebSocketManager {
             readyForTelemetry = false
             missionId = null
         } catch (e: Exception) {
-            Log.e(TAG, "❌ Error during WebSocket disconnect: ${e.message}", e)
+            // Ignore
         }
     }
 
     /**
      * Check if WebSocket is ready to send telemetry
-     * @return true if connected, session acknowledged, and mission created
      */
     fun isReadyForTelemetry(): Boolean {
         return isConnected && readyForTelemetry && sessionStarted && missionId != null
@@ -915,12 +681,11 @@ class WebSocketManager {
      * Force reset connection state and attempt fresh connection
      */
     fun reconnect() {
-        Log.i(TAG, "🔄 Force reconnecting WebSocket...")
         if (::webSocket.isInitialized) {
             try {
                 webSocket.cancel()
             } catch (e: Exception) {
-                Log.w(TAG, "Failed to cancel existing WebSocket", e)
+                // Ignore
             }
         }
         isConnected = false
@@ -934,17 +699,13 @@ class WebSocketManager {
 
     /**
      * 🔥 Start delayed monitoring for drone UID updates
-     * Checks for real drone ID updates in the first 10 seconds after connection
-     * This handles cases where OpenDroneID or AUTOPILOT_VERSION arrive after WebSocket connection
      */
     private fun startDelayedDroneUidMonitoring() {
         if (missionId == null) {
-            Log.w(TAG, "⚠️ Cannot start drone UID monitoring: no mission ID")
             return
         }
 
         val initialDroneUid = droneUid.trim()
-        Log.i(TAG, "🔍 Starting delayed drone UID monitoring (current: '$initialDroneUid')")
 
         // Check after 2, 5, and 10 seconds for drone UID updates
         val checkDelays = listOf(2000L, 5000L, 10000L)
@@ -959,23 +720,10 @@ class WebSocketManager {
                         currentDroneUid != "SITL_DRONE_001" &&
                         currentDroneUid != initialDroneUid) {
 
-                        Log.i(TAG, "🔥 DELAYED DRONE UID UPDATE DETECTED!")
-                        Log.i(TAG, "   Initial: '$initialDroneUid'")
-                        Log.i(TAG, "   Current: '$currentDroneUid'")
-
                         try {
                             sendDroneUidUpdate(currentDroneUid)
-                            Log.i(TAG, "✅ Sent delayed drone_uid_update: '$currentDroneUid'")
                         } catch (e: Exception) {
-                            Log.e(TAG, "❌ Failed to send delayed drone_uid_update", e)
-                        }
-                    } else if (delay == 10000L) {
-                        // Final check - log the status
-                        if (currentDroneUid == "SITL_DRONE_001" || currentDroneUid.isBlank()) {
-                            Log.w(TAG, "⚠️ After 10s monitoring: still using fallback drone UID '$currentDroneUid'")
-                            Log.w(TAG, "   This may indicate OpenDroneID/AUTOPILOT_VERSION not received from drone")
-                        } else {
-                            Log.i(TAG, "✅ Drone UID monitoring complete: using '$currentDroneUid'")
+                            // Ignore
                         }
                     }
                 }

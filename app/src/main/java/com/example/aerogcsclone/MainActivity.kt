@@ -172,16 +172,6 @@ class MainActivity : ComponentActivity() {
                         telemetryState.droneUid?.let { uid ->
                             if (wsManager.droneUid != uid) {
                                 wsManager.droneUid = uid
-<<<<<<< HEAD
-=======
-                                android.util.Log.i("WebSocketTelemetry", "✅ DroneUID received from FC: $uid")
-                                android.util.Log.i("WebSocketTelemetry", "🔥 Real drone ID will be used for all backend communication")
-                            }
-                        } ?: run {
-                            // Log if we haven't received drone UID yet
-                            if (wsManager.droneUid.isBlank() && BuildConfig.DEBUG) {
-                                android.util.Log.d("WebSocketTelemetry", "⏳ Still waiting for AUTOPILOT_VERSION from FC...")
->>>>>>> 58ec4c11b62a7ededf1dab8bab182d8a55715f91
                             }
                         }
 
