@@ -38,8 +38,8 @@ android {
 
             // API Configuration for DEBUG builds
             // Uses local.properties values or defaults for development
-            val debugApiUrl = localProperties.getProperty("DEBUG_API_URL") ?: "http://10.0.2.2:8000"
-            val debugServerIp = localProperties.getProperty("DEBUG_SERVER_IP") ?: "10.0.2.2"
+            val debugApiUrl = localProperties.getProperty("DEBUG_API_URL") ?: "http://65.0.76.31:8000"
+            val debugServerIp = localProperties.getProperty("DEBUG_SERVER_IP") ?: "65.0.76.31"
             val debugServerPort = localProperties.getProperty("DEBUG_SERVER_PORT") ?: "8000"
 
             buildConfigField("String", "API_BASE_URL", "\"$debugApiUrl\"")

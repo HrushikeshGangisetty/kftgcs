@@ -1,13 +1,17 @@
 package com.example.aerogcsclone.manager
 
 import android.content.Context
+import android.util.Log
+import com.example.aerogcsclone.GCSApplication
 import com.example.aerogcsclone.Telemetry.TelemetryState
+import com.example.aerogcsclone.api.SessionManager
 import com.example.aerogcsclone.database.tlog.EventType
 import com.example.aerogcsclone.database.tlog.EventSeverity
 import com.example.aerogcsclone.service.FlightLoggingService
 import com.example.aerogcsclone.telemetry.Notification
 import com.example.aerogcsclone.telemetry.NotificationType
 import com.example.aerogcsclone.telemetry.SharedViewModel
+import com.example.aerogcsclone.telemetry.WebSocketManager
 import com.example.aerogcsclone.viewmodel.TlogViewModel
 import kotlinx.coroutines.*
 import kotlin.math.sqrt
@@ -56,12 +60,19 @@ class UnifiedFlightTracker(
     private var totalDistanceMeters: Float = 0f
     private var totalSprayedDistanceMeters: Float = 0f  // Distance traveled while pump ON and flow > 0
 
+    // Track if drone has actually taken off (prevents false landing detection on arm)
+    private var hasTakenOff: Boolean = false
+    private val MIN_TAKEOFF_ALTITUDE = 1.5f  // Must reach this altitude to be considered "taken off"
+
     // Telemetry logging
     private var loggingService: FlightLoggingService? = null
 
     // Previous state tracking
     private var previousArmed = false
     private var previousMode: String? = null
+
+    // Store pending stop reason to avoid re-evaluation losing the disarm detection
+    private var pendingStopReason: String? = null
 
     // Constants
     private val TAKEOFF_ALTITUDE_THRESHOLD = 1.0f  // meters above ground
@@ -134,8 +145,14 @@ class UnifiedFlightTracker(
                 startConditionMetAt = now
             }
 
+            // Use shorter debounce for MANUAL mode (immediate start on arm)
+            val debounceMs = when (detectedMode) {
+                MissionMode.MANUAL -> 500L   // Quick start for manual mode
+                MissionMode.AUTO -> START_DEBOUNCE_MS  // Standard debounce for auto mode
+            }
+
             // Check if debounce period passed
-            if (now - startConditionMetAt >= START_DEBOUNCE_MS) {
+            if (now - startConditionMetAt >= debounceMs) {
                 missionMode = detectedMode
                 currentState = FlightState.STARTING
             }
@@ -165,7 +182,7 @@ class UnifiedFlightTracker(
     private fun detectMissionMode(flightMode: String?): MissionMode? {
         return when (flightMode?.lowercase()) {
             "auto" -> MissionMode.AUTO
-            "stabilize", "alt hold", "loiter", "pos hold", "guided" -> MissionMode.MANUAL
+            "stabilize", "althold", "loiter", "poshold", "guided" -> MissionMode.MANUAL
             else -> null  // Unknown or invalid mode
         }
     }
@@ -182,9 +199,9 @@ class UnifiedFlightTracker(
                 (altitude > groundLevelAltitude + TAKEOFF_ALTITUDE_THRESHOLD || speed > MIN_SPEED_THRESHOLD)
             }
             MissionMode.MANUAL -> {
-                // MANUAL mode: armed + altitude rising OR moving
-                telemetry.armed &&
-                (altitude > groundLevelAltitude + TAKEOFF_ALTITUDE_THRESHOLD || speed > MIN_SPEED_THRESHOLD)
+                // MANUAL mode: start logging immediately when armed
+                // This aligns with user expectation that telemetry logging starts as soon as drone is armed
+                telemetry.armed
             }
         }
     }
@@ -213,6 +230,13 @@ class UnifiedFlightTracker(
         totalDistanceMeters = 0f
         lastLat = telemetry.latitude
         lastLon = telemetry.longitude
+
+        // 🔥 Connect WebSocket for MANUAL mode flights
+        // For AUTO mode, WebSocket is connected in SharedViewModel.startMission()
+        // For MANUAL mode, we connect here when the drone is armed
+        if (missionMode == MissionMode.MANUAL) {
+            connectWebSocketForManualFlight()
+        }
 
         // Start database logging
         try {
@@ -245,9 +269,171 @@ class UnifiedFlightTracker(
         )
     }
 
+    /**
+     * Connect WebSocket for MANUAL mode flights
+     * This ensures telemetry is sent to backend even for manual flights
+     *
+     * Note: Only connects WebSocket if user selected MANUAL mode in UI
+     * For AUTOMATIC mode users, WebSocket is connected via SharedViewModel.startMission()
+     */
+    private suspend fun connectWebSocketForManualFlight() {
+        try {
+            // Check if user selected MANUAL mode in the UI
+            // If user selected AUTOMATIC, they will use startMission() which handles WebSocket
+            val userSelectedManual = sharedViewModel.userSelectedFlightMode.value == SharedViewModel.UserFlightMode.MANUAL
+            if (!userSelectedManual) {
+                Log.i("UnifiedFlightTracker", "ℹ️ User selected AUTOMATIC mode - skipping manual WebSocket connection")
+                Log.i("UnifiedFlightTracker", "ℹ️ WebSocket will be connected via startMission() for AUTO flights")
+                return
+            }
+
+            val wsManager = WebSocketManager.getInstance()
+            if (!wsManager.isConnected) {
+                Log.i("UnifiedFlightTracker", "🔌 Opening WebSocket connection for MANUAL flight...")
+
+                // Get pilotId and adminId from SessionManager
+                GCSApplication.getInstance()?.let { app ->
+                    val pilotId = SessionManager.getPilotId(app)
+                    val adminId = SessionManager.getAdminId(app)
+                    wsManager.pilotId = pilotId
+                    wsManager.adminId = adminId
+                    Log.i("UnifiedFlightTracker", "📋 Updated WebSocket credentials: pilotId=$pilotId, adminId=$adminId")
+
+                    // Warn if pilot is not logged in
+                    if (pilotId <= 0) {
+                        Log.e("UnifiedFlightTracker", "⚠️ WARNING: pilotId=$pilotId - User may not be logged in! Telemetry will not be saved.")
+                        return
+                    }
+                }
+
+                // Get plot name from SharedViewModel if available
+                val plotName = sharedViewModel.currentPlotName.value
+                wsManager.selectedPlotName = plotName
+                Log.i("UnifiedFlightTracker", "📋 Plot name set for WebSocket: $plotName")
+
+                // Set flight mode to MANUAL (this is from UnifiedFlightTracker detection)
+                wsManager.selectedFlightMode = "MANUAL"
+                Log.i("UnifiedFlightTracker", "📋 Flight mode set for WebSocket: MANUAL")
+
+                // Set mission type from SharedViewModel if available, otherwise NONE
+                val missionType = sharedViewModel.selectedMissionType.value.name
+                wsManager.selectedMissionType = missionType
+                Log.i("UnifiedFlightTracker", "📋 Mission type set for WebSocket: $missionType")
+
+                // Set grid setup source from SharedViewModel if available, otherwise NONE
+                val gridSource = sharedViewModel.gridSetupSource.value.name
+                wsManager.gridSetupSource = gridSource
+                Log.i("UnifiedFlightTracker", "📋 Grid setup source set for WebSocket: $gridSource")
+
+                // Connect WebSocket
+                wsManager.connect()
+
+                // Wait for WebSocket to connect and receive session_ack
+                var waitTime = 0
+                while (!wsManager.isConnected && waitTime < 5000) {
+                    delay(100)
+                    waitTime += 100
+                }
+
+                // Additional wait for session_ack and mission_created
+                if (wsManager.isConnected) {
+                    delay(500) // Give time for session_ack and mission_created
+                    Log.i("UnifiedFlightTracker", "✅ WebSocket ready after ${waitTime}ms")
+
+                    // Send mission status STARTED
+                    if (wsManager.missionId != null) {
+                        wsManager.sendMissionStatus(WebSocketManager.MISSION_STATUS_STARTED)
+                        wsManager.sendMissionEvent(
+                            eventType = "MANUAL_FLIGHT_STARTED",
+                            eventStatus = "INFO",
+                            description = "Manual flight started"
+                        )
+                        Log.i("UnifiedFlightTracker", "✅ Mission status STARTED sent to backend for manual flight")
+                    } else {
+                        Log.w("UnifiedFlightTracker", "⚠️ Skipping mission status - missionId not yet received")
+                    }
+                } else {
+                    Log.w("UnifiedFlightTracker", "⚠️ WebSocket connection timeout for manual flight")
+                }
+            } else {
+                Log.i("UnifiedFlightTracker", "✅ WebSocket already connected for manual flight")
+            }
+        } catch (e: Exception) {
+            Log.e("UnifiedFlightTracker", "❌ Failed to connect WebSocket for manual flight: ${e.message}", e)
+        }
+    }
+
+    /**
+     * Send mission end status for MANUAL mode flights
+     * This sends mission summary and disconnects WebSocket
+     */
+    private fun sendMissionEndForManualFlight(
+        reason: String,
+        flightTime: Long,
+        totalDistance: Float,
+        sprayedDistance: Float,
+        consumedLitres: Float?
+    ) {
+        try {
+            val wsManager = WebSocketManager.getInstance()
+            if (wsManager.isConnected && wsManager.missionId != null) {
+                Log.i("UnifiedFlightTracker", "📤 Sending mission end status for MANUAL flight")
+
+                // Send mission status ENDED
+                wsManager.sendMissionStatus(WebSocketManager.MISSION_STATUS_ENDED)
+                wsManager.sendMissionEvent(
+                    eventType = "MANUAL_FLIGHT_ENDED",
+                    eventStatus = "INFO",
+                    description = "Manual flight ended - $reason"
+                )
+
+                // Convert distance to acres (approximate: 1 acre = 4047 m²)
+                // Using distance as rough area approximation (actual area calculation would need more data)
+                val totalAcres = totalDistance / 4047.0
+                val sprayedAcres = sprayedDistance / 4047.0
+
+                // Send mission summary
+                val flyingTimeMinutes = flightTime / 60.0
+                val batteryEnd = sharedViewModel.telemetryState.value.batteryPercent ?: 0
+
+                // Get plot name, project name, and crop type from SharedViewModel
+                val plotName = sharedViewModel.currentPlotName.value
+                val projectName = sharedViewModel.currentProjectName.value
+                val cropType = sharedViewModel.currentCropType.value
+
+                wsManager.sendMissionSummary(
+                    totalAcres = totalAcres,
+                    totalSprayUsed = consumedLitres?.toDouble() ?: 0.0,
+                    flyingTimeMinutes = flyingTimeMinutes,
+                    averageSpeed = 0.0,
+                    batteryStart = wsManager.missionBatteryStart,
+                    batteryEnd = batteryEnd,
+                    alertsCount = wsManager.missionAlertsCount,
+                    status = "COMPLETED",
+                    projectName = projectName,
+                    plotName = plotName,
+                    cropType = cropType
+                )
+
+                Log.i("UnifiedFlightTracker", "✅ Mission summary sent for manual flight (plot=$plotName, project=$projectName)")
+            } else {
+                Log.w("UnifiedFlightTracker", "⚠️ Cannot send mission end - WebSocket not connected or no missionId")
+            }
+        } catch (e: Exception) {
+            Log.e("UnifiedFlightTracker", "❌ Failed to send mission end for manual flight: ${e.message}", e)
+        }
+    }
+
     private suspend fun updateFlightData(telemetry: TelemetryState) {
         // Update elapsed time
         val elapsedSeconds = (System.currentTimeMillis() - flightStartTime) / 1000L
+
+        // Track takeoff - once altitude exceeds MIN_TAKEOFF_ALTITUDE above ground, we've taken off
+        val altitude = telemetry.altitudeRelative ?: 0f
+        if (!hasTakenOff && altitude > groundLevelAltitude + MIN_TAKEOFF_ALTITUDE) {
+            hasTakenOff = true
+            android.util.Log.i("UnifiedFlightTracker", "✈️ Takeoff confirmed at altitude ${altitude}m (ground level: ${groundLevelAltitude}m)")
+        }
 
         // Update distance (if GPS is valid)
         val lat = telemetry.latitude
@@ -259,11 +445,16 @@ class UnifiedFlightTracker(
             if (distance > 0.1f && distance < 100f) {  // Sanity check: 0.1m to 100m per update
                 totalDistanceMeters += distance
 
-                // Track sprayed distance - only when pump is ON and flow rate > 0
-                val isPumpOn = telemetry.sprayTelemetry.sprayEnabled
+                // Track sprayed distance - when spray is active (RC7 ON or flow detected)
+                // Use sprayActive which includes both RC7 and flow detection for AUTO missions
+                val isSprayActive = telemetry.sprayTelemetry.sprayActive
                 val flowRate = telemetry.sprayTelemetry.flowRateLiterPerMin ?: 0f
-                if (isPumpOn && flowRate > 0f) {
+                if (isSprayActive || flowRate > 0f) {
                     totalSprayedDistanceMeters += distance
+                    // Log every 50 meters of sprayed distance
+                    if (totalSprayedDistanceMeters.toInt() % 50 == 0) {
+                        android.util.Log.d("UnifiedFlightTracker", "🔄 Sprayed distance: ${totalSprayedDistanceMeters}m (isSprayActive=$isSprayActive, flowRate=$flowRate)")
+                    }
                 }
             }
             lastLat = lat
@@ -288,14 +479,26 @@ class UnifiedFlightTracker(
             val now = System.currentTimeMillis()
             if (stopConditionMetAt == 0L) {
                 stopConditionMetAt = now
+                // Store the stop reason so it doesn't get lost when previousArmed is updated
+                pendingStopReason = stopReason
             }
 
             // Check if debounce period passed
             if (now - stopConditionMetAt >= STOP_DEBOUNCE_MS) {
                 currentState = FlightState.STOPPING
             }
+        } else if (pendingStopReason != null && stopConditionMetAt > 0L) {
+            // We have a pending stop reason but current evaluation returned null
+            // (This happens when previousArmed gets updated after detecting disarm)
+            // Continue checking debounce with the stored reason
+            val now = System.currentTimeMillis()
+            if (now - stopConditionMetAt >= STOP_DEBOUNCE_MS) {
+                currentState = FlightState.STOPPING
+            }
         } else {
+            // No stop reason and no pending reason - reset everything
             stopConditionMetAt = 0
+            pendingStopReason = null
         }
     }
 
@@ -315,24 +518,29 @@ class UnifiedFlightTracker(
             }
         }
 
-        // 3. Common: disarmed + low speed
+        // 3. Common: disarmed (primary stop condition)
+        // This should trigger AFTER drone has been armed and then disarmed
         val speed = telemetry.groundspeed ?: 0f
-        if (!telemetry.armed && speed < MIN_SPEED_THRESHOLD) {
-            return "Disarmed with low speed"
+        if (!telemetry.armed && previousArmed) {
+            // Drone just disarmed - this is a definitive stop condition
+            return "Disarmed"
         }
 
         // 4. Common: landed (altitude near ground + low speed)
+        // IMPORTANT: Only check for landing if drone has actually taken off!
+        // This prevents false landing detection immediately after arming on the ground.
         val altitude = telemetry.altitudeRelative ?: 0f
         val landingThreshold = groundLevelAltitude + LANDING_ALTITUDE_THRESHOLD
-        if (altitude <= landingThreshold && speed < MIN_SPEED_THRESHOLD) {
+        if (hasTakenOff && altitude <= landingThreshold && speed < MIN_SPEED_THRESHOLD) {
             return "Landed (altitude: ${altitude}m ≤ ${landingThreshold}m, speed: ${speed}m/s)"
         }
 
         // 5. Failsafe modes (RTL, Land)
+        // Only trigger stop after landing is confirmed
         if (telemetry.mode?.equals("RTL", ignoreCase = true) == true ||
             telemetry.mode?.equals("Land", ignoreCase = true) == true) {
-            // Wait for actual landing confirmation
-            if (!telemetry.armed || altitude <= landingThreshold) {
+            // Wait for actual landing confirmation (disarmed or very low altitude after takeoff)
+            if (!telemetry.armed || (hasTakenOff && altitude <= landingThreshold)) {
                 return "Failsafe landing completed (${telemetry.mode})"
             }
         }
@@ -344,17 +552,22 @@ class UnifiedFlightTracker(
     }
 
     private suspend fun checkStopDebounce(telemetry: TelemetryState) {
-        // Verify conditions still met
-        val stopReason = evaluateStopConditions(telemetry)
+        // Use the stored stop reason from when we entered STOPPING state
+        // This is critical because previousArmed gets updated every cycle,
+        // so re-evaluating would fail for disarm detection
+        val stopReason = pendingStopReason ?: evaluateStopConditions(telemetry)
 
         if (stopReason == null) {
+            // Conditions no longer met and no pending reason - go back to ACTIVE
             currentState = FlightState.ACTIVE
             stopConditionMetAt = 0
+            pendingStopReason = null
             return
         }
 
-        // Transition to FINALIZING
+        // Transition to FINALIZING with the stored reason
         stopFlight(stopReason)
+        pendingStopReason = null
     }
 
     private suspend fun stopFlight(reason: String) {
@@ -369,6 +582,12 @@ class UnifiedFlightTracker(
 
         // Capture consumed litres from spray telemetry
         val finalConsumedLitres = sharedViewModel.telemetryState.value.sprayTelemetry.consumedLiters
+
+        // 🔥 Send mission end status for MANUAL flights
+        // For AUTO missions, this is handled in TelemetryRepository or SharedViewModel
+        if (missionMode == MissionMode.MANUAL) {
+            sendMissionEndForManualFlight(reason, finalTime, finalDistance, finalSprayedDistance, finalConsumedLitres)
+        }
 
         // Stop telemetry logging
         loggingService?.stopLogging()
@@ -400,6 +619,11 @@ class UnifiedFlightTracker(
 
         // Show mission completion dialog with time, acres (converted from distance), sprayed acres, and consumed litres
         val consumedLitresStr = finalConsumedLitres?.let { "%.2f L".format(it) } ?: "N/A"
+
+        // Debug logging for sprayed acres calculation
+        android.util.Log.d("UnifiedFlightTracker", "🔥 FINAL VALUES: totalSprayedDistanceMeters=$totalSprayedDistanceMeters, finalSprayedDistance=$finalSprayedDistance")
+        android.util.Log.d("UnifiedFlightTracker", "🔥 formatAcres(finalSprayedDistance)=${formatAcres(finalSprayedDistance)}")
+
         sharedViewModel.showMissionCompletionDialog(
             totalTime = formatTime(finalTime),
             totalAcres = formatAcres(finalDistance),
@@ -430,12 +654,14 @@ class UnifiedFlightTracker(
         missionMode = null
         startConditionMetAt = 0
         stopConditionMetAt = 0
+        pendingStopReason = null
         flightStartTime = 0
         groundLevelAltitude = 0f
         totalDistanceMeters = 0f
         totalSprayedDistanceMeters = 0f
         lastLat = null
         lastLon = null
+        hasTakenOff = false  // Reset takeoff tracking
     }
 
     // ==================== EDGE CASES ====================

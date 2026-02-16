@@ -275,6 +275,52 @@ class TelemetryConsumer(AsyncWebsocketConsumer):
             logger.info("Mission event saved")
 
         # ==================================================
+        # DRONE UID UPDATE (when real UID received from FC)
+        # ==================================================
+        elif msg_type == "drone_uid_update":
+            mission = self.session.get("mission")
+            if not mission:
+                print("❌ drone_uid_update before session_start", flush=True)
+                return
+
+            try:
+                new_drone_uid = data.get("drone_uid")
+                if not new_drone_uid:
+                    print("⚠️ drone_uid_update: No drone_uid provided", flush=True)
+                    return
+
+                print(f"🔥 Updating drone UID to: {new_drone_uid}", flush=True)
+
+                # Get or create vehicle with the new real UID
+                admin = self.session["admin"]
+                pilot = self.session["pilot"]
+                old_vehicle = self.session["vehicle"]
+
+                # Check if vehicle with new UID already exists
+                new_vehicle, created = await sync_to_async(Vehicle.objects.get_or_create)(
+                    vehicle_id=new_drone_uid,
+                    defaults={
+                        "vehicle_name": new_drone_uid,
+                        "admin": admin,
+                        "pilot": pilot,
+                    }
+                )
+
+                # Update mission to use the new vehicle
+                mission.vehicle = new_vehicle
+                await sync_to_async(mission.save)()
+
+                # Update session to use new vehicle
+                self.session["vehicle"] = new_vehicle
+
+                print(f"✅ Vehicle ID updated: {old_vehicle.vehicle_id} → {new_drone_uid}", flush=True)
+                logger.info(f"Vehicle ID updated from {old_vehicle.vehicle_id} to {new_drone_uid}")
+
+            except Exception as e:
+                print(f"❌ DRONE_UID_UPDATE ERROR: {e}", flush=True)
+                logger.exception("drone_uid_update failed")
+
+        # ==================================================
         # MISSION SUMMARY (with crop_type, project_name, plot_name)
         # ==================================================
         elif msg_type == "mission_summary":
@@ -298,6 +344,7 @@ class TelemetryConsumer(AsyncWebsocketConsumer):
                         "admin": self.session["admin"],
                         "pilot": self.session["pilot"],
                         "total_acres": data.get("total_acres"),
+                        "total_sprayed_acres": data.get("total_sprayed_acres"),
                         "total_spray_used_liters": data.get("total_spray_used"),
                         "flying_time_sec": data.get("flying_time_minutes", 0) * 60 if data.get("flying_time_minutes") else None,
                         "battery_start": data.get("battery_start"),

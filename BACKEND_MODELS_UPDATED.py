@@ -333,6 +333,7 @@ class MissionSummary(models.Model):
 
     # 🔥 CHANGED: total_distance_meters -> total_acres
     total_acres = models.FloatField(null=True, blank=True, help_text="Total area covered in acres")
+    total_sprayed_acres = models.FloatField(null=True, blank=True, help_text="Total acres sprayed (distance with spray ON)")
     total_spray_used_liters = models.FloatField(null=True, blank=True)
     flying_time_sec = models.FloatField(null=True, blank=True)
 

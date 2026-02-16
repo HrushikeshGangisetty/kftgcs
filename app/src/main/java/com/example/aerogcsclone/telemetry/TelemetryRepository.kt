@@ -1,5 +1,6 @@
 ﻿package com.example.aerogcsclone.telemetry
 
+import android.util.Log
 import com.divpundir.mavlink.adapters.coroutines.asCoroutine
 import com.divpundir.mavlink.adapters.coroutines.tryConnect
 import com.divpundir.mavlink.adapters.coroutines.trySendUnsignedV2
@@ -13,14 +14,26 @@ import com.divpundir.mavlink.definitions.ardupilotmega.MagCalProgress
 import com.divpundir.mavlink.definitions.common.MagCalReport
 import com.example.aerogcsclone.Telemetry.AppScope
 import com.example.aerogcsclone.Telemetry.TelemetryState
+import com.example.aerogcsclone.Telemetry.extractDroneUniqueId
 
 import com.example.aerogcsclone.utils.AppStrings
 import com.example.aerogcsclone.telemetry.connections.MavConnectionProvider
+import com.example.aerogcsclone.fence.FenceAction
+import com.example.aerogcsclone.fence.FenceConfiguration
+import com.example.aerogcsclone.fence.FenceStatus
+import com.example.aerogcsclone.fence.FenceZone
+import com.google.android.gms.maps.model.LatLng
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeout
+import kotlinx.coroutines.TimeoutCancellationException
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlin.coroutines.resume
 import com.divpundir.mavlink.api.MavFrame
 import com.divpundir.mavlink.api.MavMessage
 import kotlinx.coroutines.withTimeoutOrNull
@@ -35,6 +48,7 @@ object MavMode {
     const val GUIDED: UInt = 4u // GUIDED mode for copter takeoff
     const val RTL: UInt = 6u // RTL (Return to Launch) mode
     const val LAND: UInt = 9u // Add LAND mode for explicit landing
+    const val POSHOLD: UInt = 16u // POSHOLD (Position Hold) - holds position precisely like Hover
     const val BRAKE: UInt = 17u // BRAKE mode - immediately stops all horizontal movement
     // Add other modes as needed
 }
@@ -135,7 +149,16 @@ class MavlinkTelemetryRepository(
 
     // Zero flow detection for tank empty (when sprayer is ON but flow is 0)
     private var zeroFlowStartTime: Long? = null
-    private val ZERO_FLOW_THRESHOLD_MS = 1500L // 1.5 seconds of zero flow = tank empty
+    private var pumpTurnedOnTime: Long? = null  // Track when pump was turned ON for initial delay
+    private val ZERO_FLOW_THRESHOLD_MS = 3000L // 3 seconds of zero flow = tank empty (increased for reliability)
+    private val PUMP_STARTUP_DELAY_MS = 2000L  // 2 second delay after pump turns ON before checking flow
+
+    // AUTO mode spray tracking
+    // In AUTO mode, sprayer is controlled by DO_SET_SERVO, DO_SPRAYER, or ArduPilot Sprayer library
+    // We detect spray activity by flow rate > 0 (which means spray command is active)
+    // When flow drops to 0 while spray was active, that indicates tank empty
+    private var autoModeSprayDetected = false  // TRUE when flow > 0 detected during current AUTO mission
+    private var lastPositiveFlowTime: Long? = null  // Timestamp when flow > 0 was last detected
 
     // MAG_CAL_PROGRESS flow for compass calibration progress
     private val _magCalProgress = MutableSharedFlow<MagCalProgress>(replay = 0, extraBufferCapacity = 10)
@@ -152,6 +175,12 @@ class MavlinkTelemetryRepository(
     // PARAM_VALUE flow for parameter reading
     private val _paramValue = MutableSharedFlow<ParamValue>(replay = 0, extraBufferCapacity = 10)
     val paramValue: SharedFlow<ParamValue> = _paramValue.asSharedFlow()
+
+    // ════════════════════════════════════════════════════════════════
+    // GEOFENCE STATUS (ArduPilot Native Fence System)
+    // ════════════════════════════════════════════════════════════════
+    private val _fenceStatus = MutableStateFlow(FenceStatus())
+    val fenceStatus: StateFlow<FenceStatus> = _fenceStatus.asStateFlow()
 
     /**
      * Throttled state update for high-frequency messages (GPS, VFR_HUD, etc.)
@@ -374,6 +403,9 @@ class MavlinkTelemetryRepository(
                             // Request spray telemetry capacity parameters
                             delay(500) // Small delay to let message rates stabilize
                             requestSprayCapacityParameters()
+
+                            // Start monitoring fence status from FC
+                            startFenceMonitoring()
                         }
                     } else if (!state.value.connected) {
                         // FCU was detected before but connection was lost, now it's back
@@ -607,6 +639,32 @@ class MavlinkTelemetryRepository(
                             else -> "%.2f L".format(consumedLiters)
                         }
 
+                        // ═══════════════════════════════════════════════════════════════════
+                        // AUTO MISSION SPRAY DETECTION
+                        // Spray is considered "active" when:
+                        // 1. RC7 is enabled (manual spray via RC), OR
+                        // 2. Flow rate > 0 (spray enabled via DO_SET_SERVO, DO_SPRAYER, or Sprayer library)
+                        // This ensures green spray lines are drawn even when RC7 is OFF during AUTO missions
+                        // ═══════════════════════════════════════════════════════════════════
+                        val rc7SprayEnabled = state.value.sprayTelemetry.sprayEnabled
+                        val hasFlowDetected = flowRateLiterPerMin != null && flowRateLiterPerMin > 0f
+                        val currentMode = state.value.mode
+                        val isInAutoMode = currentMode?.equals("Auto", ignoreCase = true) == true
+
+                        // Track AUTO mode spray activity via flow detection
+                        // When flow > 0 is detected in AUTO mode, we know DO_SET_SERVO/DO_SPRAYER/Sprayer is active
+                        if (hasFlowDetected) {
+                            lastPositiveFlowTime = System.currentTimeMillis()
+                            if (isInAutoMode && !autoModeSprayDetected) {
+                                autoModeSprayDetected = true
+                                Log.d("TankEmpty", "🚁 AUTO mode spray detected via flow sensor - flow rate: ${flowRateLiterPerMin} L/min")
+                            }
+                        }
+
+                        // sprayActive is TRUE when:
+                        // - RC7 is enabled (manual), OR
+                        // - Flow is currently detected (DO_SET_SERVO/DO_SPRAYER/Sprayer active)
+                        val sprayIsActive = rc7SprayEnabled || hasFlowDetected
 
                         _state.update { state ->
                             state.copy(
@@ -616,48 +674,107 @@ class MavlinkTelemetryRepository(
                                     flowCapacityLiters = flowCapacityLiters,
                                     flowRemainingPercent = flowRemainingPercent,
                                     formattedFlowRate = formattedFlowRate,
-                                    formattedConsumed = formattedConsumed
+                                    formattedConsumed = formattedConsumed,
+                                    sprayActive = sprayIsActive  // Set based on RC7 OR flow detection
                                 )
                             )
                         }
 
-                        // â•â•â• FLOW-BASED TANK EMPTY DETECTION â•â•â•
-                        // Tank is considered empty when:
-                        // 1. Sprayer is ON (rc7 enabled)
-                        // 2. Flow rate is 0 for 1.5+ seconds
-                        // 3. BATT2 is properly configured
-                        val currentSprayEnabledForEmpty = state.value.sprayTelemetry.sprayEnabled
+                        // ╔══════════════════════════════════════════════════════════════════╗
+                        // ║          FLOW-BASED TANK EMPTY DETECTION                         ║
+                        // ╠══════════════════════════════════════════════════════════════════╣
+                        // ║ Tank is considered empty when:                                   ║
+                        // ║                                                                  ║
+                        // ║ MANUAL MODE (RC7):                                               ║
+                        // ║   - RC7 is enabled (sprayEnabled = true)                         ║
+                        // ║   - Flow rate is 0 for 3+ seconds                                ║
+                        // ║                                                                  ║
+                        // ║ AUTO MODE (DO_SET_SERVO / DO_SPRAYER / Sprayer library):         ║
+                        // ║   - Flow was detected > 0 at some point (autoModeSprayDetected)  ║
+                        // ║   - Flow rate drops to 0 for 3+ seconds                          ║
+                        // ║   - This works because we KNOW spray was commanded active        ║
+                        // ║     (evidenced by previous flow), so zero flow = tank empty      ║
+                        // ║                                                                  ║
+                        // ║ BATT2 must be properly configured for detection to work          ║
+                        // ╚══════════════════════════════════════════════════════════════════╝
+
                         val configValid = state.value.sprayTelemetry.configurationValid
                         val flowIsZero = flowRateLiterPerMin == null || flowRateLiterPerMin == 0f
 
-                        if (currentSprayEnabledForEmpty && configValid && flowIsZero) {
-                            // Sprayer is ON but no flow - start/continue timing
-                            if (zeroFlowStartTime == null) {
-                                zeroFlowStartTime = System.currentTimeMillis()
-                            } else {
-                                val zeroFlowDuration = System.currentTimeMillis() - zeroFlowStartTime!!
+                        // Sprayer is considered ON for tank empty detection when:
+                        // 1. RC7 is enabled (manual mode), OR
+                        // 2. We're in AUTO mode AND spray was detected (had flow > 0)
+                        //    This means DO_SET_SERVO/DO_SPRAYER/Sprayer library is active
+                        val sprayCommandActive = rc7SprayEnabled || (isInAutoMode && autoModeSprayDetected)
 
-                                if (zeroFlowDuration >= ZERO_FLOW_THRESHOLD_MS && !tankEmptyNotificationShown) {
-                                    sharedViewModel.addNotification(
-                                        Notification(
-                                            message = "Tank Empty! Sprayer is ON but no flow detected.",
-                                            type = NotificationType.WARNING
+                        if (sprayCommandActive && configValid) {
+                            // Track when sprayer was turned ON
+                            if (pumpTurnedOnTime == null) {
+                                pumpTurnedOnTime = System.currentTimeMillis()
+                                val spraySource = if (rc7SprayEnabled) "RC7" else "AUTO mission (DO_SET_SERVO/DO_SPRAYER)"
+                                Log.d("TankEmpty", "⏱️ Sprayer active via $spraySource - waiting ${PUMP_STARTUP_DELAY_MS}ms before checking flow")
+                            }
+
+                            val timeSincePumpOn = System.currentTimeMillis() - (pumpTurnedOnTime ?: 0L)
+
+                            // Only check for zero flow after pump startup delay
+                            if (timeSincePumpOn >= PUMP_STARTUP_DELAY_MS && flowIsZero) {
+                                // Sprayer has been ON long enough and still no flow - start/continue timing
+                                if (zeroFlowStartTime == null) {
+                                    zeroFlowStartTime = System.currentTimeMillis()
+                                    Log.d("TankEmpty", "⏱️ Zero flow timer started - spray command active for ${timeSincePumpOn}ms but no flow (mode: $currentMode)")
+                                } else {
+                                    val zeroFlowDuration = System.currentTimeMillis() - zeroFlowStartTime!!
+
+                                    if (zeroFlowDuration >= ZERO_FLOW_THRESHOLD_MS && !tankEmptyNotificationShown) {
+                                        Log.w("TankEmpty", "🚨 TANK EMPTY! Spray command active for ${timeSincePumpOn}ms with ${zeroFlowDuration}ms of zero flow (mode: $currentMode)")
+                                        sharedViewModel.addNotification(
+                                            Notification(
+                                                message = "Tank Empty! Sprayer is ON but no flow detected.",
+                                                type = NotificationType.WARNING
+                                            )
                                         )
-                                    )
-                                    sharedViewModel.announceTankEmpty()
-                                    tankEmptyNotificationShown = true
+                                        sharedViewModel.announceTankEmpty()
+                                        tankEmptyNotificationShown = true
+
+                                        // If in AUTO mode, switch to LOITER and trigger resume popup
+                                        if (isInAutoMode) {
+                                            Log.i("TankEmpty", "🚨 AUTO mode - switching to LOITER for tank refill")
+                                            sharedViewModel.handleTankEmptyInAutoMode()
+                                        }
+                                    }
+                                }
+                            } else if (!flowIsZero) {
+                                // Flow detected - reset zero flow timer
+                                if (zeroFlowStartTime != null) {
+                                    Log.d("TankEmpty", "⏱️ Zero flow timer reset - flow detected (${String.format("%.2f", flowRateLiterPerMin ?: 0f)} L/min)")
+                                    zeroFlowStartTime = null
+                                }
+
+                                // Reset tank empty notification if flow is detected again (tank refilled)
+                                if (tankEmptyNotificationShown) {
+                                    Log.i("TankEmpty", "✓ Flow restored - tank refilled")
+                                    tankEmptyNotificationShown = false
                                 }
                             }
                         } else {
-                            // Reset zero flow timer if sprayer is OFF or flow is detected
-                            if (zeroFlowStartTime != null) {
+                            // Sprayer is OFF or config invalid - reset all timers
+                            if (pumpTurnedOnTime != null || zeroFlowStartTime != null) {
+                                val reason = when {
+                                    !sprayCommandActive -> "spray command inactive"
+                                    else -> "config invalid"
+                                }
+                                Log.d("TankEmpty", "⏱️ All timers reset - $reason")
+                                pumpTurnedOnTime = null
                                 zeroFlowStartTime = null
                             }
+                        }
 
-                            // Reset tank empty notification if flow is detected again (tank refilled)
-                            if (!flowIsZero && tankEmptyNotificationShown) {
-                                tankEmptyNotificationShown = false
-                            }
+                        // Reset AUTO mode spray detection when leaving AUTO mode
+                        if (!isInAutoMode && autoModeSprayDetected) {
+                            Log.d("TankEmpty", "🔄 Leaving AUTO mode - resetting spray detection state")
+                            autoModeSprayDetected = false
+                            lastPositiveFlowTime = null
                         }
                     }
                     // Level sensor (BATT3 - id=2)
@@ -975,10 +1092,67 @@ class MavlinkTelemetryRepository(
                             // Disable yaw hold when exiting Auto mode
                             sharedViewModel.disableYawHold()
                         } else if (lastArmed == true && !armed) {
-                            // Drone disarmed - cancel timer and DON'T show mission complete popup for disarm
+                            // Drone disarmed - check if we had an active mission to trigger completion dialog
                             missionTimerJob?.cancel()
                             missionTimerJob = null
-                            _state.update { it.copy(isMissionActive = false, missionElapsedSec = null) }
+
+                            // Get current mission state before updating
+                            val lastElapsed = state.value.missionElapsedSec ?: state.value.lastMissionElapsedSec
+                            val wasMissionActive = state.value.isMissionActive
+                            val wasInAutoMode = lastMode?.equals("Auto", ignoreCase = true) == true
+                            val isPaused = state.value.missionPaused
+                            val alreadyCompleted = state.value.missionCompleted
+
+                            // Show mission completion dialog if:
+                            // 1. There was meaningful mission time (elapsed > 0)
+                            // 2. Mission was not paused
+                            // 3. Not already marked as completed
+                            if ((lastElapsed ?: 0L) > 0L && !isPaused && !alreadyCompleted) {
+                                _state.update { it.copy(
+                                    isMissionActive = false,
+                                    missionElapsedSec = null,
+                                    missionCompleted = true,
+                                    lastMissionElapsedSec = lastElapsed
+                                )}
+
+                                // Send mission status ENDED to backend
+                                try {
+                                    val wsManager = WebSocketManager.getInstance()
+                                    wsManager.sendMissionStatus(WebSocketManager.MISSION_STATUS_ENDED)
+                                    wsManager.sendMissionEvent(
+                                        eventType = "MISSION_ENDED",
+                                        eventStatus = "INFO",
+                                        description = "Mission completed - drone disarmed"
+                                    )
+
+                                    // Send mission summary
+                                    val currentState = state.value
+                                    val batteryEnd = currentState.batteryPercent ?: 0
+                                    val totalDistance = currentState.totalDistanceMeters ?: 0f
+                                    val flyingTimeMinutes = (lastElapsed ?: 0L) / 60.0
+                                    val avgSpeed = if (flyingTimeMinutes > 0) (totalDistance / 1000.0) / (flyingTimeMinutes / 60.0) else 0.0
+                                    val totalSprayUsed = currentState.sprayTelemetry.consumedLiters?.toDouble() ?: 0.0
+                                    val sprayWidthMeters = 5.0
+                                    val totalAreaSqMeters = totalDistance * sprayWidthMeters
+                                    val totalAcres = totalAreaSqMeters / 4046.86
+
+                                    wsManager.sendMissionSummary(
+                                        totalAcres = totalAcres,
+                                        totalSprayUsed = totalSprayUsed,
+                                        flyingTimeMinutes = flyingTimeMinutes,
+                                        averageSpeed = avgSpeed,
+                                        batteryStart = wsManager.missionBatteryStart,
+                                        batteryEnd = batteryEnd,
+                                        alertsCount = wsManager.missionAlertsCount,
+                                        status = "COMPLETED"
+                                    )
+                                } catch (e: Exception) {
+                                    // Ignore WebSocket errors
+                                }
+                            } else {
+                                // No meaningful mission or already handled - just reset state
+                                _state.update { it.copy(isMissionActive = false, missionElapsedSec = null) }
+                            }
 
                             // Also disable spray when drone is disarmed for safety
                             sharedViewModel.disableSprayOnModeChange()
@@ -1119,12 +1293,8 @@ class MavlinkTelemetryRepository(
 
                     if (currentSeq != lastMissionSeq) {
                         lastMissionSeq = currentSeq
-                        sharedViewModel.addNotification(
-                            Notification(
-                                "Executing waypoint #${lastMissionSeq}",
-                                NotificationType.INFO
-                            )
-                        )
+                        // NOTE: Removed waypoint execution notification from notification panel
+                        // The UI already shows current waypoint progress in the telemetry display
                     }
                 }
         }
@@ -1155,12 +1325,8 @@ class MavlinkTelemetryRepository(
                     // Update SharedViewModel
                     sharedViewModel.updateCurrentWaypoint(reachedSeq)
 
-                    sharedViewModel.addNotification(
-                        Notification(
-                            "Reached waypoint #${reachedSeq}",
-                            NotificationType.INFO
-                        )
-                    )
+                    // NOTE: Removed "Reached waypoint" notification from notification panel
+                    // The UI already shows current waypoint progress in the telemetry display
                 }
         }
 
@@ -1177,9 +1343,8 @@ class MavlinkTelemetryRepository(
                         return@collect
                     }
 
-                    val message = "Mission upload: ${missionAck.type.entry?.name ?: "UNKNOWN"}"
-                    val type = if (missionAck.type.value == MavMissionResult.MAV_MISSION_ACCEPTED.value) NotificationType.SUCCESS else NotificationType.ERROR
-                    sharedViewModel.addNotification(Notification(message, type))
+                    // NOTE: Removed mission upload ACK notification from notification panel
+                    // The upload progress is shown in the dedicated upload dialog
                 }
         }
 
@@ -1414,7 +1579,59 @@ class MavlinkTelemetryRepository(
                 }
         }
 
-        // AUTOPILOT_VERSION for drone identification
+        // OpenDroneID BASIC_ID for drone identification
+        scope.launch {
+            mavFrame
+                .filter { state.value.fcuDetected && it.systemId == fcuSystemId }
+                .map { it.message }
+                .filterIsInstance<OpenDroneIdBasicId>()
+                .collect { basicIdMessage ->
+                    try {
+                        Log.i("TelemetryRepo", "📥 OPEN_DRONE_ID_BASIC_ID received from FC")
+
+                        // Extract drone identifier using the new logic
+                        val droneIdentifier = extractDroneUniqueId(basicIdMessage)
+
+                        if (droneIdentifier != null) {
+                            Log.i("TelemetryRepo", "✅ Extracted Drone ID: ${droneIdentifier.serialNumber} (Type: ${droneIdentifier.idType})")
+
+                            // Update telemetry state with the serial number as droneUid
+                            _state.update { state ->
+                                state.copy(
+                                    droneUid = droneIdentifier.serialNumber,
+                                    droneUid2 = droneIdentifier.idOrMac, // Store MAC/ID as secondary
+                                    // Keep existing vendor/product/firmware info from AUTOPILOT_VERSION if available
+                                    vendorId = state.vendorId,
+                                    productId = state.productId,
+                                    firmwareVersion = state.firmwareVersion,
+                                    boardVersion = state.boardVersion
+                                )
+                            }
+
+                            // 🔥 CRITICAL FIX: Update WebSocketManager with real drone UID
+                            try {
+                                val wsManager = WebSocketManager.getInstance()
+                                wsManager.droneUid = droneIdentifier.serialNumber
+                                Log.i("TelemetryRepo", "✅ Updated WebSocketManager with droneUid: '${droneIdentifier.serialNumber}'")
+                            } catch (e: Exception) {
+                                Log.e("TelemetryRepo", "❌ Failed to update WebSocketManager droneUid", e)
+                            }
+
+                            // Announce drone ID via TTS
+                            val shortUid = droneIdentifier.serialNumber.takeLast(8) // Last 8 characters for brevity
+                            sharedViewModel.speak("Drone identified. Serial number ending in $shortUid")
+                            Log.i("TelemetryRepo", "🎤 Announced drone serial number via TTS")
+                        } else {
+                            Log.w("TelemetryRepo", "⚠️ No valid drone identifier found in OPEN_DRONE_ID_BASIC_ID message")
+                        }
+
+                    } catch (e: Exception) {
+                        Log.e("TelemetryRepo", "❌ Error processing OPEN_DRONE_ID_BASIC_ID", e)
+                    }
+                }
+        }
+
+        // Still process AUTOPILOT_VERSION for firmware/hardware info but not for droneUid
         scope.launch {
             mavFrame
                 .filter { state.value.fcuDetected && it.systemId == fcuSystemId }
@@ -1422,23 +1639,7 @@ class MavlinkTelemetryRepository(
                 .filterIsInstance<AutopilotVersion>()
                 .collect { autopilotVersion ->
                     try {
-                        // Extract UID - prefer uid2 over uid if uid2 is non-zero
-                        val primaryUid = if (autopilotVersion.uid2.any { it.toInt() != 0 }) {
-                            // Convert uid2 (18 bytes) to hex string
-                            autopilotVersion.uid2.joinToString("") { "%02x".format(it.toInt() and 0xFF) }
-                        } else if (autopilotVersion.uid != 0UL) {
-                            // Convert uid (8 bytes) to hex string
-                            "%016x".format(autopilotVersion.uid)
-                        } else {
-                            null
-                        }
-
-                        // Also store uid2 separately if it exists and is different from uid
-                        val secondaryUid = if (autopilotVersion.uid2.any { it.toInt() != 0 }) {
-                            val uid2Hex = autopilotVersion.uid2.joinToString("") { "%02x".format(it.toInt() and 0xFF) }
-                            val uidHex = "%016x".format(autopilotVersion.uid)
-                            if (uid2Hex != uidHex) uid2Hex else null
-                        } else null
+                        Log.i("TelemetryRepo", "📥 AUTOPILOT_VERSION received from FC (for firmware info only)")
 
                         // Format firmware version (4 bytes: major.minor.patch.type)
                         val fwVersion = autopilotVersion.flightSwVersion
@@ -1448,13 +1649,23 @@ class MavlinkTelemetryRepository(
                         val fwType = fwVersion and 0xFFu
                         val formattedFirmware = "$major.$minor.$patch (type: $fwType)"
 
-                        if (secondaryUid != null) {
-                        }
-
                         _state.update { state ->
+                            // 🔥 FALLBACK DRONE UID: If no OpenDroneID available, use AUTOPILOT_VERSION info
+                            val fallbackDroneUid = if (state.droneUid.isNullOrBlank()) {
+                                // Create a fallback drone UID from autopilot version info
+                                val vendorId = autopilotVersion.vendorId.toInt()
+                                val productId = autopilotVersion.productId.toInt()
+                                val boardVersion = autopilotVersion.boardVersion.toInt()
+                                "FC_${vendorId}_${productId}_${boardVersion}"
+                            } else {
+                                state.droneUid // Keep existing OpenDroneID
+                            }
+
                             state.copy(
-                                droneUid = primaryUid,
-                                droneUid2 = secondaryUid,
+                                // Use fallback UID if OpenDroneID not available
+                                droneUid = fallbackDroneUid,
+                                droneUid2 = state.droneUid2,
+                                // Update firmware/hardware info
                                 vendorId = autopilotVersion.vendorId.toInt(),
                                 productId = autopilotVersion.productId.toInt(),
                                 firmwareVersion = formattedFirmware,
@@ -1462,13 +1673,21 @@ class MavlinkTelemetryRepository(
                             )
                         }
 
-                        // Announce drone ID via TTS
-                        if (primaryUid != null) {
-                            val shortUid = primaryUid.takeLast(8) // Last 8 characters for brevity
-                            sharedViewModel.speak("Drone identified. UID ending in $shortUid")
+                        // 🔥 Update WebSocketManager with drone UID (OpenDroneID or fallback)
+                        val currentState = _state.value
+                        if (!currentState.droneUid.isNullOrBlank()) {
+                            try {
+                                val wsManager = WebSocketManager.getInstance()
+                                wsManager.droneUid = currentState.droneUid!!
+                                Log.i("TelemetryRepo", "✅ Updated WebSocketManager with droneUid from AUTOPILOT_VERSION: '${currentState.droneUid}'")
+                            } catch (e: Exception) {
+                                Log.e("TelemetryRepo", "❌ Failed to update WebSocketManager droneUid from AUTOPILOT_VERSION", e)
+                            }
                         }
 
+
                     } catch (e: Exception) {
+                        Log.e("TelemetryRepo", "❌ Error processing AUTOPILOT_VERSION", e)
                     }
                 }
         }
@@ -1758,6 +1977,7 @@ class MavlinkTelemetryRepository(
             5u -> "Loiter"
             6u -> "RTL"
             9u -> "Land"
+            16u -> "PosHold"
             17u -> "Brake"
             else -> "Unknown"
         }
@@ -1773,9 +1993,14 @@ class MavlinkTelemetryRepository(
     /**
      * Uploads a mission using the MAVLink mission protocol handshake.
      * Returns true if ACK received, false otherwise.
+     * @param onProgress Optional callback for progress updates (currentItem, totalItems)
      */
     @Suppress("DEPRECATION")
-    suspend fun uploadMissionWithAck(missionItems: List<MissionItemInt>, timeoutMs: Long = 45000): Boolean {
+    suspend fun uploadMissionWithAck(
+        missionItems: List<MissionItemInt>,
+        timeoutMs: Long = 45000,
+        onProgress: ((currentItem: Int, totalItems: Int) -> Unit)? = null
+    ): Boolean {
         // Mark upload as in progress to prevent global listener from showing notifications
         isMissionUploadInProgress = true
 
@@ -1932,6 +2157,9 @@ class MavlinkTelemetryRepository(
 
                             connection.trySendUnsignedV2(gcsSystemId, gcsComponentId, item)
                             sentSeqs.add(seq)
+
+                            // Emit progress update to UI
+                            onProgress?.invoke(seq + 1, missionItems.size)
 
                             // Log progress: first, last, and every 10 items for verification
                             if (seq == 0 || seq == missionItems.size - 1 || seq % 10 == 0) {
@@ -2093,6 +2321,106 @@ class MavlinkTelemetryRepository(
             job.cancel()
 
         } catch (e: Exception) {
+        }
+    }
+
+    /**
+     * 🔥 Upload fence items to Flight Controller
+     * Similar to uploadMissionWithAck but specifically for geofence points
+     */
+    suspend fun uploadFenceItems(fenceItems: List<MissionItemInt>, timeoutMs: Long = 30000): Boolean {
+        if (!state.value.fcuDetected) {
+            Log.e("TelemetryRepo", "❌ Cannot upload fence: FCU not detected")
+            return false
+        }
+
+        if (fenceItems.isEmpty()) {
+            Log.w("TelemetryRepo", "❌ Cannot upload fence: No fence items")
+            return false
+        }
+
+        try {
+            Log.i("TelemetryRepo", "🔥 Uploading ${fenceItems.size} fence points to FC")
+
+            // Step 1: Send mission count for fence items
+            val missionCount = MissionCount(
+                targetSystem = fcuSystemId,
+                targetComponent = fcuComponentId,
+                count = fenceItems.size.toUShort(),
+                missionType = MavEnumValue.of(MavMissionType.FENCE)
+            )
+
+            connection.trySendUnsignedV2(gcsSystemId, gcsComponentId, missionCount)
+            Log.i("TelemetryRepo", "📤 Sent fence mission count: ${fenceItems.size}")
+
+            // Step 2: Wait for mission requests and send fence items
+            val finalAckDeferred = CompletableDeferred<Pair<Boolean, String>>()
+            val sentSeqs = mutableSetOf<Int>()
+
+            val job = AppScope.launch {
+                connection.mavFrame.collect { frame ->
+                    when (val msg = frame.message) {
+                        is MissionRequest, is MissionRequestInt -> {
+                            val seq = if (msg is MissionRequestInt) msg.seq.toInt() else (msg as MissionRequest).seq.toInt()
+
+                            if (seq !in 0 until fenceItems.size) {
+                                finalAckDeferred.complete(false to "Invalid fence sequence $seq")
+                                return@collect
+                            }
+
+                            val fenceItem = fenceItems[seq].copy(
+                                targetSystem = fcuSystemId,
+                                targetComponent = fcuComponentId,
+                                seq = seq.toUShort()
+                            )
+
+                            delay(50L) // Small delay for stability
+                            connection.trySendUnsignedV2(gcsSystemId, gcsComponentId, fenceItem)
+                            sentSeqs.add(seq)
+
+                            Log.d("TelemetryRepo", "📤 Sent fence point $seq/${fenceItems.size}")
+                        }
+
+                        is MissionAck -> {
+                            if (msg.missionType.value == MavMissionType.FENCE.value) {
+                                when (msg.type.value) {
+                                    MavMissionResult.MAV_MISSION_ACCEPTED.value -> {
+                                        finalAckDeferred.complete(true to "Fence upload successful")
+                                    }
+                                    MavMissionResult.MAV_MISSION_DENIED.value -> {
+                                        finalAckDeferred.complete(false to "Fence upload denied")
+                                    }
+                                    MavMissionResult.MAV_MISSION_ERROR.value -> {
+                                        finalAckDeferred.complete(false to "Fence upload error")
+                                    }
+                                    else -> {
+                                        finalAckDeferred.complete(false to "Unknown fence upload result: ${msg.type.value}")
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Wait for completion
+            val result = withTimeout(timeoutMs) {
+                finalAckDeferred.await()
+            }
+
+            job.cancel()
+
+            val success = result.first
+            val message = result.second
+            Log.i("TelemetryRepo", if (success) "✅ $message" else "❌ $message")
+            return success
+
+        } catch (e: TimeoutCancellationException) {
+            Log.e("TelemetryRepo", "❌ Fence upload timeout after ${timeoutMs}ms")
+            return false
+        } catch (e: Exception) {
+            Log.e("TelemetryRepo", "❌ Fence upload failed", e)
+            return false
         }
     }
 
@@ -2642,5 +2970,848 @@ class MavlinkTelemetryRepository(
 
         return resequenced
     }
-}
 
+    // ════════════════════════════════════════════════════════════════
+    // GEOFENCE MANAGEMENT (ArduPilot Native Fence System)
+    // ════════════════════════════════════════════════════════════════
+
+    /**
+     * Upload geofence to flight controller using ArduPilot's fence system.
+     * This uploads the fence definition to FC memory, where it will be
+     * enforced autonomously at 400Hz (vs GCS-based enforcement at ~5Hz).
+     *
+     * @param configuration Complete fence configuration with zones and parameters
+     * @return true if upload successful, false otherwise
+     */
+    suspend fun uploadGeofence(configuration: FenceConfiguration): Boolean {
+        return withContext(Dispatchers.IO) {
+            try {
+                Log.i("Geofence", "═══════════════════════════════════════════")
+                Log.i("Geofence", "Starting geofence upload to flight controller")
+                Log.i("Geofence", "Zones: ${configuration.zones.size}")
+                Log.i("Geofence", "Action: ${configuration.action}")
+                Log.i("Geofence", "Margin: ${configuration.margin}m")
+
+                // Step 1: Convert fence zones to MAVLink mission items
+                val fenceItems = convertFenceToMissionItems(configuration.zones)
+
+                if (fenceItems.isEmpty()) {
+                    Log.e("Geofence", "No fence items to upload")
+                    return@withContext false
+                }
+
+                Log.i("Geofence", "Converted to ${fenceItems.size} fence items")
+
+                // Step 2: Upload fence using mission protocol with FENCE type
+                val uploadSuccess = uploadFenceItemsInternal(fenceItems)
+
+                if (!uploadSuccess) {
+                    Log.e("Geofence", "Failed to upload fence items")
+                    return@withContext false
+                }
+
+                Log.i("Geofence", "✅ Fence items uploaded successfully")
+
+                // Step 3: Configure fence parameters
+                delay(500)  // Let FC process fence upload
+
+                val paramsSet = configureFenceParameters(configuration)
+
+                if (!paramsSet) {
+                    Log.e("Geofence", "Failed to set fence parameters")
+                    return@withContext false
+                }
+
+                Log.i("Geofence", "✅ Fence parameters configured")
+
+                // Step 4: Enable fence
+                delay(500)
+                val enabled = enableFence(true)
+
+                if (!enabled) {
+                    Log.e("Geofence", "Failed to enable fence")
+                    return@withContext false
+                }
+
+                Log.i("Geofence", "✅ Geofence enabled on flight controller")
+
+                // Step 5: Verify fence is actually enabled by reading back parameters
+                delay(300)
+                val verifyEnabled = verifyFenceEnabled()
+                if (verifyEnabled) {
+                    Log.i("Geofence", "✅ Fence verification passed - fence is ACTIVE")
+                } else {
+                    Log.w("Geofence", "⚠️ Fence verification failed - fence may not be active!")
+                }
+
+                Log.i("Geofence", "═══════════════════════════════════════════")
+
+                // NOTE: Removed geofence upload notification from notification panel
+                // The upload status is communicated via logs and TTS
+
+                true
+
+            } catch (e: Exception) {
+                Log.e("Geofence", "Error uploading geofence: ${e.message}")
+                e.printStackTrace()
+                false
+            }
+        }
+    }
+
+    /**
+     * Convert fence zones to MAVLink MISSION_ITEM_INT messages
+     */
+    private fun convertFenceToMissionItems(zones: List<FenceZone>): List<MissionItemInt> {
+        val items = mutableListOf<MissionItemInt>()
+        var seq = 0
+
+        for (zone in zones) {
+            when (zone) {
+                is FenceZone.Polygon -> {
+                    // Each vertex becomes a fence item
+                    val command = if (zone.isInclusion) {
+                        MavCmd.NAV_FENCE_POLYGON_VERTEX_INCLUSION
+                    } else {
+                        MavCmd.NAV_FENCE_POLYGON_VERTEX_EXCLUSION
+                    }
+
+                    for ((index, point) in zone.points.withIndex()) {
+                        items.add(
+                            MissionItemInt(
+                                targetSystem = fcuSystemId,
+                                targetComponent = fcuComponentId,
+                                seq = seq.toUShort(),
+                                frame = MavEnumValue.of(com.divpundir.mavlink.definitions.common.MavFrame.GLOBAL_INT),
+                                command = MavEnumValue.of(command),
+                                current = 0u,
+                                autocontinue = 0u,
+                                param1 = zone.points.size.toFloat(),  // Total vertex count
+                                param2 = 0f,
+                                param3 = 0f,
+                                param4 = 0f,
+                                x = (point.latitude * 1E7).toInt(),
+                                y = (point.longitude * 1E7).toInt(),
+                                z = 0f,
+                                missionType = MavEnumValue.of(MavMissionType.FENCE)
+                            )
+                        )
+                        seq++
+                    }
+                }
+
+                is FenceZone.Circle -> {
+                    val command = if (zone.isInclusion) {
+                        MavCmd.NAV_FENCE_CIRCLE_INCLUSION
+                    } else {
+                        MavCmd.NAV_FENCE_CIRCLE_EXCLUSION
+                    }
+
+                    items.add(
+                        MissionItemInt(
+                            targetSystem = fcuSystemId,
+                            targetComponent = fcuComponentId,
+                            seq = seq.toUShort(),
+                            frame = MavEnumValue.of(com.divpundir.mavlink.definitions.common.MavFrame.GLOBAL_INT),
+                            command = MavEnumValue.of(command),
+                            current = 0u,
+                            autocontinue = 0u,
+                            param1 = zone.radiusMeters,  // Radius in meters
+                            param2 = 0f,
+                            param3 = 0f,
+                            param4 = 0f,
+                            x = (zone.center.latitude * 1E7).toInt(),
+                            y = (zone.center.longitude * 1E7).toInt(),
+                            z = 0f,
+                            missionType = MavEnumValue.of(MavMissionType.FENCE)
+                        )
+                    )
+                    seq++
+                }
+
+                is FenceZone.ReturnPoint -> {
+                    items.add(
+                        MissionItemInt(
+                            targetSystem = fcuSystemId,
+                            targetComponent = fcuComponentId,
+                            seq = seq.toUShort(),
+                            frame = MavEnumValue.of(com.divpundir.mavlink.definitions.common.MavFrame.GLOBAL_INT),
+                            command = MavEnumValue.of(MavCmd.NAV_FENCE_RETURN_POINT),
+                            current = 0u,
+                            autocontinue = 0u,
+                            param1 = 0f,
+                            param2 = 0f,
+                            param3 = 0f,
+                            param4 = 0f,
+                            x = (zone.location.latitude * 1E7).toInt(),
+                            y = (zone.location.longitude * 1E7).toInt(),
+                            z = 0f,
+                            missionType = MavEnumValue.of(MavMissionType.FENCE)
+                        )
+                    )
+                    seq++
+                }
+            }
+        }
+
+        return items
+    }
+
+    /**
+     * Upload fence items using mission protocol with FENCE mission type
+     * Internal implementation with coroutine handling
+     */
+    private suspend fun uploadFenceItemsInternal(items: List<MissionItemInt>): Boolean {
+        return suspendCancellableCoroutine { continuation ->
+            val job = AppScope.launch {
+                try {
+                    Log.i("Geofence", "═══════════════════════════════════════════")
+                    Log.i("Geofence", "Uploading ${items.size} fence items...")
+
+                    // Log fence points for debugging
+                    items.forEachIndexed { index, item ->
+                        val lat = item.x / 1E7
+                        val lon = item.y / 1E7
+                        Log.d("Geofence", "  Item $index: lat=$lat, lon=$lon, cmd=${item.command.value}")
+                    }
+
+                    // Step 1: Clear existing fence
+                    Log.i("Geofence", "Step 1: Clearing existing fence...")
+                    val clearCmd = MissionClearAll(
+                        targetSystem = fcuSystemId,
+                        targetComponent = fcuComponentId,
+                        missionType = MavEnumValue.of(MavMissionType.FENCE)
+                    )
+                    connection.trySendUnsignedV2(gcsSystemId, gcsComponentId, clearCmd)
+
+                    // Wait for clear ACK
+                    val clearAck = withTimeoutOrNull(2000) {
+                        mavFrame
+                            .filter { it.systemId == fcuSystemId }
+                            .map { it.message }
+                            .filterIsInstance<MissionAck>()
+                            .first { it.missionType.value == MavMissionType.FENCE.value }
+                    }
+                    if (clearAck != null) {
+                        Log.d("Geofence", "  Clear ACK received: ${clearAck.type.value}")
+                    } else {
+                        Log.w("Geofence", "  No clear ACK (continuing anyway)")
+                    }
+                    delay(500)
+
+                    // Step 2: Send fence count
+                    Log.i("Geofence", "Step 2: Sending fence count: ${items.size}")
+                    val countMsg = MissionCount(
+                        targetSystem = fcuSystemId,
+                        targetComponent = fcuComponentId,
+                        count = items.size.toUShort(),
+                        missionType = MavEnumValue.of(MavMissionType.FENCE)
+                    )
+                    connection.trySendUnsignedV2(gcsSystemId, gcsComponentId, countMsg)
+
+                    // Step 3: Wait for MISSION_REQUEST_INT/MISSION_REQUEST from FC and send items
+                    Log.i("Geofence", "Step 3: Waiting for FC to request items...")
+                    val uploadedItems = mutableSetOf<Int>()
+                    val timeout = 15000L  // 15 second timeout
+                    val startTime = System.currentTimeMillis()
+                    var lastRequestTime = startTime
+
+                    while (uploadedItems.size < items.size) {
+                        // Check timeout
+                        val elapsed = System.currentTimeMillis() - startTime
+                        if (elapsed > timeout) {
+                            Log.e("Geofence", "Upload timeout after ${elapsed}ms - uploaded ${uploadedItems.size}/${items.size}")
+                            continuation.resume(false)
+                            return@launch
+                        }
+
+                        // Wait for requests from FC (shorter timeout per request)
+                        val frame = withTimeoutOrNull(2000) {
+                            mavFrame
+                                .filter { it.systemId == fcuSystemId }
+                                .first { msg ->
+                                    val message = msg.message
+                                    (message is MissionRequestInt && message.missionType.value == MavMissionType.FENCE.value) ||
+                                    (message is MissionRequest && message.missionType.value == MavMissionType.FENCE.value)
+                                }
+                        }
+
+                        if (frame == null) {
+                            // No request received - resend count if we haven't gotten any requests
+                            if (uploadedItems.isEmpty() && System.currentTimeMillis() - lastRequestTime > 2000) {
+                                Log.w("Geofence", "  No requests received, resending count...")
+                                connection.trySendUnsignedV2(gcsSystemId, gcsComponentId, countMsg)
+                                lastRequestTime = System.currentTimeMillis()
+                            }
+                            continue
+                        }
+
+                        when (val msg = frame.message) {
+                            is MissionRequestInt -> {
+                                val seq = msg.seq.toInt()
+                                Log.d("Geofence", "  FC requested item $seq (MissionRequestInt)")
+                                if (seq < items.size) {
+                                    connection.trySendUnsignedV2(gcsSystemId, gcsComponentId, items[seq])
+                                    uploadedItems.add(seq)
+                                    lastRequestTime = System.currentTimeMillis()
+                                    delay(50)
+                                }
+                            }
+
+                            is MissionRequest -> {
+                                val seq = msg.seq.toInt()
+                                Log.d("Geofence", "  FC requested item $seq (MissionRequest legacy)")
+                                if (seq < items.size) {
+                                    connection.trySendUnsignedV2(gcsSystemId, gcsComponentId, items[seq])
+                                    uploadedItems.add(seq)
+                                    lastRequestTime = System.currentTimeMillis()
+                                    delay(50)
+                                }
+                            }
+                        }
+                    }
+
+                    Log.i("Geofence", "  All ${uploadedItems.size} items sent to FC")
+
+                    // Step 4: Wait for MISSION_ACK
+                    Log.i("Geofence", "Step 4: Waiting for fence upload acknowledgment...")
+                    val ack = withTimeoutOrNull(5000) {
+                        mavFrame
+                            .filter { it.systemId == fcuSystemId }
+                            .map { it.message }
+                            .filterIsInstance<MissionAck>()
+                            .first { it.missionType.value == MavMissionType.FENCE.value }
+                    }
+
+                    if (ack != null) {
+                        Log.i("Geofence", "  ACK received: ${ack.type.value} (0=accepted)")
+                        if (ack.type.value == MavMissionResult.MAV_MISSION_ACCEPTED.value) {
+                            Log.i("Geofence", "✅ Fence upload acknowledged by FC")
+                            Log.i("Geofence", "═══════════════════════════════════════════")
+                            continuation.resume(true)
+                        } else {
+                            Log.e("Geofence", "❌ Fence rejected by FC: ${ack.type.value}")
+                            continuation.resume(false)
+                        }
+                    } else {
+                        // No ACK received - but fence might still be uploaded
+                        // Some FCs don't send ACK for fence uploads
+                        Log.w("Geofence", "⚠️ No ACK received (fence may still be active)")
+                        Log.i("Geofence", "═══════════════════════════════════════════")
+                        // Return true anyway as the items were uploaded
+                        continuation.resume(true)
+                    }
+
+                } catch (e: Exception) {
+                    Log.e("Geofence", "Error during fence upload: ${e.message}")
+                    e.printStackTrace()
+                    continuation.resume(false)
+                }
+            }
+
+            continuation.invokeOnCancellation {
+                job.cancel()
+            }
+        }
+    }
+
+    /**
+     * Configure fence parameters on flight controller
+     */
+    private suspend fun configureFenceParameters(config: FenceConfiguration): Boolean {
+        try {
+            Log.i("Geofence", "Configuring fence parameters...")
+
+            // Set fence action (what happens on breach)
+            if (!setFenceParameter("FENCE_ACTION", config.action.value)) {
+                Log.e("Geofence", "Failed to set FENCE_ACTION")
+                return false
+            }
+            delay(200)
+
+            // Set fence margin (safety buffer)
+            if (!setFenceParameter("FENCE_MARGIN", config.margin)) {
+                Log.e("Geofence", "Failed to set FENCE_MARGIN")
+                return false
+            }
+            delay(200)
+
+            // Set fence type bitfield
+            // Bit 0 (1) = Max altitude fence
+            // Bit 1 (2) = Circle fence
+            // Bit 2 (4) = Polygon fence
+            var fenceType = 0
+            config.zones.forEach { zone ->
+                when (zone) {
+                    is FenceZone.Polygon -> fenceType = fenceType or 4  // Bit 2 = polygon
+                    is FenceZone.Circle -> fenceType = fenceType or 2   // Bit 1 = circle
+                    else -> {}
+                }
+            }
+            if (config.altitudeMax != null || config.altitudeMin != null) {
+                fenceType = fenceType or 1  // Bit 0 = altitude
+            }
+
+            if (!setFenceParameter("FENCE_TYPE", fenceType.toFloat())) {
+                Log.e("Geofence", "Failed to set FENCE_TYPE")
+                return false
+            }
+            delay(200)
+
+            // Set altitude limits if provided
+            if (config.altitudeMax != null) {
+                if (!setFenceParameter("FENCE_ALT_MAX", config.altitudeMax)) {
+                    Log.e("Geofence", "Failed to set FENCE_ALT_MAX")
+                    return false
+                }
+                delay(200)
+            }
+
+            if (config.altitudeMin != null) {
+                if (!setFenceParameter("FENCE_ALT_MIN", config.altitudeMin)) {
+                    Log.e("Geofence", "Failed to set FENCE_ALT_MIN")
+                    return false
+                }
+                delay(200)
+            }
+
+            Log.i("Geofence", "✅ All fence parameters configured")
+            return true
+
+        } catch (e: Exception) {
+            Log.e("Geofence", "Error configuring fence parameters: ${e.message}")
+            return false
+        }
+    }
+
+    /**
+     * Enable or disable geofence on flight controller
+     */
+    suspend fun enableFence(enable: Boolean): Boolean {
+        return setFenceParameter("FENCE_ENABLE", if (enable) 1.0f else 0.0f)
+    }
+
+    /**
+     * Verify that fence is actually enabled by reading back parameters
+     */
+    private suspend fun verifyFenceEnabled(): Boolean {
+        return suspendCancellableCoroutine { continuation ->
+            val job = AppScope.launch {
+                try {
+                    // Request FENCE_ENABLE parameter
+                    val paramRequest = ParamRequestRead(
+                        targetSystem = fcuSystemId,
+                        targetComponent = fcuComponentId,
+                        paramId = "FENCE_ENABLE",
+                        paramIndex = -1
+                    )
+                    connection.trySendUnsignedV2(gcsSystemId, gcsComponentId, paramRequest)
+
+                    // Wait for response
+                    val response = withTimeoutOrNull(2000) {
+                        mavFrame
+                            .filter { it.systemId == fcuSystemId }
+                            .map { it.message }
+                            .filterIsInstance<ParamValue>()
+                            .first { it.paramId == "FENCE_ENABLE" }
+                    }
+
+                    if (response != null) {
+                        val isEnabled = response.paramValue >= 1.0f
+                        Log.d("Geofence", "FENCE_ENABLE = ${response.paramValue} (enabled=$isEnabled)")
+
+                        // Also check FENCE_TYPE to confirm polygon fence is configured
+                        if (isEnabled) {
+                            delay(100)
+                            val typeRequest = ParamRequestRead(
+                                targetSystem = fcuSystemId,
+                                targetComponent = fcuComponentId,
+                                paramId = "FENCE_TYPE",
+                                paramIndex = -1
+                            )
+                            connection.trySendUnsignedV2(gcsSystemId, gcsComponentId, typeRequest)
+
+                            val typeResponse = withTimeoutOrNull(2000) {
+                                mavFrame
+                                    .filter { it.systemId == fcuSystemId }
+                                    .map { it.message }
+                                    .filterIsInstance<ParamValue>()
+                                    .first { it.paramId == "FENCE_TYPE" }
+                            }
+
+                            if (typeResponse != null) {
+                                val fenceType = typeResponse.paramValue.toInt()
+                                val hasPolygon = (fenceType and 4) != 0  // Bit 2 = polygon
+                                val hasCircle = (fenceType and 2) != 0  // Bit 1 = circle
+                                val hasAltitude = (fenceType and 1) != 0  // Bit 0 = altitude
+                                Log.d("Geofence", "FENCE_TYPE = $fenceType (polygon=$hasPolygon, circle=$hasCircle, altitude=$hasAltitude)")
+                            }
+
+                            // Check FENCE_ACTION
+                            delay(100)
+                            val actionRequest = ParamRequestRead(
+                                targetSystem = fcuSystemId,
+                                targetComponent = fcuComponentId,
+                                paramId = "FENCE_ACTION",
+                                paramIndex = -1
+                            )
+                            connection.trySendUnsignedV2(gcsSystemId, gcsComponentId, actionRequest)
+
+                            val actionResponse = withTimeoutOrNull(2000) {
+                                mavFrame
+                                    .filter { it.systemId == fcuSystemId }
+                                    .map { it.message }
+                                    .filterIsInstance<ParamValue>()
+                                    .first { it.paramId == "FENCE_ACTION" }
+                            }
+
+                            if (actionResponse != null) {
+                                val actionName = when (actionResponse.paramValue.toInt()) {
+                                    0 -> "REPORT_ONLY"
+                                    1 -> "RTL"
+                                    2 -> "HOLD"
+                                    3 -> "GUIDED"
+                                    4 -> "BRAKE"
+                                    5 -> "SMART_RTL"
+                                    else -> "UNKNOWN"
+                                }
+                                Log.d("Geofence", "FENCE_ACTION = ${actionResponse.paramValue.toInt()} ($actionName)")
+                            }
+                        }
+
+                        continuation.resume(isEnabled)
+                    } else {
+                        Log.w("Geofence", "No response for FENCE_ENABLE parameter read")
+                        continuation.resume(false)
+                    }
+
+                } catch (e: Exception) {
+                    Log.e("Geofence", "Error verifying fence: ${e.message}")
+                    continuation.resume(false)
+                }
+            }
+
+            continuation.invokeOnCancellation {
+                job.cancel()
+            }
+        }
+    }
+
+    /**
+     * Set a fence-related parameter on the flight controller
+     */
+    private suspend fun setFenceParameter(paramId: String, value: Float): Boolean {
+        return suspendCancellableCoroutine { continuation ->
+            val job = AppScope.launch {
+                try {
+                    Log.d("Geofence", "Setting parameter $paramId = $value")
+
+                    // Send PARAM_SET
+                    val paramSet = ParamSet(
+                        targetSystem = fcuSystemId,
+                        targetComponent = fcuComponentId,
+                        paramId = paramId,
+                        paramValue = value,
+                        paramType = MavEnumValue.of(MavParamType.REAL32)
+                    )
+                    connection.trySendUnsignedV2(gcsSystemId, gcsComponentId, paramSet)
+
+                    // Wait for PARAM_VALUE acknowledgment
+                    val ack = withTimeoutOrNull(3000) {
+                        mavFrame
+                            .filter { it.systemId == fcuSystemId }
+                            .map { it.message }
+                            .filterIsInstance<ParamValue>()
+                            .first { it.paramId == paramId }
+                    }
+
+                    if (ack != null && ack.paramValue == value) {
+                        Log.d("Geofence", "✅ Parameter $paramId set successfully")
+                        continuation.resume(true)
+                    } else {
+                        Log.e("Geofence", "❌ Failed to set parameter $paramId")
+                        continuation.resume(false)
+                    }
+
+                } catch (e: Exception) {
+                    Log.e("Geofence", "Error setting parameter $paramId: ${e.message}")
+                    continuation.resume(false)
+                }
+            }
+
+            continuation.invokeOnCancellation {
+                job.cancel()
+            }
+        }
+    }
+
+    /**
+     * Download current geofence from flight controller
+     */
+    suspend fun downloadGeofence(): List<FenceZone> {
+        return withContext(Dispatchers.IO) {
+            try {
+                Log.i("Geofence", "Downloading geofence from flight controller...")
+
+                // Request fence items using mission protocol
+                val fenceItems = requestFenceItemsFromFcu()
+
+                Log.i("Geofence", "Downloaded ${fenceItems.size} fence items")
+
+                // Convert mission items back to fence zones
+                convertMissionItemsToFence(fenceItems)
+
+            } catch (e: Exception) {
+                Log.e("Geofence", "Error downloading geofence: ${e.message}")
+                emptyList()
+            }
+        }
+    }
+
+    /**
+     * Request fence items from FC using mission protocol
+     */
+    private suspend fun requestFenceItemsFromFcu(): List<MissionItemInt> {
+        return suspendCancellableCoroutine { continuation ->
+            val job = AppScope.launch {
+                try {
+                    val receivedItems = mutableListOf<MissionItemInt>()
+
+                    // Request fence count
+                    val requestList = MissionRequestList(
+                        targetSystem = fcuSystemId,
+                        targetComponent = fcuComponentId,
+                        missionType = MavEnumValue.of(MavMissionType.FENCE)
+                    )
+                    connection.trySendUnsignedV2(gcsSystemId, gcsComponentId, requestList)
+
+                    // Wait for count
+                    val countMsg = withTimeoutOrNull(5000) {
+                        mavFrame
+                            .filter { it.systemId == fcuSystemId }
+                            .map { it.message }
+                            .filterIsInstance<MissionCount>()
+                            .first { it.missionType.value == MavMissionType.FENCE.value }
+                    }
+
+                    val count = countMsg?.count?.toInt() ?: 0
+
+                    if (count == 0) {
+                        Log.i("Geofence", "No fence items on FC")
+                        continuation.resume(emptyList())
+                        return@launch
+                    }
+
+                    Log.i("Geofence", "FC reports $count fence items")
+
+                    // Request each item
+                    for (seq in 0 until count) {
+                        val request = MissionRequestInt(
+                            targetSystem = fcuSystemId,
+                            targetComponent = fcuComponentId,
+                            seq = seq.toUShort(),
+                            missionType = MavEnumValue.of(MavMissionType.FENCE)
+                        )
+                        connection.trySendUnsignedV2(gcsSystemId, gcsComponentId, request)
+
+                        val item = withTimeoutOrNull(2000) {
+                            mavFrame
+                                .filter { it.systemId == fcuSystemId }
+                                .map { it.message }
+                                .filterIsInstance<MissionItemInt>()
+                                .first { it.seq.toInt() == seq && it.missionType.value == MavMissionType.FENCE.value }
+                        }
+
+                        if (item != null) {
+                            receivedItems.add(item)
+                        } else {
+                            Log.w("Geofence", "Timeout receiving fence item $seq")
+                        }
+
+                        delay(50)
+                    }
+
+                    continuation.resume(receivedItems)
+
+                } catch (e: Exception) {
+                    Log.e("Geofence", "Error requesting fence items: ${e.message}")
+                    continuation.resume(emptyList())
+                }
+            }
+
+            continuation.invokeOnCancellation {
+                job.cancel()
+            }
+        }
+    }
+
+    /**
+     * Convert downloaded mission items back to fence zones
+     */
+    private fun convertMissionItemsToFence(items: List<MissionItemInt>): List<FenceZone> {
+        val zones = mutableListOf<FenceZone>()
+        val polygonVertices = mutableMapOf<Boolean, MutableList<LatLng>>()  // isInclusion -> vertices
+        var currentPolygonVertexCount = 0
+        var currentPolygonIsInclusion = true
+
+        for (item in items) {
+            when (item.command.value) {
+                MavCmd.NAV_FENCE_POLYGON_VERTEX_INCLUSION.value,
+                MavCmd.NAV_FENCE_POLYGON_VERTEX_EXCLUSION.value -> {
+                    val isInclusion = item.command.value == MavCmd.NAV_FENCE_POLYGON_VERTEX_INCLUSION.value
+                    val vertexCount = item.param1.toInt()
+                    val lat = item.x / 1E7
+                    val lng = item.y / 1E7
+
+                    // Check if we're starting a new polygon
+                    if (currentPolygonVertexCount == 0 || isInclusion != currentPolygonIsInclusion) {
+                        // If there's an existing polygon being built, save it first
+                        if (polygonVertices[currentPolygonIsInclusion]?.isNotEmpty() == true) {
+                            zones.add(FenceZone.Polygon(
+                                points = polygonVertices[currentPolygonIsInclusion]!!.toList(),
+                                isInclusion = currentPolygonIsInclusion
+                            ))
+                            polygonVertices[currentPolygonIsInclusion]?.clear()
+                        }
+                        currentPolygonVertexCount = vertexCount
+                        currentPolygonIsInclusion = isInclusion
+                    }
+
+                    polygonVertices.getOrPut(isInclusion) { mutableListOf() }.add(LatLng(lat, lng))
+
+                    // When we have all vertices, create polygon
+                    if (polygonVertices[isInclusion]?.size == currentPolygonVertexCount) {
+                        zones.add(FenceZone.Polygon(
+                            points = polygonVertices[isInclusion]!!.toList(),
+                            isInclusion = isInclusion
+                        ))
+                        polygonVertices[isInclusion]?.clear()
+                        currentPolygonVertexCount = 0
+                    }
+                }
+
+                MavCmd.NAV_FENCE_CIRCLE_INCLUSION.value,
+                MavCmd.NAV_FENCE_CIRCLE_EXCLUSION.value -> {
+                    val isInclusion = item.command.value == MavCmd.NAV_FENCE_CIRCLE_INCLUSION.value
+                    val radius = item.param1
+                    val lat = item.x / 1E7
+                    val lng = item.y / 1E7
+
+                    zones.add(FenceZone.Circle(
+                        center = LatLng(lat, lng),
+                        radiusMeters = radius,
+                        isInclusion = isInclusion
+                    ))
+                }
+
+                MavCmd.NAV_FENCE_RETURN_POINT.value -> {
+                    val lat = item.x / 1E7
+                    val lng = item.y / 1E7
+
+                    zones.add(FenceZone.ReturnPoint(
+                        location = LatLng(lat, lng)
+                    ))
+                }
+
+                else -> {
+                    Log.w("Geofence", "Unknown fence command: ${item.command.value}")
+                }
+            }
+        }
+
+        return zones
+    }
+
+    /**
+     * Start monitoring fence status from flight controller.
+     * This monitors SYS_STATUS for fence breach flags.
+     * Should be called when connection is established.
+     */
+    fun startFenceMonitoring() {
+        AppScope.launch {
+            // Monitor SYS_STATUS for fence breach flags
+            mavFrame
+                .filter { state.value.fcuDetected && it.systemId == fcuSystemId }
+                .map { it.message }
+                .filterIsInstance<SysStatus>()
+                .collect { sysStatus ->
+                    // Check fence breach bit in onboard_control_sensors_health
+                    // Bit 8 (0x100) = FENCE
+                    val fenceHealthy = (sysStatus.onboardControlSensorsHealth.value and 0x100u) != 0u
+                    val fenceEnabled = (sysStatus.onboardControlSensorsEnabled.value and 0x100u) != 0u
+                    val fenceBreached = fenceEnabled && !fenceHealthy
+
+                    val previousStatus = _fenceStatus.value
+
+                    _fenceStatus.update { it.copy(
+                        enabled = fenceEnabled,
+                        breached = fenceBreached
+                    )}
+
+                    // Notify only on new breach detection
+                    if (fenceBreached && !previousStatus.breached) {
+                        Log.w("Geofence", "⚠️ FENCE BREACH DETECTED BY FC!")
+
+                        // Notify user
+                        withContext(Dispatchers.Main) {
+                            sharedViewModel.addNotification(
+                                Notification(
+                                    message = "⚠️ Geofence breach! FC is handling...",
+                                    type = NotificationType.WARNING
+                                )
+                            )
+                            sharedViewModel.speak("Geofence breach detected")
+                        }
+                    }
+                }
+        }
+    }
+
+    /**
+     * Clear all fence data from flight controller
+     */
+    suspend fun clearGeofenceFromFC(): Boolean {
+        return withContext(Dispatchers.IO) {
+            try {
+                Log.i("Geofence", "Clearing fence from flight controller...")
+
+                // Send MISSION_CLEAR_ALL with FENCE type
+                val clearCmd = MissionClearAll(
+                    targetSystem = fcuSystemId,
+                    targetComponent = fcuComponentId,
+                    missionType = MavEnumValue.of(MavMissionType.FENCE)
+                )
+                connection.trySendUnsignedV2(gcsSystemId, gcsComponentId, clearCmd)
+
+                // Wait for acknowledgment
+                val ack = withTimeoutOrNull(5000) {
+                    mavFrame
+                        .filter { it.systemId == fcuSystemId }
+                        .map { it.message }
+                        .filterIsInstance<MissionAck>()
+                        .first { it.missionType.value == MavMissionType.FENCE.value }
+                }
+
+                if (ack?.type?.value == MavMissionResult.MAV_MISSION_ACCEPTED.value) {
+                    Log.i("Geofence", "✅ Fence cleared from FC")
+
+                    // Disable fence
+                    delay(200)
+                    enableFence(false)
+
+                    // Reset fence status
+                    _fenceStatus.value = FenceStatus()
+
+                    return@withContext true
+                } else {
+                    Log.e("Geofence", "❌ Failed to clear fence: ${ack?.type}")
+                    return@withContext false
+                }
+
+            } catch (e: Exception) {
+                Log.e("Geofence", "Error clearing fence: ${e.message}")
+                false
+            }
+        }
+    }
+}

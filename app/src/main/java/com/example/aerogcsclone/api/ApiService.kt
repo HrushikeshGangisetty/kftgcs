@@ -1,6 +1,5 @@
 package com.example.aerogcsclone.api
 
-import android.os.Build
 import com.google.gson.Gson
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -25,7 +24,7 @@ object ApiService {
      * Attempts to read from BuildConfig first, falls back to defaults for development
      */
     private object ServerConfig {
-        // Default values for development (emulator)
+        // Default values for development (physical device connects to AWS EC2)
         private const val DEFAULT_SERVER_IP = "65.0.76.31"
         private const val DEFAULT_SERVER_PORT = "8000"
         private const val DEFAULT_API_URL = "http://65.0.76.31:8000"
@@ -74,34 +73,20 @@ object ApiService {
     }
 
     // ===========================================
-    // AUTO-DETECTION LOGIC
+    // BASE URL CONFIGURATION
     // ===========================================
 
-    private val BASE_URL: String
-        get() {
-            return when {
-                // If using production server (release builds)
-                ServerConfig.useProductionServer -> ServerConfig.apiBaseUrl
+    // Compute BASE_URL once at initialization
+    private val BASE_URL: String by lazy {
+        val url = when {
+            // If using production server (release builds)
+            ServerConfig.useProductionServer -> ServerConfig.apiBaseUrl
 
-                // If running on emulator, use 10.0.2.2 with configured port
-                isEmulator() -> "http://10.0.2.2:${ServerConfig.serverPort}"
-
-                // If running on physical device, use configured IP
-                else -> "http://${ServerConfig.serverIp}:${ServerConfig.serverPort}"
-            }
+            // Use configured server IP (physical device)
+            else -> "http://${ServerConfig.serverIp}:${ServerConfig.serverPort}"
         }
-
-    private fun isEmulator(): Boolean {
-        return (Build.FINGERPRINT.startsWith("generic")
-                || Build.FINGERPRINT.startsWith("unknown")
-                || Build.MODEL.contains("google_sdk")
-                || Build.MODEL.contains("Emulator")
-                || Build.MODEL.contains("Android SDK built for x86")
-                || Build.MANUFACTURER.contains("Genymotion")
-                || Build.BRAND.startsWith("generic") && Build.DEVICE.startsWith("generic")
-                || "google_sdk" == Build.PRODUCT
-                || Build.PRODUCT.contains("sdk")
-                || Build.PRODUCT.contains("emulator"))
+        Timber.d("BASE_URL selected: $url (useProduction=${ServerConfig.useProductionServer})")
+        url
     }
 
     // ===========================================

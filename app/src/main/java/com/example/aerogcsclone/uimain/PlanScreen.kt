@@ -100,10 +100,10 @@ fun PlanScreen(
     var isPlanSaved by remember { mutableStateOf(false) }  // True after saving, false during editing
 
     // Grid survey parameters
-    var lineSpacing by remember { mutableStateOf(3f) }
+    var lineSpacing by remember { mutableStateOf(2f) }
     var gridAngle by remember { mutableStateOf(0f) }
-    var surveySpeed by remember { mutableStateOf(10f) }
-    var surveyAltitude by remember { mutableStateOf(60f) }
+    var surveySpeed by remember { mutableStateOf(1f) }
+    var surveyAltitude by remember { mutableStateOf(1f) }
     var holdNosePosition by remember { mutableStateOf(false) }
     var autoSpray by remember { mutableStateOf(false) }
     var indentation by remember { mutableStateOf(1f) }  // Safe zone padding in meters (1-10m, 0.5 step)
@@ -495,6 +495,10 @@ fun PlanScreen(
                 surveySpeed = gridParams.surveySpeed
                 surveyAltitude = gridParams.surveyAltitude
                 surveyPolygon = gridParams.surveyPolygon
+                obstacles = gridParams.obstacles
+
+                // Debug log for obstacles loading
+                android.util.Log.d("PlanScreen", "Loaded template with ${gridParams.obstacles.size} obstacles")
 
                 if (surveyPolygon.size >= 3) {
                     regenerateGrid()
@@ -1726,8 +1730,8 @@ fun PlanScreen(
                                     value = lineSpacing,
                                     onValueChange = { if (!isPlanSaved) lineSpacing = it },
                                     enabled = !isPlanSaved,
-                                    valueRange = 3f..5f,
-                                    steps = 19,
+                                    valueRange = 2f..5f,
+                                    steps = 21,
                                     modifier = Modifier.weight(1f),
                                     colors = SliderDefaults.colors(
                                         thumbColor = if (isPlanSaved) Color.Gray else MaterialTheme.colorScheme.primary,
@@ -1773,8 +1777,8 @@ fun PlanScreen(
                                 Slider(
                                     value = gridAngle,
                                     onValueChange = { gridAngle = it },
-                                    valueRange = 0f..180f,
-                                    steps = 35,
+                                    valueRange = 0f..360f,
+                                    steps = 71,
                                     modifier = Modifier.weight(1f),
                                     colors = SliderDefaults.colors(
                                         thumbColor = MaterialTheme.colorScheme.primary,
@@ -1783,7 +1787,7 @@ fun PlanScreen(
                                     )
                                 )
                                 IconButton(
-                                    onClick = { gridAngle = (gridAngle + 5f).coerceAtMost(180f) },
+                                    onClick = { gridAngle = (gridAngle + 5f).coerceAtMost(360f) },
                                     modifier = Modifier.size(32.dp)
                                 ) {
                                     Icon(
@@ -2151,8 +2155,8 @@ fun PlanScreen(
                                 Slider(
                                     value = fenceRadius,
                                     onValueChange = { telemetryViewModel.setFenceRadius(it) },
-                                    valueRange = -4f..50f, // Changed minimum from 0 to -4 for testing boundary crossing
-                                    steps = 50, // Updated steps to match new range
+                                    valueRange = 1f..50f, // Minimum 1m as requested, max 50m
+                                    steps = 48, // 1m increments from 1 to 50
                                     modifier = Modifier.fillMaxWidth(),
                                     colors = SliderDefaults.colors(
                                         thumbColor = Color.Green,
@@ -2568,13 +2572,17 @@ fun PlanScreen(
                 SaveMissionDialog(
                     onDismiss = { showSaveMissionDialog = false },
                     onSave = { projectName, plotName ->
+                        // Debug log for obstacles saving
+                        android.util.Log.d("PlanScreen", "Saving template with ${obstacles.size} obstacles")
+
                         val currentGridParams = if (isGridSurveyMode) {
                             GridParameters(
                                 lineSpacing = lineSpacing,
                                 gridAngle = gridAngle,
                                 surveySpeed = surveySpeed,
                                 surveyAltitude = surveyAltitude,
-                                surveyPolygon = surveyPolygon
+                                surveyPolygon = surveyPolygon,
+                                obstacles = obstacles
                             )
                         } else null
 
