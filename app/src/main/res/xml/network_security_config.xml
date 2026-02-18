@@ -2,7 +2,7 @@
 <network-security-config>
     <!--
         SECURITY: Cleartext traffic enabled for WebSocket connections to AWS.
-        Android → WebSocket → AWS EC2 (65.0.76.31:3000) → PostgreSQL DB
+        Android → WebSocket → AWS EC2 (65.0.76.31:8000) → PostgreSQL DB
     -->
 
     <!-- Base configuration: Allow cleartext traffic for development/testing -->

@@ -27,7 +27,8 @@ object ApiService {
         // Default values for development (physical device connects to AWS EC2)
         private const val DEFAULT_SERVER_IP = "65.0.76.31"
         private const val DEFAULT_SERVER_PORT = "8000"
-        private const val DEFAULT_API_URL = "http://65.0.76.31:8000"
+        // SECURITY: Use HTTPS for secure communication
+        private const val DEFAULT_API_URL = "https://65.0.76.31:8000"
 
         val apiBaseUrl: String
             get() = tryGetBuildConfigString("API_BASE_URL") ?: DEFAULT_API_URL

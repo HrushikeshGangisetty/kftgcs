@@ -54,15 +54,14 @@ class WebSocketManager {
 
         // Toggle for production vs development mode
         // Set to true when deploying to production with a real backend
-        private const val USE_SECURE_CONNECTION = false
+        private const val USE_SECURE_CONNECTION = true
 
         // Production server (WSS - encrypted)
-        // TODO: Replace with your actual production server URL before release
-        private const val PRODUCTION_WSS_URL = "wss://your-secure-server.com/ws/telemetry"
+        // Using secure WebSocket connection for AWS EC2
+        private const val PRODUCTION_WSS_URL = "wss://65.0.76.31:8000/ws/telemetry/"
 
         // Production server hostname for certificate pinning
-        // TODO: Replace with your actual server hostname
-        private const val PRODUCTION_HOST = "your-secure-server.com"
+        private const val PRODUCTION_HOST = "65.0.76.31"
 
         // Certificate pin (SHA-256 hash of server's public key)
         // TODO: Generate and add your server's certificate pin before production release

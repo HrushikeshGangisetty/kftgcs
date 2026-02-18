@@ -1,22 +1,14 @@
 package com.example.aerogcsclone.authentication
 
 import android.widget.Toast
-import androidx.activity.compose.rememberLauncherForActivityResult
-import androidx.activity.result.IntentSenderRequest
-import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Email
 import androidx.compose.material3.Button
-import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
-import androidx.compose.material3.Icon
-import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Text
@@ -131,21 +123,6 @@ fun LoginPage(modifier: Modifier = Modifier, navController: NavController, authV
 
                 TextButton(onClick = { navController.navigate(Screen.Signup.route) }) {
                     Text(text = "Signup", color = Color.Black)
-                }
-
-                Spacer(modifier = Modifier.height(8.dp))
-
-                OutlinedButton(
-                    onClick = {
-                        navController.navigate(Screen.Connection.route) {
-                            popUpTo(Screen.Login.route) { inclusive = true }
-                        }
-                    },
-                    colors = ButtonDefaults.outlinedButtonColors(
-                        contentColor = Color.Black
-                    )
-                ) {
-                    Text(text = "Direct Login", color = Color.Black)
                 }
             }
         }
