@@ -498,7 +498,7 @@ fun PlanScreen(
                 obstacles = gridParams.obstacles
 
                 // Debug log for obstacles loading
-                android.util.Log.d("PlanScreen", "Loaded template with ${gridParams.obstacles.size} obstacles")
+                LogUtils.d("PlanScreen", "Loaded template with ${gridParams.obstacles.size} obstacles")
 
                 if (surveyPolygon.size >= 3) {
                     regenerateGrid()
@@ -2573,7 +2573,7 @@ fun PlanScreen(
                     onDismiss = { showSaveMissionDialog = false },
                     onSave = { projectName, plotName ->
                         // Debug log for obstacles saving
-                        android.util.Log.d("PlanScreen", "Saving template with ${obstacles.size} obstacles")
+                        LogUtils.d("PlanScreen", "Saving template with ${obstacles.size} obstacles")
 
                         val currentGridParams = if (isGridSurveyMode) {
                             GridParameters(

@@ -4,7 +4,6 @@ package com.example.aerogcsclone.telemetry
 import android.annotation.SuppressLint
 import android.bluetooth.BluetoothDevice
 import android.content.Context
-import android.util.Log
 import androidx.compose.runtime.State
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -28,6 +27,7 @@ import com.example.aerogcsclone.telemetry.connections.BluetoothConnectionProvide
 import com.example.aerogcsclone.telemetry.connections.MavConnectionProvider
 import com.example.aerogcsclone.telemetry.connections.TcpConnectionProvider
 import com.example.aerogcsclone.utils.GeofenceUtils
+import com.example.aerogcsclone.utils.LogUtils
 import com.example.aerogcsclone.utils.TextToSpeechManager
 import com.example.aerogcsclone.fence.FenceAction
 import com.example.aerogcsclone.fence.FenceConfiguration
@@ -110,12 +110,12 @@ class SharedViewModel : ViewModel() {
      * This ensures WebSocket telemetry logging starts regardless of how the mission was initiated.
      */
     private fun onMissionBecameActive() {
-        Log.i("SharedVM", "🚀 Mission became active - checking WebSocket connection")
+        LogUtils.i("SharedVM", "🚀 Mission became active - checking WebSocket connection")
         viewModelScope.launch {
             try {
                 val wsManager = WebSocketManager.getInstance()
                 if (!wsManager.isConnected) {
-                    Log.i("SharedVM", "🔌 Auto-connecting WebSocket for active mission...")
+                    LogUtils.i("SharedVM", "🔌 Auto-connecting WebSocket for active mission...")
 
                     // 🔥 CRITICAL: Get latest pilotId and adminId from SessionManager
                     GCSApplication.getInstance()?.let { app ->
@@ -123,28 +123,28 @@ class SharedViewModel : ViewModel() {
                         val adminId = com.example.aerogcsclone.api.SessionManager.getAdminId(app)
                         wsManager.pilotId = pilotId
                         wsManager.adminId = adminId
-                        Log.i("SharedVM", "📋 Auto-connect: Updated WebSocket credentials: pilotId=$pilotId, adminId=$adminId")
+                        LogUtils.i("SharedVM", "📋 Auto-connect: Updated WebSocket credentials: pilotId=$pilotId, adminId=$adminId")
 
                         if (pilotId <= 0) {
-                            Log.e("SharedVM", "⚠️ WARNING: pilotId=$pilotId - User may not be logged in! Telemetry will not be saved.")
+                            LogUtils.e("SharedVM", "⚠️ WARNING: pilotId=$pilotId - User may not be logged in! Telemetry will not be saved.")
                         }
                     }
 
                     // 🔥 Set plot name before connecting
                     wsManager.selectedPlotName = _currentPlotName.value
-                    Log.i("SharedVM", "📋 Auto-connect: Plot name set: ${_currentPlotName.value}")
+                    LogUtils.i("SharedVM", "📋 Auto-connect: Plot name set: ${_currentPlotName.value}")
 
                     // 🔥 Set flight mode (Automatic or Manual)
                     wsManager.selectedFlightMode = _userSelectedFlightMode.value.name
-                    Log.i("SharedVM", "📋 Auto-connect: Flight mode set: ${_userSelectedFlightMode.value.name}")
+                    LogUtils.i("SharedVM", "📋 Auto-connect: Flight mode set: ${_userSelectedFlightMode.value.name}")
 
                     // 🔥 Set mission type (Grid or Waypoint)
                     wsManager.selectedMissionType = _selectedMissionType.value.name
-                    Log.i("SharedVM", "📋 Auto-connect: Mission type set: ${_selectedMissionType.value.name}")
+                    LogUtils.i("SharedVM", "📋 Auto-connect: Mission type set: ${_selectedMissionType.value.name}")
 
                     // 🔥 Set grid setup source
                     wsManager.gridSetupSource = _gridSetupSource.value.name
-                    Log.i("SharedVM", "📋 Auto-connect: Grid setup source set: ${_gridSetupSource.value.name}")
+                    LogUtils.i("SharedVM", "📋 Auto-connect: Grid setup source set: ${_gridSetupSource.value.name}")
 
                     wsManager.connect()
 
@@ -157,7 +157,7 @@ class SharedViewModel : ViewModel() {
 
                     if (wsManager.isConnected) {
                         delay(500) // Give time for session_ack and mission_created
-                        Log.i("SharedVM", "✅ Auto-connect: WebSocket ready after ${waitTime}ms")
+                        LogUtils.i("SharedVM", "✅ Auto-connect: WebSocket ready after ${waitTime}ms")
 
                         // Send mission started status
                         if (wsManager.missionId != null) {
@@ -167,16 +167,16 @@ class SharedViewModel : ViewModel() {
                                 eventStatus = "INFO",
                                 description = "Mission started (auto-detected via mode change)"
                             )
-                            Log.i("SharedVM", "✅ Auto-connect: Mission status STARTED sent to backend")
+                            LogUtils.i("SharedVM", "✅ Auto-connect: Mission status STARTED sent to backend")
                         }
                     } else {
-                        Log.w("SharedVM", "⚠️ Auto-connect: WebSocket failed to connect within timeout")
+                        LogUtils.w("SharedVM", "⚠️ Auto-connect: WebSocket failed to connect within timeout")
                     }
                 } else {
-                    Log.i("SharedVM", "✅ WebSocket already connected - no action needed")
+                    LogUtils.i("SharedVM", "✅ WebSocket already connected - no action needed")
                 }
             } catch (e: Exception) {
-                Log.e("SharedVM", "❌ Auto-connect: Failed to connect WebSocket", e)
+                LogUtils.e("SharedVM", "❌ Auto-connect: Failed to connect WebSocket", e)
             }
         }
     }
@@ -186,7 +186,7 @@ class SharedViewModel : ViewModel() {
      * Called when mission is completed or when user navigates to select a new mode.
      */
     fun clearMissionFromMap() {
-        Log.i("SharedVM", "Clearing mission data from map (including geofence)")
+        LogUtils.i("SharedVM", "Clearing mission data from map (including geofence)")
         _uploadedWaypoints.value = emptyList()
         _gridWaypoints.value = emptyList()
         _surveyPolygon.value = emptyList()
@@ -208,7 +208,7 @@ class SharedViewModel : ViewModel() {
      * Uses Mission Planner-style approach to clear fence from FC.
      */
     fun clearGeofence() {
-        Log.i("SharedVM", "🔥 Clearing geofence from UI and FC")
+        LogUtils.i("SharedVM", "🔥 Clearing geofence from UI and FC")
 
         // STEP 1: Disable and clear geofence on the Flight Controller
         viewModelScope.launch {
@@ -216,7 +216,7 @@ class SharedViewModel : ViewModel() {
                 // Use the new clearGeofenceFromFC function
                 val cleared = repo?.clearGeofenceFromFC() ?: false
                 if (cleared) {
-                    Log.i("Geofence", "✅ Geofence cleared from FC")
+                    LogUtils.i("Geofence", "✅ Geofence cleared from FC")
                     addNotification(
                         Notification(
                             message = "Geofence cleared from Flight Controller",
@@ -226,10 +226,10 @@ class SharedViewModel : ViewModel() {
                 } else {
                     // Fallback: just disable the fence
                     repo?.enableFence(false)
-                    Log.i("Geofence", "✅ Geofence disabled on FC")
+                    LogUtils.i("Geofence", "✅ Geofence disabled on FC")
                 }
             } catch (e: Exception) {
-                Log.e("Geofence", "❌ Failed to clear geofence from FC", e)
+                LogUtils.e("Geofence", "❌ Failed to clear geofence from FC", e)
                 addNotification(
                     Notification(
                         message = "Failed to clear geofence from FC: ${e.message}",
@@ -248,14 +248,14 @@ class SharedViewModel : ViewModel() {
         // STEP 3: Reset geofence warning/violation states
         resetGeofenceState()
 
-        Log.i("SharedVM", "✅ Geofence cleared from UI and FC")
+        LogUtils.i("SharedVM", "✅ Geofence cleared from UI and FC")
     }
 
     // Initialize TTS with context
     fun initializeTextToSpeech(context: Context) {
         if (ttsManager == null) {
             ttsManager = TextToSpeechManager(context)
-            Log.d("SharedVM", "TextToSpeech initialized")
+            LogUtils.d("SharedVM", "TextToSpeech initialized")
         }
     }
 
@@ -264,7 +264,7 @@ class SharedViewModel : ViewModel() {
         ttsManager?.setLanguage(languageCode)
         // Also update the app-wide language for UI strings
         com.example.aerogcsclone.utils.AppStrings.setLanguage(languageCode)
-        Log.d("SharedVM", "Language set to: $languageCode")
+        LogUtils.d("SharedVM", "Language set to: $languageCode")
     }
 
     // Announce language selection
@@ -313,7 +313,7 @@ class SharedViewModel : ViewModel() {
 
     fun setMissionType(type: MissionType) {
         _selectedMissionType.value = type
-        Log.i("SharedVM", "📋 Mission type set to: ${type.name}")
+        LogUtils.i("SharedVM", "📋 Mission type set to: ${type.name}")
     }
 
     // ========== GRID SETUP SOURCE (How the grid boundary was created) ==========
@@ -331,7 +331,7 @@ class SharedViewModel : ViewModel() {
 
     fun setGridSetupSource(source: GridSetupSource) {
         _gridSetupSource.value = source
-        Log.i("SharedVM", "📋 Grid setup source set to: ${source.name}")
+        LogUtils.i("SharedVM", "📋 Grid setup source set to: ${source.name}")
     }
 
     /**
@@ -344,13 +344,13 @@ class SharedViewModel : ViewModel() {
 
     fun announceSelectedAutomatic() {
         _userSelectedFlightMode.value = UserFlightMode.AUTOMATIC
-        Log.i("SharedVM", "User selected AUTOMATIC mode - pause/resume ENABLED")
+        LogUtils.i("SharedVM", "User selected AUTOMATIC mode - pause/resume ENABLED")
         ttsManager?.announceSelectedAutomatic()
     }
 
     fun announceSelectedManual() {
         _userSelectedFlightMode.value = UserFlightMode.MANUAL
-        Log.i("SharedVM", "User selected MANUAL mode - pause/resume DISABLED")
+        LogUtils.i("SharedVM", "User selected MANUAL mode - pause/resume DISABLED")
         ttsManager?.announceSelectedManual()
     }
 
@@ -400,20 +400,20 @@ class SharedViewModel : ViewModel() {
 
                 // Only proceed if we're in AUTO mode
                 if (currentMode?.equals("Auto", ignoreCase = true) != true) {
-                    Log.d("SharedVM", "Tank empty detected but not in AUTO mode ($currentMode) - skipping LOITER transition")
+                    LogUtils.d("SharedVM", "Tank empty detected but not in AUTO mode ($currentMode) - skipping LOITER transition")
                     return@launch
                 }
 
-                Log.i("SharedVM", "=== TANK EMPTY IN AUTO MODE ===")
-                Log.i("SharedVM", "Switching to LOITER mode for tank refill")
-                Log.i("SharedVM", "Current waypoint: $currentWp, Last AUTO waypoint: $lastAutoWp")
+                LogUtils.i("SharedVM", "=== TANK EMPTY IN AUTO MODE ===")
+                LogUtils.i("SharedVM", "Switching to LOITER mode for tank refill")
+                LogUtils.i("SharedVM", "Current waypoint: $currentWp, Last AUTO waypoint: $lastAutoWp")
 
                 // Change mode to LOITER - this will trigger the resume popup via mode change detection
                 // (AUTO → LOITER transition is detected in TelemetryRepository and triggers onModeChangedToLoiterFromAuto)
                 val result = repo?.changeMode(MavMode.LOITER) ?: false
 
                 if (result) {
-                    Log.i("SharedVM", "LOITER mode command sent successfully - resume popup will be triggered by mode change detection")
+                    LogUtils.i("SharedVM", "LOITER mode command sent successfully - resume popup will be triggered by mode change detection")
 
                     // Send mission status to backend
                     try {
@@ -424,10 +424,10 @@ class SharedViewModel : ViewModel() {
                             description = "Mission paused due to tank empty"
                         )
                     } catch (e: Exception) {
-                        Log.e("SharedVM", "Failed to send tank empty pause status", e)
+                        LogUtils.e("SharedVM", "Failed to send tank empty pause status", e)
                     }
                 } else {
-                    Log.e("SharedVM", "Failed to send LOITER mode command for tank empty")
+                    LogUtils.e("SharedVM", "Failed to send LOITER mode command for tank empty")
                     addNotification(
                         Notification(
                             message = "Failed to switch to LOITER mode for tank refill",
@@ -436,7 +436,7 @@ class SharedViewModel : ViewModel() {
                     )
                 }
             } catch (e: Exception) {
-                Log.e("SharedVM", "Error handling tank empty in AUTO mode", e)
+                LogUtils.e("SharedVM", "Error handling tank empty in AUTO mode", e)
             }
         }
     }
@@ -532,12 +532,12 @@ class SharedViewModel : ViewModel() {
             try {
                 val pairedBtDevices = bluetoothAdapter.bondedDevices
                 setPairedDevices(pairedBtDevices)
-                Log.d("SharedVM", "Refreshed ${pairedBtDevices.size} paired Bluetooth devices")
+                LogUtils.d("SharedVM", "Refreshed ${pairedBtDevices.size} paired Bluetooth devices")
             } catch (se: SecurityException) {
-                Log.e("SharedVM", "Bluetooth permission missing: ${se.message}")
+                LogUtils.e("SharedVM", "Bluetooth permission missing: ${se.message}")
             }
         } else {
-            Log.e("SharedVM", "Bluetooth adapter not available")
+            LogUtils.e("SharedVM", "Bluetooth adapter not available")
         }
     }
 
@@ -618,7 +618,7 @@ class SharedViewModel : ViewModel() {
         // NOTE: Mission waypoints are NO LONGER automatically cleared when mission completes.
         // The map lines should remain visible until user navigates to select a new flying mode.
         if (completed) {
-            Log.i("SharedVM", "Mission completed via updateFlightState - keeping map lines visible")
+            LogUtils.i("SharedVM", "Mission completed via updateFlightState - keeping map lines visible")
         }
     }
 
@@ -628,7 +628,7 @@ class SharedViewModel : ViewModel() {
      */
     fun markMissionCompletedHandled() {
         _telemetryState.value = _telemetryState.value.copy(missionCompletedHandled = true)
-        Log.i("SharedVM", "Mission completed handled - popup won't show again for this mission")
+        LogUtils.i("SharedVM", "Mission completed handled - popup won't show again for this mission")
     }
 
     /**
@@ -640,7 +640,7 @@ class SharedViewModel : ViewModel() {
             missionCompletedHandled = false,
             lastMissionElapsedSec = null
         )
-        Log.i("SharedVM", "Mission completed state reset")
+        LogUtils.i("SharedVM", "Mission completed state reset")
     }
 
     // --- Calibration helpers ---
@@ -649,25 +649,25 @@ class SharedViewModel : ViewModel() {
      * This is needed because these messages are not sent by default.
      */
     suspend fun requestMagCalMessages(hz: Float = 10f) {
-        Log.d("CompassCalVM", "========== REQUESTING MAG CAL MESSAGE STREAMING ==========")
-        Log.d("CompassCalVM", "Requesting MAG_CAL_PROGRESS (191) at $hz Hz")
-        Log.d("CompassCalVM", "Requesting MAG_CAL_REPORT (192) at $hz Hz")
-        Log.d("CompassCalVM", "Interval: ${if (hz > 0f) (1_000_000f / hz).toInt() else 0} microseconds")
+        LogUtils.d("CompassCalVM", "========== REQUESTING MAG CAL MESSAGE STREAMING ==========")
+        LogUtils.d("CompassCalVM", "Requesting MAG_CAL_PROGRESS (191) at $hz Hz")
+        LogUtils.d("CompassCalVM", "Requesting MAG_CAL_REPORT (192) at $hz Hz")
+        LogUtils.d("CompassCalVM", "Interval: ${if (hz > 0f) (1_000_000f / hz).toInt() else 0} microseconds")
 
         repo?.sendCommand(
             MavCmd.SET_MESSAGE_INTERVAL,
             param1 = 191f, // MAG_CAL_PROGRESS message ID
             param2 = if (hz <= 0f) 0f else (1_000_000f / hz) // interval in microseconds
         )
-        Log.d("CompassCalVM", "✓ MAG_CAL_PROGRESS message interval command sent")
+        LogUtils.d("CompassCalVM", "✓ MAG_CAL_PROGRESS message interval command sent")
 
         repo?.sendCommand(
             MavCmd.SET_MESSAGE_INTERVAL,
             param1 = 192f, // MAG_CAL_REPORT message ID
             param2 = if (hz <= 0f) 0f else (1_000_000f / hz) // interval in microseconds
         )
-        Log.d("CompassCalVM", "✓ MAG_CAL_REPORT message interval command sent")
-        Log.d("CompassCalVM", "========================================================")
+        LogUtils.d("CompassCalVM", "✓ MAG_CAL_REPORT message interval command sent")
+        LogUtils.d("CompassCalVM", "========================================================")
     }
 
     /**
@@ -675,23 +675,23 @@ class SharedViewModel : ViewModel() {
      * Sets the message interval to 0 (disabled).
      */
     suspend fun stopMagCalMessages() {
-        Log.d("CompassCalVM", "========== STOPPING MAG CAL MESSAGE STREAMING ==========")
-        Log.d("CompassCalVM", "Disabling MAG_CAL_PROGRESS (191) streaming")
+        LogUtils.d("CompassCalVM", "========== STOPPING MAG CAL MESSAGE STREAMING ==========")
+        LogUtils.d("CompassCalVM", "Disabling MAG_CAL_PROGRESS (191) streaming")
         repo?.sendCommand(
             MavCmd.SET_MESSAGE_INTERVAL,
             param1 = 191f, // MAG_CAL_PROGRESS message ID
             param2 = 0f // 0 = disable streaming
         )
-        Log.d("CompassCalVM", "✓ MAG_CAL_PROGRESS streaming disabled")
+        LogUtils.d("CompassCalVM", "✓ MAG_CAL_PROGRESS streaming disabled")
 
-        Log.d("CompassCalVM", "Disabling MAG_CAL_REPORT (192) streaming")
+        LogUtils.d("CompassCalVM", "Disabling MAG_CAL_REPORT (192) streaming")
         repo?.sendCommand(
             MavCmd.SET_MESSAGE_INTERVAL,
             param1 = 192f, // MAG_CAL_REPORT message ID
             param2 = 0f // 0 = disable streaming
         )
-        Log.d("CompassCalVM", "✓ MAG_CAL_REPORT streaming disabled")
-        Log.d("CompassCalVM", "========================================================")
+        LogUtils.d("CompassCalVM", "✓ MAG_CAL_REPORT streaming disabled")
+        LogUtils.d("CompassCalVM", "========================================================")
     }
 
     /**
@@ -706,7 +706,7 @@ class SharedViewModel : ViewModel() {
                     .first()
             }
         } catch (e: Exception) {
-            Log.e("SharedVM", "Error while awaiting COMMAND_ACK for $commandId", e)
+            LogUtils.e("SharedVM", "Error while awaiting COMMAND_ACK for $commandId", e)
             null
         }
     }
@@ -716,31 +716,31 @@ class SharedViewModel : ViewModel() {
      * Message ID 65 for RC_CHANNELS.
      */
     suspend fun requestRCChannels(hz: Float = 10f) {
-        Log.d("RCCalVM", "========== REQUESTING RC_CHANNELS MESSAGE STREAMING ==========")
-        Log.d("RCCalVM", "Requesting RC_CHANNELS (65) at $hz Hz")
-        Log.d("RCCalVM", "Interval: ${if (hz > 0f) (1_000_000f / hz).toInt() else 0} microseconds")
+        LogUtils.d("RCCalVM", "========== REQUESTING RC_CHANNELS MESSAGE STREAMING ==========")
+        LogUtils.d("RCCalVM", "Requesting RC_CHANNELS (65) at $hz Hz")
+        LogUtils.d("RCCalVM", "Interval: ${if (hz > 0f) (1_000_000f / hz).toInt() else 0} microseconds")
 
         repo?.sendCommand(
             MavCmd.SET_MESSAGE_INTERVAL,
             param1 = 65f, // RC_CHANNELS message ID
             param2 = if (hz <= 0f) 0f else (1_000_000f / hz) // interval in microseconds
         )
-        Log.d("RCCalVM", "✓ RC_CHANNELS message interval command sent")
-        Log.d("RCCalVM", "==============================================================")
+        LogUtils.d("RCCalVM", "✓ RC_CHANNELS message interval command sent")
+        LogUtils.d("RCCalVM", "==============================================================")
     }
 
     /**
      * Stop RC_CHANNELS message streaming.
      */
     suspend fun stopRCChannels() {
-        Log.d("RCCalVM", "========== STOPPING RC_CHANNELS MESSAGE STREAMING ==========")
+        LogUtils.d("RCCalVM", "========== STOPPING RC_CHANNELS MESSAGE STREAMING ==========")
         repo?.sendCommand(
             MavCmd.SET_MESSAGE_INTERVAL,
             param1 = 65f, // RC_CHANNELS message ID
             param2 = 0f // 0 = disable streaming
         )
-        Log.d("RCCalVM", "✓ RC_CHANNELS streaming disabled")
-        Log.d("RCCalVM", "=============================================================")
+        LogUtils.d("RCCalVM", "✓ RC_CHANNELS streaming disabled")
+        LogUtils.d("RCCalVM", "=============================================================")
     }
 
     /**
@@ -751,7 +751,7 @@ class SharedViewModel : ViewModel() {
      * Param2-7: 0 (reserved)
      */
     suspend fun rebootAutopilot() {
-        Log.d("Calibration", "========== SENDING REBOOT COMMAND ==========")
+        LogUtils.d("Calibration", "========== SENDING REBOOT COMMAND ==========")
         try {
             repo?.sendCommand(
                 MavCmd.PREFLIGHT_REBOOT_SHUTDOWN,
@@ -763,11 +763,11 @@ class SharedViewModel : ViewModel() {
                 param6 = 0f, // Reserved
                 param7 = 0f  // Reserved
             )
-            Log.d("Calibration", "✓ Reboot command sent successfully")
+            LogUtils.d("Calibration", "✓ Reboot command sent successfully")
         } catch (e: Exception) {
-            Log.e("Calibration", "❌ Failed to send reboot command", e)
+            LogUtils.e("Calibration", "❌ Failed to send reboot command", e)
         }
-        Log.d("Calibration", "============================================")
+        LogUtils.d("Calibration", "============================================")
     }
 
     /**
@@ -788,9 +788,9 @@ class SharedViewModel : ViewModel() {
                     repository.gcsComponentId,
                     paramRequestRead
                 )
-                Log.d("RCCalVM", "📤 Sent PARAM_REQUEST_READ for: $paramId")
+                LogUtils.d("RCCalVM", "📤 Sent PARAM_REQUEST_READ for: $paramId")
             } catch (e: Exception) {
-                Log.e("RCCalVM", "Failed to request parameter $paramId", e)
+                LogUtils.e("RCCalVM", "Failed to request parameter $paramId", e)
             }
         }
     }
@@ -802,7 +802,7 @@ class SharedViewModel : ViewModel() {
     suspend fun setParameter(paramId: String, value: Float, timeoutMs: Long = 3000L): com.divpundir.mavlink.definitions.common.ParamValue? {
         repo?.let { repository ->
             try {
-                Log.d("RCCalVM", "📤 Setting parameter: $paramId = $value")
+                LogUtils.d("RCCalVM", "📤 Setting parameter: $paramId = $value")
 
                 val paramSet = com.divpundir.mavlink.definitions.common.ParamSet(
                     targetSystem = repository.fcuSystemId,
@@ -825,7 +825,7 @@ class SharedViewModel : ViewModel() {
                         .first()
                 }
             } catch (e: Exception) {
-                Log.e("RCCalVM", "Failed to set parameter $paramId", e)
+                LogUtils.e("RCCalVM", "Failed to set parameter $paramId", e)
                 return null
             }
         }
@@ -840,7 +840,7 @@ class SharedViewModel : ViewModel() {
                     if (portInt != null) {
                         TcpConnectionProvider(ipAddress.value, portInt)
                     } else {
-                        Log.e("SharedVM", "Invalid port number.")
+                        LogUtils.e("SharedVM", "Invalid port number.")
                         null
                     }
                 }
@@ -848,14 +848,14 @@ class SharedViewModel : ViewModel() {
                     selectedDevice.value?.device?.let {
                         BluetoothConnectionProvider(it)
                     } ?: run {
-                        Log.e("SharedVM", "No Bluetooth device selected.")
+                        LogUtils.e("SharedVM", "No Bluetooth device selected.")
                         null
                     }
                 }
             }
 
             if (provider == null) {
-                Log.e("SharedVM", "Failed to create connection provider.")
+                LogUtils.e("SharedVM", "Failed to create connection provider.")
                 return@launch
             }
 
@@ -872,7 +872,7 @@ class SharedViewModel : ViewModel() {
                     // Preserve SharedViewModel-managed fields (pause state, mission active state) while updating from repository
                     _telemetryState.update { currentState ->
                         // DEBUG LOG: Track state synchronization
-                        Log.i("DEBUG_STATE", "Before sync - repoLastAuto: ${repoState.lastAutoWaypoint}, currentLastAuto: ${currentState.lastAutoWaypoint}, repoCurrent: ${repoState.currentWaypoint}, currentCurrent: ${currentState.currentWaypoint}")
+                        LogUtils.i("DEBUG_STATE", "Before sync - repoLastAuto: ${repoState.lastAutoWaypoint}, currentLastAuto: ${currentState.lastAutoWaypoint}, repoCurrent: ${repoState.currentWaypoint}, currentCurrent: ${currentState.currentWaypoint}")
 
                         // IMPORTANT: Preserve isMissionActive if it's currently true (managed by UnifiedFlightTracker)
                         // This ensures manual missions aren't overwritten by TelemetryRepository's AUTO-only logic
@@ -957,7 +957,7 @@ class SharedViewModel : ViewModel() {
     fun setCurrentMissionNames(projectName: String, plotName: String) {
         _currentProjectName.value = projectName
         _currentPlotName.value = plotName
-        Log.i("SharedVM", "Current mission names set - Project: $projectName, Plot: $plotName")
+        LogUtils.i("SharedVM", "Current mission names set - Project: $projectName, Plot: $plotName")
     }
 
     /**
@@ -967,7 +967,7 @@ class SharedViewModel : ViewModel() {
     fun showMissionCompletionDialog(totalTime: String, totalAcres: String, sprayedAcres: String, consumedLitres: String) {
         _missionCompletionData.value = MissionCompletionData(totalTime, totalAcres, sprayedAcres, consumedLitres)
         _showMissionCompletionDialog.value = true
-        Log.i("SharedVM", "Mission completion dialog triggered - Time: $totalTime, Acres: $totalAcres, Sprayed: $sprayedAcres, Litres: $consumedLitres")
+        LogUtils.i("SharedVM", "Mission completion dialog triggered - Time: $totalTime, Acres: $totalAcres, Sprayed: $sprayedAcres, Litres: $consumedLitres")
         // 🔌 WebSocket stays connected - will be disconnected when user clicks OK
     }
 
@@ -976,7 +976,7 @@ class SharedViewModel : ViewModel() {
      */
     fun dismissMissionCompletionDialog() {
         _showMissionCompletionDialog.value = false
-        Log.i("SharedVM", "Mission completion dialog dismissed")
+        LogUtils.i("SharedVM", "Mission completion dialog dismissed")
     }
 
     /**
@@ -989,7 +989,7 @@ class SharedViewModel : ViewModel() {
         _currentPlotName.value = plotName
         _currentCropType.value = cropType
         _showMissionCompletionDialog.value = false
-        Log.i("SharedVM", "Mission completion data saved - Project: $projectName, Plot: $plotName, CropType: $cropType")
+        LogUtils.i("SharedVM", "Mission completion data saved - Project: $projectName, Plot: $plotName, CropType: $cropType")
 
         // 🔥 Send mission summary with all data including crop type
         try {
@@ -1021,7 +1021,7 @@ class SharedViewModel : ViewModel() {
                 .replace(" acre", "")
                 .toDoubleOrNull() ?: 0.0
 
-            Log.d("SharedVM", "🔥 DEBUG: completionData.sprayedAcres='${completionData.sprayedAcres}', parsed totalSprayedAcres=$totalSprayedAcres")
+            LogUtils.d("SharedVM", "🔥 DEBUG: completionData.sprayedAcres='${completionData.sprayedAcres}', parsed totalSprayedAcres=$totalSprayedAcres")
 
             wsManager.sendMissionSummary(
                 totalAcres = totalAcres,
@@ -1037,17 +1037,17 @@ class SharedViewModel : ViewModel() {
                 cropType = cropType,
                 totalSprayedAcres = totalSprayedAcres
             )
-            Log.i("SharedVM", "📤 Mission summary sent with cropType=$cropType")
+            LogUtils.i("SharedVM", "📤 Mission summary sent with cropType=$cropType")
         } catch (e: Exception) {
-            Log.e("SharedVM", "❌ Failed to send mission summary: ${e.message}", e)
+            LogUtils.e("SharedVM", "❌ Failed to send mission summary: ${e.message}", e)
         }
 
         // 🔌 Disconnect WebSocket after sending summary
         try {
             WebSocketManager.getInstance().disconnect()
-            Log.i("SharedVM", "🔌 WebSocket disconnected - User clicked OK on mission completion dialog")
+            LogUtils.i("SharedVM", "🔌 WebSocket disconnected - User clicked OK on mission completion dialog")
         } catch (e: Exception) {
-            Log.e("SharedVM", "❌ Failed to disconnect WebSocket: ${e.message}", e)
+            LogUtils.e("SharedVM", "❌ Failed to disconnect WebSocket: ${e.message}", e)
         }
 
         // The actual saving to database should be handled by TlogViewModel or MissionTemplateViewModel
@@ -1152,7 +1152,7 @@ class SharedViewModel : ViewModel() {
             val scaledPolygon = GeofenceUtils.scalePolygon(_geofencePolygon.value, deltaMeters)
             if (scaledPolygon.size >= 3) {
                 _geofencePolygon.value = scaledPolygon
-                Log.d("Geofence", "Geofence polygon scaled by ${deltaMeters}m (new buffer: ${newRadius}m)")
+                LogUtils.d("Geofence", "Geofence polygon scaled by ${deltaMeters}m (new buffer: ${newRadius}m)")
 
                 // Schedule debounced upload - will upload after user stops adjusting slider
                 scheduleGeofenceUpload(scaledPolygon)
@@ -1177,14 +1177,14 @@ class SharedViewModel : ViewModel() {
             val droneLon = _telemetryState.value.longitude
             if (_homePosition.value == null && droneLat != null && droneLon != null) {
                 _homePosition.value = LatLng(droneLat, droneLon)
-                Log.i("Geofence", "Home position captured: $droneLat, $droneLon")
+                LogUtils.i("Geofence", "Home position captured: $droneLat, $droneLon")
             }
 
             // Generate geofence polygon from waypoints and upload to FC
             // This will call uploadGeofenceToFC which uses the new Mission Planner approach
             updateGeofencePolygon()
 
-            Log.i("Geofence", "✓ Geofence ENABLED - uploading to FC")
+            LogUtils.i("Geofence", "✓ Geofence ENABLED - uploading to FC")
             addNotification(
                 Notification(
                     message = "Geofence enabled - uploading to FC...",
@@ -1198,14 +1198,14 @@ class SharedViewModel : ViewModel() {
                     // Use the new clearGeofenceFromFC function
                     val cleared = repo?.clearGeofenceFromFC() ?: false
                     if (cleared) {
-                        Log.i("Geofence", "✅ Geofence cleared from FC")
+                        LogUtils.i("Geofence", "✅ Geofence cleared from FC")
                     } else {
                         // Fallback: just disable the fence
                         repo?.enableFence(false)
-                        Log.i("Geofence", "✅ Geofence disabled on FC")
+                        LogUtils.i("Geofence", "✅ Geofence disabled on FC")
                     }
                 } catch (e: Exception) {
-                    Log.e("Geofence", "❌ Failed to disable geofence on FC", e)
+                    LogUtils.e("Geofence", "❌ Failed to disable geofence on FC", e)
                 }
             }
 
@@ -1214,7 +1214,7 @@ class SharedViewModel : ViewModel() {
             _geofencePolygon.value = emptyList()
             _fenceConfiguration.value = null
             _homePosition.value = null
-            Log.i("Geofence", "Geofence DISABLED - all state reset")
+            LogUtils.i("Geofence", "Geofence DISABLED - all state reset")
             addNotification(
                 Notification(
                     message = "Geofence disabled",
@@ -1231,7 +1231,7 @@ class SharedViewModel : ViewModel() {
     fun updateGeofencePolygonManually(polygon: List<LatLng>) {
         if (_geofenceEnabled.value && polygon.size >= 3) {
             _geofencePolygon.value = polygon
-            Log.d("Geofence", "Geofence polygon manually updated with ${polygon.size} vertices")
+            LogUtils.d("Geofence", "Geofence polygon manually updated with ${polygon.size} vertices")
 
             // Use debounced upload for manual adjustments (dragging)
             scheduleGeofenceUpload(polygon)
@@ -1250,7 +1250,7 @@ class SharedViewModel : ViewModel() {
         val homePos = _homePosition.value
         if (homePos != null) {
             allWaypoints.add(homePos)
-            Log.d("Geofence", "Added home position to geofence: $homePos")
+            LogUtils.d("Geofence", "Added home position to geofence: $homePos")
         }
 
         // DO NOT include current drone position - geofence should remain stationary
@@ -1259,26 +1259,26 @@ class SharedViewModel : ViewModel() {
         // Add mission waypoints
         if (_uploadedWaypoints.value.isNotEmpty()) {
             allWaypoints.addAll(_uploadedWaypoints.value)
-            Log.d("Geofence", "Added ${_uploadedWaypoints.value.size} uploaded waypoints")
+            LogUtils.d("Geofence", "Added ${_uploadedWaypoints.value.size} uploaded waypoints")
         } else {
             allWaypoints.addAll(_planningWaypoints.value)
             if (_planningWaypoints.value.isNotEmpty()) {
-                Log.d("Geofence", "Added ${_planningWaypoints.value.size} planning waypoints")
+                LogUtils.d("Geofence", "Added ${_planningWaypoints.value.size} planning waypoints")
             }
         }
         allWaypoints.addAll(_surveyPolygon.value)
         if (_surveyPolygon.value.isNotEmpty()) {
-            Log.d("Geofence", "Added ${_surveyPolygon.value.size} survey polygon points")
+            LogUtils.d("Geofence", "Added ${_surveyPolygon.value.size} survey polygon points")
         }
         allWaypoints.addAll(_gridWaypoints.value)
         if (_gridWaypoints.value.isNotEmpty()) {
-            Log.d("Geofence", "Added ${_gridWaypoints.value.size} grid waypoints")
+            LogUtils.d("Geofence", "Added ${_gridWaypoints.value.size} grid waypoints")
         }
 
         if (allWaypoints.isNotEmpty()) {
             // Use default buffer distance with 7m minimum (increased from 5m for 2m extra safety)
             val bufferDistance = _fenceRadius.value.toDouble().coerceAtLeast(7.0)
-            Log.i("Geofence", "Generating ${if (_useSquareGeofence.value) "square" else "polygon"} geofence with ${allWaypoints.size} points, buffer distance: ${bufferDistance}m")
+            LogUtils.i("Geofence", "Generating ${if (_useSquareGeofence.value) "square" else "polygon"} geofence with ${allWaypoints.size} points, buffer distance: ${bufferDistance}m")
 
             val geofenceShape = if (_useSquareGeofence.value) {
                 GeofenceUtils.generateSquareGeofence(allWaypoints, bufferDistance)
@@ -1288,7 +1288,7 @@ class SharedViewModel : ViewModel() {
 
             if (geofenceShape.size >= 3) {
                 _geofencePolygon.value = geofenceShape
-                Log.i("Geofence", "✓ Geofence ${if (_useSquareGeofence.value) "square" else "polygon"} generated successfully with ${geofenceShape.size} vertices")
+                LogUtils.i("Geofence", "✓ Geofence ${if (_useSquareGeofence.value) "square" else "polygon"} generated successfully with ${geofenceShape.size} vertices")
 
                 // 🔥 VALIDATION: Verify all source waypoints are inside the generated geofence
                 var allInside = true
@@ -1296,25 +1296,25 @@ class SharedViewModel : ViewModel() {
                     val isInside = GeofenceUtils.isPointInPolygon(wp, geofenceShape)
                     val distToEdge = GeofenceUtils.distanceToPolygonEdge(wp, geofenceShape)
                     if (!isInside) {
-                        Log.e("Geofence", "❌ VALIDATION FAILED: Waypoint $index at ${wp.latitude}, ${wp.longitude} is OUTSIDE generated geofence!")
+                        LogUtils.e("Geofence", "❌ VALIDATION FAILED: Waypoint $index at ${wp.latitude}, ${wp.longitude} is OUTSIDE generated geofence!")
                         allInside = false
                     } else {
-                        Log.d("Geofence", "✓ Waypoint $index inside geofence, ${String.format("%.1f", distToEdge)}m from edge")
+                        LogUtils.d("Geofence", "✓ Waypoint $index inside geofence, ${String.format("%.1f", distToEdge)}m from edge")
                     }
                 }
 
                 if (!allInside) {
-                    Log.e("Geofence", "⚠️ WARNING: Some waypoints are outside the geofence! Buffer may be too small.")
+                    LogUtils.e("Geofence", "⚠️ WARNING: Some waypoints are outside the geofence! Buffer may be too small.")
                     // Increase buffer and regenerate
                     val largerBuffer = bufferDistance + 5.0
-                    Log.i("Geofence", "Attempting to regenerate with larger buffer: ${largerBuffer}m")
+                    LogUtils.i("Geofence", "Attempting to regenerate with larger buffer: ${largerBuffer}m")
                     val largerGeofence = if (_useSquareGeofence.value) {
                         GeofenceUtils.generateSquareGeofence(allWaypoints, largerBuffer)
                     } else {
                         GeofenceUtils.generatePolygonBuffer(allWaypoints, largerBuffer)
                     }
                     _geofencePolygon.value = largerGeofence
-                    Log.i("Geofence", "✓ Regenerated geofence with larger buffer")
+                    LogUtils.i("Geofence", "✓ Regenerated geofence with larger buffer")
 
                     // Upload regenerated geofence to FC immediately (first-time enable)
                     if (largerGeofence.size >= 3) {
@@ -1325,11 +1325,11 @@ class SharedViewModel : ViewModel() {
                     uploadGeofenceImmediately(geofenceShape)
                 }
             } else {
-                Log.w("Geofence", "Failed to generate valid geofence")
+                LogUtils.w("Geofence", "Failed to generate valid geofence")
                 _geofencePolygon.value = emptyList()
             }
         } else {
-            Log.w("Geofence", "No waypoints available for geofence")
+            LogUtils.w("Geofence", "No waypoints available for geofence")
             _geofencePolygon.value = emptyList()
         }
     }
@@ -1343,7 +1343,7 @@ class SharedViewModel : ViewModel() {
         // Check if all points are inside the polygon with a small tolerance
         for (point in points) {
             if (!GeofenceUtils.isPointInPolygon(point, polygon)) {
-                Log.w("SharedVM", "Point not in geofence: $point")
+                LogUtils.w("SharedVM", "Point not in geofence: $point")
                 return false
             }
         }
@@ -1357,7 +1357,7 @@ class SharedViewModel : ViewModel() {
      */
     private fun scheduleGeofenceUpload(polygon: List<LatLng>) {
         if (polygon.size < 3) {
-            Log.w("Geofence", "❌ Cannot upload geofence: insufficient points (${polygon.size})")
+            LogUtils.w("Geofence", "❌ Cannot upload geofence: insufficient points (${polygon.size})")
             return
         }
 
@@ -1369,7 +1369,7 @@ class SharedViewModel : ViewModel() {
 
         // Start a new debounce job
         fenceUploadJob = viewModelScope.launch {
-            Log.d("Geofence", "⏳ Waiting ${FENCE_UPLOAD_DEBOUNCE_MS}ms before uploading fence...")
+            LogUtils.d("Geofence", "⏳ Waiting ${FENCE_UPLOAD_DEBOUNCE_MS}ms before uploading fence...")
             delay(FENCE_UPLOAD_DEBOUNCE_MS)
 
             // After debounce period, upload the latest polygon
@@ -1386,7 +1386,7 @@ class SharedViewModel : ViewModel() {
      */
     private fun uploadGeofenceImmediately(polygon: List<LatLng>) {
         if (polygon.size < 3) {
-            Log.w("Geofence", "❌ Cannot upload geofence: insufficient points (${polygon.size})")
+            LogUtils.w("Geofence", "❌ Cannot upload geofence: insufficient points (${polygon.size})")
             return
         }
 
@@ -1406,12 +1406,12 @@ class SharedViewModel : ViewModel() {
     private suspend fun uploadGeofenceToFCInternal(polygon: List<LatLng>) {
         // Use mutex to prevent concurrent uploads
         if (!fenceUploadMutex.tryLock()) {
-            Log.w("Geofence", "⏳ Upload already in progress, skipping...")
+            LogUtils.w("Geofence", "⏳ Upload already in progress, skipping...")
             return
         }
 
         try {
-            Log.i("Geofence", "🔥 Starting geofence upload to FC: ${polygon.size} points")
+            LogUtils.i("Geofence", "🔥 Starting geofence upload to FC: ${polygon.size} points")
 
             // Use the new Mission Planner-style upload
             val config = FenceConfiguration(
@@ -1424,18 +1424,18 @@ class SharedViewModel : ViewModel() {
             val uploadResult = repo?.uploadGeofence(config) ?: false
 
             if (uploadResult) {
-                Log.i("Geofence", "✅ Fence uploaded to FC successfully")
+                LogUtils.i("Geofence", "✅ Fence uploaded to FC successfully")
                 _fenceConfiguration.value = config
                 lastFenceUploadTime = System.currentTimeMillis()
                 // NOTE: Removed geofence upload notification from notification panel
                 // The upload progress is shown in the dedicated upload UI
             } else {
-                Log.e("Geofence", "❌ Failed to upload fence to FC")
+                LogUtils.e("Geofence", "❌ Failed to upload fence to FC")
                 // NOTE: Removed geofence upload failure notification from notification panel
             }
 
         } catch (e: Exception) {
-            Log.e("Geofence", "❌ Geofence upload failed", e)
+            LogUtils.e("Geofence", "❌ Geofence upload failed", e)
             // NOTE: Removed geofence upload error notification from notification panel
         } finally {
             fenceUploadMutex.unlock()
@@ -1455,6 +1455,9 @@ class SharedViewModel : ViewModel() {
 
     private val _sprayRate = MutableStateFlow(100f) // 10% to 100%
     val sprayRate: StateFlow<Float> = _sprayRate.asStateFlow()
+
+    // Track spray state before pause for automatic restore on resume
+    private var _sprayWasActiveBeforePause = false
 
     // ========== YAW HOLD STATE (Hold Nose Position feature) ==========
     // These control continuous yaw enforcement during AUTO mode
@@ -1524,12 +1527,12 @@ class SharedViewModel : ViewModel() {
     fun onModeChangedToLoiterFromAuto(waypointNumber: Int) {
         // Safety check: Don't show popup if user is in Manual mode
         if (!isPauseResumeEnabled()) {
-            Log.i("SharedVM", "=== MODE CHANGED: AUTO → LOITER === (IGNORED - user in MANUAL mode)")
+            LogUtils.i("SharedVM", "=== MODE CHANGED: AUTO → LOITER === (IGNORED - user in MANUAL mode)")
             return
         }
 
-        Log.i("SharedVM", "=== MODE CHANGED: AUTO → LOITER ===")
-        Log.i("SharedVM", "Waypoint at mode change: $waypointNumber")
+        LogUtils.i("SharedVM", "=== MODE CHANGED: AUTO → LOITER ===")
+        LogUtils.i("SharedVM", "Waypoint at mode change: $waypointNumber")
 
         _resumePointWaypoint.value = waypointNumber
 
@@ -1538,7 +1541,7 @@ class SharedViewModel : ViewModel() {
         val currentLon = _telemetryState.value.longitude
         if (currentLat != null && currentLon != null) {
             _pendingResumeLocation = LatLng(currentLat, currentLon)
-            Log.i("SharedVM", "Pending resume point location captured: $currentLat, $currentLon")
+            LogUtils.i("SharedVM", "Pending resume point location captured: $currentLat, $currentLon")
         }
 
         // Do NOT set resume location yet - wait for user confirmation
@@ -1573,12 +1576,12 @@ class SharedViewModel : ViewModel() {
     fun confirmSetResumePoint() {
         val waypointNumber = _resumePointWaypoint.value ?: return
 
-        Log.i("SharedVM", "User confirmed resume point at waypoint $waypointNumber")
+        LogUtils.i("SharedVM", "User confirmed resume point at waypoint $waypointNumber")
 
         // Now set the resume location to show the "R" marker
         _pendingResumeLocation?.let {
             _resumePointLocation.value = it
-            Log.i("SharedVM", "Resume point marker set at: ${it.latitude}, ${it.longitude}")
+            LogUtils.i("SharedVM", "Resume point marker set at: ${it.latitude}, ${it.longitude}")
         }
 
         // Hide the popup
@@ -1593,7 +1596,7 @@ class SharedViewModel : ViewModel() {
      * No marker is shown and no processing happens
      */
     fun cancelSetResumePoint() {
-        Log.i("SharedVM", "User cancelled resume point")
+        LogUtils.i("SharedVM", "User cancelled resume point")
 
         // Clear pending location
         _pendingResumeLocation = null
@@ -1620,34 +1623,34 @@ class SharedViewModel : ViewModel() {
      */
     private fun processResumePoint(waypointNumber: Int) {
         viewModelScope.launch {
-            Log.i("SharedVM", "═══════════════════════════════════════")
-            Log.i("SharedVM", "=== AUTO PROCESSING RESUME POINT (BACKGROUND) ===")
-            Log.i("SharedVM", "Resume waypoint: $waypointNumber")
+            LogUtils.i("SharedVM", "═══════════════════════════════════════")
+            LogUtils.i("SharedVM", "=== AUTO PROCESSING RESUME POINT (BACKGROUND) ===")
+            LogUtils.i("SharedVM", "Resume waypoint: $waypointNumber")
 
             // Get the resume location (where drone was paused)
             val resumeLocation = _resumePointLocation.value
-            Log.i("SharedVM", "Resume location: ${resumeLocation?.latitude}, ${resumeLocation?.longitude}")
-            Log.i("SharedVM", "═══════════════════════════════════════")
+            LogUtils.i("SharedVM", "Resume location: ${resumeLocation?.latitude}, ${resumeLocation?.longitude}")
+            LogUtils.i("SharedVM", "═══════════════════════════════════════")
 
             try {
                 // Step 1: Check connection
                 if (!_telemetryState.value.connected) {
-                    Log.e("SharedVM", "Not connected to FC - skipping auto resume processing")
+                    LogUtils.e("SharedVM", "Not connected to FC - skipping auto resume processing")
                     return@launch
                 }
 
                 // Step 2: Get current mission from FC (silent - no progress updates)
-                Log.i("SharedVM", "Retrieving mission from FC (background)...")
+                LogUtils.i("SharedVM", "Retrieving mission from FC (background)...")
                 val allWaypoints = repo?.getAllWaypoints()
                 if (allWaypoints == null || allWaypoints.isEmpty()) {
-                    Log.e("SharedVM", "Failed to retrieve mission from FC")
+                    LogUtils.e("SharedVM", "Failed to retrieve mission from FC")
                     return@launch
                 }
 
-                Log.i("SharedVM", "Retrieved ${allWaypoints.size} waypoints from FC")
+                LogUtils.i("SharedVM", "Retrieved ${allWaypoints.size} waypoints from FC")
 
                 // Step 3: Filter waypoints from resume point, inserting resume location as first WP
-                Log.i("SharedVM", "Filtering waypoints from resume point (background)...")
+                LogUtils.i("SharedVM", "Filtering waypoints from resume point (background)...")
                 val filtered = repo?.filterWaypointsForResume(
                     allWaypoints,
                     waypointNumber,
@@ -1655,49 +1658,49 @@ class SharedViewModel : ViewModel() {
                     resumeLongitude = resumeLocation?.longitude
                 )
                 if (filtered == null || filtered.isEmpty()) {
-                    Log.e("SharedVM", "Filtering resulted in empty mission")
+                    LogUtils.e("SharedVM", "Filtering resulted in empty mission")
                     return@launch
                 }
 
-                Log.i("SharedVM", "Filtered to ${filtered.size} waypoints")
+                LogUtils.i("SharedVM", "Filtered to ${filtered.size} waypoints")
 
                 // Step 4: Resequence waypoints
-                Log.i("SharedVM", "Resequencing waypoints (background)...")
+                LogUtils.i("SharedVM", "Resequencing waypoints (background)...")
                 val resequenced = repo?.resequenceWaypoints(filtered)
                 if (resequenced == null || resequenced.isEmpty()) {
-                    Log.e("SharedVM", "Resequencing failed")
+                    LogUtils.e("SharedVM", "Resequencing failed")
                     return@launch
                 }
 
-                Log.i("SharedVM", "Resequenced to ${resequenced.size} waypoints")
+                LogUtils.i("SharedVM", "Resequenced to ${resequenced.size} waypoints")
 
                 // Step 5: Validate sequence numbers
                 val sequences = resequenced.map { it.seq.toInt() }
                 val expectedSequences = (0 until resequenced.size).toList()
                 if (sequences != expectedSequences) {
-                    Log.e("SharedVM", "❌ Invalid sequence numbers!")
+                    LogUtils.e("SharedVM", "❌ Invalid sequence numbers!")
                     return@launch
                 }
-                Log.i("SharedVM", "✅ Sequence validation passed")
+                LogUtils.i("SharedVM", "✅ Sequence validation passed")
 
                 // Step 6: Upload modified mission to FC (silent)
-                Log.i("SharedVM", "Uploading modified mission to FC (background)...")
+                LogUtils.i("SharedVM", "Uploading modified mission to FC (background)...")
                 val uploadSuccess = repo?.uploadMissionWithAck(resequenced) ?: false
                 if (!uploadSuccess) {
-                    Log.e("SharedVM", "❌ Mission upload failed")
+                    LogUtils.e("SharedVM", "❌ Mission upload failed")
                     return@launch
                 }
 
-                Log.i("SharedVM", "✅ Modified mission uploaded to FC")
+                LogUtils.i("SharedVM", "✅ Modified mission uploaded to FC")
 
                 delay(500)
 
                 // Step 7: Set current waypoint to 1
                 val setWpResult = repo?.setCurrentWaypoint(1) ?: false
                 if (setWpResult) {
-                    Log.i("SharedVM", "✅ Current waypoint set to 1")
+                    LogUtils.i("SharedVM", "✅ Current waypoint set to 1")
                 } else {
-                    Log.w("SharedVM", "⚠️ Failed to set current waypoint, continuing anyway")
+                    LogUtils.w("SharedVM", "⚠️ Failed to set current waypoint, continuing anyway")
                 }
 
                 // Mark that resume mission is ready
@@ -1705,12 +1708,12 @@ class SharedViewModel : ViewModel() {
                 _missionUploaded.value = true
                 lastUploadedCount = resequenced.size
 
-                Log.i("SharedVM", "═══════════════════════════════════════")
-                Log.i("SharedVM", "✅ Resume mission ready (background processing complete)")
-                Log.i("SharedVM", "═══════════════════════════════════════")
+                LogUtils.i("SharedVM", "═══════════════════════════════════════")
+                LogUtils.i("SharedVM", "✅ Resume mission ready (background processing complete)")
+                LogUtils.i("SharedVM", "═══════════════════════════════════════")
 
             } catch (e: Exception) {
-                Log.e("SharedVM", "Failed to auto-process resume point", e)
+                LogUtils.e("SharedVM", "Failed to auto-process resume point", e)
             }
         }
     }
@@ -1722,7 +1725,7 @@ class SharedViewModel : ViewModel() {
     fun confirmAddResumeHere(onProgress: (String) -> Unit = {}, onResult: (Boolean, String?) -> Unit = { _, _ -> }) {
         viewModelScope.launch {
             val resumeWaypoint = _resumePointWaypoint.value ?: run {
-                Log.e("SharedVM", "No resume waypoint stored!")
+                LogUtils.e("SharedVM", "No resume waypoint stored!")
                 onResult(false, "No resume waypoint stored")
                 return@launch
             }
@@ -1730,11 +1733,11 @@ class SharedViewModel : ViewModel() {
             // Get the resume location (where drone was paused)
             val resumeLocation = _resumePointLocation.value
 
-            Log.i("ResumeMission", "═══════════════════════════════════════")
-            Log.i("ResumeMission", "=== CONFIRM ADD RESUME HERE ===")
-            Log.i("ResumeMission", "Resume waypoint: $resumeWaypoint")
-            Log.i("ResumeMission", "Resume location: ${resumeLocation?.latitude}, ${resumeLocation?.longitude}")
-            Log.i("ResumeMission", "═══════════════════════════════════════")
+            LogUtils.i("ResumeMission", "═══════════════════════════════════════")
+            LogUtils.i("ResumeMission", "=== CONFIRM ADD RESUME HERE ===")
+            LogUtils.i("ResumeMission", "Resume waypoint: $resumeWaypoint")
+            LogUtils.i("ResumeMission", "Resume location: ${resumeLocation?.latitude}, ${resumeLocation?.longitude}")
+            LogUtils.i("ResumeMission", "═══════════════════════════════════════")
 
             _showAddResumeHerePopup.value = false
 
@@ -1742,7 +1745,7 @@ class SharedViewModel : ViewModel() {
                 // Step 1: Check connection
                 onProgress("Checking connection...")
                 if (!_telemetryState.value.connected) {
-                    Log.e("SharedVM", "Not connected to FC")
+                    LogUtils.e("SharedVM", "Not connected to FC")
                     onResult(false, "Not connected to flight controller")
                     return@launch
                 }
@@ -1752,18 +1755,18 @@ class SharedViewModel : ViewModel() {
                 // Step 2: Get current mission from FC
                 val allWaypoints = repo?.getAllWaypoints()
                 if (allWaypoints == null || allWaypoints.isEmpty()) {
-                    Log.e("SharedVM", "Failed to retrieve mission from FC")
+                    LogUtils.e("SharedVM", "Failed to retrieve mission from FC")
                     onResult(false, "Failed to retrieve mission from flight controller")
                     return@launch
                 }
 
-                Log.i("SharedVM", "Retrieved ${allWaypoints.size} waypoints from FC")
+                LogUtils.i("SharedVM", "Retrieved ${allWaypoints.size} waypoints from FC")
 
                 // Log original mission
-                Log.i("SharedVM", "--- Original Mission ---")
+                LogUtils.i("SharedVM", "--- Original Mission ---")
                 allWaypoints.forEach { wp ->
                     val cmdName = wp.command.entry?.name ?: "CMD_${wp.command.value}"
-                    Log.i("SharedVM", "  seq=${wp.seq}: $cmdName frame=${wp.frame.value} current=${wp.current}")
+                    LogUtils.i("SharedVM", "  seq=${wp.seq}: $cmdName frame=${wp.frame.value} current=${wp.current}")
                 }
 
                 onProgress("Filtering waypoints from resume point...")
@@ -1776,30 +1779,30 @@ class SharedViewModel : ViewModel() {
                     resumeLongitude = resumeLocation?.longitude
                 )
                 if (filtered == null || filtered.isEmpty()) {
-                    Log.e("SharedVM", "Filtering resulted in empty mission")
+                    LogUtils.e("SharedVM", "Filtering resulted in empty mission")
                     onResult(false, "No waypoints after resume point")
                     return@launch
                 }
 
-                Log.i("SharedVM", "Filtered to ${filtered.size} waypoints")
+                LogUtils.i("SharedVM", "Filtered to ${filtered.size} waypoints")
 
                 onProgress("Resequencing waypoints...")
 
                 // Step 4: Resequence waypoints
                 val resequenced = repo?.resequenceWaypoints(filtered)
                 if (resequenced == null || resequenced.isEmpty()) {
-                    Log.e("SharedVM", "Resequencing failed")
+                    LogUtils.e("SharedVM", "Resequencing failed")
                     onResult(false, "Failed to resequence waypoints")
                     return@launch
                 }
 
-                Log.i("SharedVM", "Resequenced to ${resequenced.size} waypoints")
+                LogUtils.i("SharedVM", "Resequenced to ${resequenced.size} waypoints")
 
                 // Log final mission structure
-                Log.i("SharedVM", "--- Final Resume Mission ---")
+                LogUtils.i("SharedVM", "--- Final Resume Mission ---")
                 resequenced.forEach { wp ->
                     val cmdName = wp.command.entry?.name ?: "CMD_${wp.command.value}"
-                    Log.i("SharedVM", "  seq=${wp.seq}: $cmdName frame=${wp.frame.value} alt=${wp.z}m target=${wp.targetSystem}:${wp.targetComponent}")
+                    LogUtils.i("SharedVM", "  seq=${wp.seq}: $cmdName frame=${wp.frame.value} alt=${wp.z}m target=${wp.targetSystem}:${wp.targetComponent}")
                 }
 
                 // Step 5: Validate sequence numbers (skip TAKEOFF validation for resume)
@@ -1807,42 +1810,42 @@ class SharedViewModel : ViewModel() {
                 val sequences = resequenced.map { it.seq.toInt() }
                 val expectedSequences = (0 until resequenced.size).toList()
                 if (sequences != expectedSequences) {
-                    Log.e("SharedVM", "❌ Invalid sequence numbers!")
-                    Log.e("SharedVM", "Expected: $expectedSequences, Got: $sequences")
+                    LogUtils.e("SharedVM", "❌ Invalid sequence numbers!")
+                    LogUtils.e("SharedVM", "Expected: $expectedSequences, Got: $sequences")
                     onResult(false, "Invalid mission sequence")
                     return@launch
                 }
-                Log.i("SharedVM", "✅ Sequence validation passed")
+                LogUtils.i("SharedVM", "✅ Sequence validation passed")
 
                 onProgress("Uploading modified mission to FC...")
 
                 // Step 6: Upload modified mission to FC
                 val uploadSuccess = repo?.uploadMissionWithAck(resequenced) ?: false
                 if (uploadSuccess) {
-                    Log.i("SharedVM", "✅ Modified mission uploaded to FC")
+                    LogUtils.i("SharedVM", "✅ Modified mission uploaded to FC")
 
                     // Verify by reading back the mission count
                     // Delay allows FC to fully commit mission to storage before verification
                     delay(1000)
                     val verifyCount = repo?.getMissionCount() ?: 0
                     if (verifyCount != resequenced.size) {
-                        Log.e("SharedVM", "⚠️ WARNING: FC reports $verifyCount waypoints but we uploaded ${resequenced.size}")
+                        LogUtils.e("SharedVM", "⚠️ WARNING: FC reports $verifyCount waypoints but we uploaded ${resequenced.size}")
                     } else {
-                        Log.i("SharedVM", "✅ FC confirms $verifyCount waypoints stored")
+                        LogUtils.i("SharedVM", "✅ FC confirms $verifyCount waypoints stored")
                     }
                 } else {
-                    Log.e("SharedVM", "❌ Mission upload FAILED - FC rejected mission")
+                    LogUtils.e("SharedVM", "❌ Mission upload FAILED - FC rejected mission")
                     onResult(false, "Mission upload failed - flight controller rejected mission")
                     return@launch
                 }
 
                 // Step 7: Set Current Waypoint to start execution
                 onProgress("Setting current waypoint...")
-                Log.i("SharedVM", "Setting current waypoint to 1 (start from first mission item after HOME)")
+                LogUtils.i("SharedVM", "Setting current waypoint to 1 (start from first mission item after HOME)")
                 val setWaypointSuccess = repo?.setCurrentWaypoint(1) ?: false
 
                 if (!setWaypointSuccess) {
-                    Log.w("SharedVM", "Failed to set current waypoint, continuing anyway")
+                    LogUtils.w("SharedVM", "Failed to set current waypoint, continuing anyway")
                 }
 
                 delay(500)
@@ -1850,7 +1853,7 @@ class SharedViewModel : ViewModel() {
                 // Step 8: Switch to AUTO Mode
                 onProgress("Switching to AUTO mode...")
                 val currentMode = _telemetryState.value.mode
-                Log.i("SharedVM", "Current mode: $currentMode")
+                LogUtils.i("SharedVM", "Current mode: $currentMode")
 
                 var autoSuccess = false
                 var retryCount = 0
@@ -1858,16 +1861,16 @@ class SharedViewModel : ViewModel() {
 
                 while (!autoSuccess && retryCount < maxRetries) {
                     val attempt = retryCount + 1
-                    Log.i("SharedVM", "Attempt $attempt/$maxRetries: Sending AUTO mode command...")
+                    LogUtils.i("SharedVM", "Attempt $attempt/$maxRetries: Sending AUTO mode command...")
 
                     autoSuccess = repo?.changeMode(MavMode.AUTO) ?: false
 
-                    Log.i("SharedVM", "Attempt $attempt result: ${if (autoSuccess) "SUCCESS" else "FAILED"}")
+                    LogUtils.i("SharedVM", "Attempt $attempt result: ${if (autoSuccess) "SUCCESS" else "FAILED"}")
 
                     if (!autoSuccess) {
                         retryCount++
                         if (retryCount < maxRetries) {
-                            Log.w("SharedVM", "Waiting 2 seconds before retry...")
+                            LogUtils.w("SharedVM", "Waiting 2 seconds before retry...")
                             delay(2000)
                         }
                     }
@@ -1875,13 +1878,13 @@ class SharedViewModel : ViewModel() {
 
                 if (!autoSuccess) {
                     val finalMode = _telemetryState.value.mode
-                    Log.e("SharedVM", "❌ Failed to switch to AUTO after $maxRetries attempts")
-                    Log.e("SharedVM", "Final mode: $finalMode")
+                    LogUtils.e("SharedVM", "❌ Failed to switch to AUTO after $maxRetries attempts")
+                    LogUtils.e("SharedVM", "Final mode: $finalMode")
                     onResult(false, "Failed to switch to AUTO. Stuck in: $finalMode")
                     return@launch
                 }
 
-                Log.i("SharedVM", "✅ Successfully switched to AUTO mode")
+                LogUtils.i("SharedVM", "✅ Successfully switched to AUTO mode")
 
                 // Complete: Update state
                 onProgress("Mission resumed!")
@@ -1901,13 +1904,21 @@ class SharedViewModel : ViewModel() {
                         description = "Mission resumed"
                     )
                 } catch (e: Exception) {
-                    Log.e("SharedVM", "Failed to send RESUMED status", e)
+                    LogUtils.e("SharedVM", "Failed to send RESUMED status", e)
                 }
 
                 // Mark mission as uploaded
                 _missionUploaded.value = true
                 lastUploadedCount = resequenced.size
-                Log.i("SharedVM", "✅ Mission upload status updated: uploaded=$_missionUploaded, count=$lastUploadedCount")
+                LogUtils.i("SharedVM", "✅ Mission upload status updated: uploaded=$_missionUploaded, count=$lastUploadedCount")
+
+                // ✅ Restore spray if it was active before pause
+                if (_sprayWasActiveBeforePause) {
+                    LogUtils.i("SharedVM", "💧 Restoring spray after resume from waypoint $resumeWaypoint (was active before pause)")
+                    delay(500) // Small delay to ensure mode change is complete
+                    setSprayEnabled(true)
+                    _sprayWasActiveBeforePause = false
+                }
 
                 // Complete
                 addNotification(
@@ -1918,14 +1929,14 @@ class SharedViewModel : ViewModel() {
                 )
                 ttsManager?.announceMissionResumed()
 
-                Log.i("ResumeMission", "═══════════════════════════════════════")
-                Log.i("ResumeMission", "✅ Resume Mission Complete!")
-                Log.i("ResumeMission", "═══════════════════════════════════════")
+                LogUtils.i("ResumeMission", "═══════════════════════════════════════")
+                LogUtils.i("ResumeMission", "✅ Resume Mission Complete!")
+                LogUtils.i("ResumeMission", "═══════════════════════════════════════")
 
                 onResult(true, null)
 
             } catch (e: Exception) {
-                Log.e("ResumeMission", "❌ Resume mission failed", e)
+                LogUtils.e("ResumeMission", "❌ Resume mission failed", e)
                 addNotification(Notification("Resume mission failed: ${e.message}", NotificationType.ERROR))
                 onResult(false, e.message)
             }
@@ -1938,7 +1949,7 @@ class SharedViewModel : ViewModel() {
     fun dismissAddResumeHerePopup() {
         _showAddResumeHerePopup.value = false
         _resumePointWaypoint.value = null
-        Log.i("SharedVM", "Add Resume Here popup dismissed")
+        LogUtils.i("SharedVM", "Add Resume Here popup dismissed")
     }
 
     /**
@@ -1947,7 +1958,7 @@ class SharedViewModel : ViewModel() {
      */
     fun onModeChangedToAuto() {
         if (_resumeMissionReady.value) {
-            Log.i("SharedVM", "=== MODE CHANGED TO AUTO - STARTING RESUME MISSION ===")
+            LogUtils.i("SharedVM", "=== MODE CHANGED TO AUTO - STARTING RESUME MISSION ===")
 
             viewModelScope.launch {
                 // Small delay to ensure FC is ready
@@ -1957,7 +1968,7 @@ class SharedViewModel : ViewModel() {
                 val startSuccess = repo?.startMission() ?: false
 
                 if (startSuccess) {
-                    Log.i("SharedVM", "✅ Resume mission started successfully")
+                    LogUtils.i("SharedVM", "✅ Resume mission started successfully")
                     _resumeMissionReady.value = false
                     // Clear the resume point location (remove "R" marker from map)
                     _resumePointLocation.value = null
@@ -1968,6 +1979,15 @@ class SharedViewModel : ViewModel() {
                             pausedAtWaypoint = null
                         )
                     }
+
+                    // ✅ Restore spray if it was active before pause
+                    if (_sprayWasActiveBeforePause) {
+                        LogUtils.i("SharedVM", "💧 Restoring spray after AUTO mode change (was active before pause)")
+                        delay(500) // Small delay to ensure mode change is complete
+                        setSprayEnabled(true)
+                        _sprayWasActiveBeforePause = false
+                    }
+
                     addNotification(
                         Notification(
                             message = "Mission resumed from stored point",
@@ -1976,7 +1996,7 @@ class SharedViewModel : ViewModel() {
                     )
                     ttsManager?.announceMissionResumed()
                 } else {
-                    Log.e("SharedVM", "Failed to start resume mission")
+                    LogUtils.e("SharedVM", "Failed to start resume mission")
                     addNotification(
                         Notification(
                             message = "Failed to start resume mission",
@@ -2094,15 +2114,15 @@ class SharedViewModel : ViewModel() {
 
         if (sequences != expectedSequences) {
             // Enhanced logging for debugging
-            Log.e("MissionValidation", "❌ Sequence validation FAILED")
-            Log.e("MissionValidation", "Expected sequences: $expectedSequences")
-            Log.e("MissionValidation", "Actual sequences: $sequences")
-            Log.e("MissionValidation", "Missing sequences: ${expectedSequences.minus(sequences.toSet())}")
-            Log.e("MissionValidation", "Extra sequences: ${sequences.toSet().minus(expectedSequences.toSet())}")
+            LogUtils.e("MissionValidation", "❌ Sequence validation FAILED")
+            LogUtils.e("MissionValidation", "Expected sequences: $expectedSequences")
+            LogUtils.e("MissionValidation", "Actual sequences: $sequences")
+            LogUtils.e("MissionValidation", "Missing sequences: ${expectedSequences.minus(sequences.toSet())}")
+            LogUtils.e("MissionValidation", "Extra sequences: ${sequences.toSet().minus(expectedSequences.toSet())}")
 
             // Log each mission item for debugging
             missionItems.forEach { item ->
-                Log.e("MissionValidation", "Item: seq=${item.seq} cmd=${item.command.value} current=${item.current}")
+                LogUtils.e("MissionValidation", "Item: seq=${item.seq} cmd=${item.command.value} current=${item.current}")
             }
 
             return Pair(false, "Invalid sequence numbers - Expected: $expectedSequences, Got: $sequences")
@@ -2111,7 +2131,7 @@ class SharedViewModel : ViewModel() {
         // Find NAV_TAKEOFF command
         val hasTakeoff = missionItems.any { it.command.value == MavCmdId.NAV_TAKEOFF }
         if (!hasTakeoff) {
-            Log.w("MissionValidation", "⚠️ Mission does not contain NAV_TAKEOFF command!")
+            LogUtils.w("MissionValidation", "⚠️ Mission does not contain NAV_TAKEOFF command!")
             addNotification(
                 Notification(
                     "WARNING: Mission missing NAV_TAKEOFF. AUTO mode may fail with 'Missing Takeoff Cmd'",
@@ -2124,7 +2144,7 @@ class SharedViewModel : ViewModel() {
         // Check that NAV_TAKEOFF is early in mission (ideally seq 1 after HOME)
         val takeoffSeq = missionItems.find { it.command.value == MavCmdId.NAV_TAKEOFF }?.seq?.toInt()
         if (takeoffSeq != null && takeoffSeq > 2) {
-            Log.w("MissionValidation", "⚠️ NAV_TAKEOFF at seq=$takeoffSeq (expected seq=1)")
+            LogUtils.w("MissionValidation", "⚠️ NAV_TAKEOFF at seq=$takeoffSeq (expected seq=1)")
             addNotification(
                 Notification(
                     "WARNING: NAV_TAKEOFF should be at sequence 1 (after HOME)",
@@ -2153,7 +2173,7 @@ class SharedViewModel : ViewModel() {
                         return Pair(false, "Invalid coordinates at seq=${item.seq}: lat=$lat, lon=$lon")
                     }
                     if (lat == 0.0 && lon == 0.0) {
-                        Log.w("MissionValidation", "⚠️ Waypoint at seq=${item.seq} has coordinates (0,0)")
+                        LogUtils.w("MissionValidation", "⚠️ Waypoint at seq=${item.seq} has coordinates (0,0)")
                     }
                 }
 
@@ -2163,19 +2183,19 @@ class SharedViewModel : ViewModel() {
             }
         }
 
-        Log.i("MissionValidation", "✅ Mission structure validation passed")
+        LogUtils.i("MissionValidation", "✅ Mission structure validation passed")
         return Pair(true, null)
     }
 
     fun uploadMission(missionItems: List<MissionItemInt>, onResult: (Boolean, String?) -> Unit = { _, _ -> }) {
         viewModelScope.launch {
             try {
-                Log.i("MissionUpload", "═══ VM: Starting mission upload (${missionItems.size} items) ═══")
+                LogUtils.i("MissionUpload", "═══ VM: Starting mission upload (${missionItems.size} items) ═══")
 
                 if (repo == null) {
                     _missionUploaded.value = false
                     lastUploadedCount = 0
-                    Log.e("MissionUpload", "VM: No repository available")
+                    LogUtils.e("MissionUpload", "VM: No repository available")
                     onResult(false, "Not connected to vehicle")
                     return@launch
                 }
@@ -2183,25 +2203,25 @@ class SharedViewModel : ViewModel() {
                 if (!_telemetryState.value.fcuDetected) {
                     _missionUploaded.value = false
                     lastUploadedCount = 0
-                    Log.e("MissionUpload", "VM: FCU not detected")
+                    LogUtils.e("MissionUpload", "VM: FCU not detected")
                     onResult(false, "FCU not detected")
                     return@launch
                 }
 
                 // Validate mission structure before uploading
-                Log.i("MissionUpload", "VM: Validating mission structure...")
+                LogUtils.i("MissionUpload", "VM: Validating mission structure...")
                 val (isValid, errorMessage) = validateMissionStructure(missionItems)
                 if (!isValid) {
                     _missionUploaded.value = false
                     lastUploadedCount = 0
-                    Log.e("MissionUpload", "VM: Mission validation failed - $errorMessage")
+                    LogUtils.e("MissionUpload", "VM: Mission validation failed - $errorMessage")
                     addNotification(
                         Notification("Mission validation failed: $errorMessage", NotificationType.ERROR)
                     )
                     onResult(false, "Mission validation failed: $errorMessage")
                     return@launch
                 }
-                Log.i("MissionUpload", "VM: Mission structure validation passed")
+                LogUtils.i("MissionUpload", "VM: Mission structure validation passed")
 
                 // Show progress: Uploading
                 _missionUploadProgress.value = MissionUploadProgress(
@@ -2210,7 +2230,7 @@ class SharedViewModel : ViewModel() {
                     totalItems = missionItems.size,
                     message = "Uploading ${missionItems.size} waypoints..."
                 )
-                Log.d("MissionUpload", "VM: Progress UI updated - Uploading")
+                LogUtils.d("MissionUpload", "VM: Progress UI updated - Uploading")
 
                 val success = repo?.uploadMissionWithAck(
                     missionItems = missionItems,
@@ -2227,7 +2247,7 @@ class SharedViewModel : ViewModel() {
 
                 _missionUploaded.value = success
                 if (success) {
-                    Log.i("MissionUpload", "VM: Upload successful, processing waypoints...")
+                    LogUtils.i("MissionUpload", "VM: Upload successful, processing waypoints...")
                     lastUploadedCount = missionItems.size
                     val waypoints = missionItems.filter { item ->
                         item.command.value != 20u && !(item.x == 0 && item.y == 0)
@@ -2243,13 +2263,13 @@ class SharedViewModel : ViewModel() {
                         val formatted = GridUtils.calculateAndFormatPolygonArea(_surveyPolygon.value)
                         _missionAreaSqMeters.value = areaMeters
                         _missionAreaFormatted.value = formatted
-                        Log.d("MissionUpload", "VM: Mission area (survey polygon): $formatted")
+                        LogUtils.d("MissionUpload", "VM: Mission area (survey polygon): $formatted")
                     } else if (waypoints.size >= 3) {
                         val formatted = GridUtils.calculateAndFormatPolygonArea(waypoints)
                         val areaMeters = GridUtils.calculatePolygonArea(waypoints)
                         _missionAreaSqMeters.value = areaMeters
                         _missionAreaFormatted.value = formatted
-                        Log.d("MissionUpload", "VM: Mission area (waypoints): $formatted")
+                        LogUtils.d("MissionUpload", "VM: Mission area (waypoints): $formatted")
                     } else {
                         _missionAreaSqMeters.value = 0.0
                         _missionAreaFormatted.value = "0 acres"
@@ -2265,10 +2285,10 @@ class SharedViewModel : ViewModel() {
                     delay(1500)
                     _missionUploadProgress.value = null
 
-                    Log.i("MissionUpload", "VM: ✅ Upload complete - ${missionItems.size} items")
+                    LogUtils.i("MissionUpload", "VM: ✅ Upload complete - ${missionItems.size} items")
                     onResult(true, null)
                 } else {
-                    Log.e("MissionUpload", "VM: ❌ Upload failed")
+                    LogUtils.e("MissionUpload", "VM: ❌ Upload failed")
                     lastUploadedCount = 0
                     _uploadedWaypoints.value = emptyList()
                     _missionAreaSqMeters.value = 0.0
@@ -2301,7 +2321,7 @@ class SharedViewModel : ViewModel() {
                 delay(2000)
                 _missionUploadProgress.value = null
 
-                Log.e("MissionUpload", "VM: ❌ Upload exception: ${e.message}", e)
+                LogUtils.e("MissionUpload", "VM: ❌ Upload exception: ${e.message}", e)
                 onResult(false, e.message)
             }
         }
@@ -2311,36 +2331,36 @@ class SharedViewModel : ViewModel() {
         viewModelScope.launch {
             _telemetryState.value = _telemetryState.value.copy(isMissionActive = false, missionCompleted = false, missionCompletedHandled = false, missionElapsedSec = null)
             try {
-                Log.i("SharedVM", "Starting mission start sequence...")
+                LogUtils.i("SharedVM", "Starting mission start sequence...")
 
                 if (repo == null) {
-                    Log.w("SharedVM", "No repo available, cannot start mission")
+                    LogUtils.w("SharedVM", "No repo available, cannot start mission")
                     onResult(false, "Not connected to vehicle")
                     return@launch
                 }
 
                 if (!_telemetryState.value.fcuDetected) {
-                    Log.w("SharedVM", "FCU not detected, cannot start mission")
+                    LogUtils.w("SharedVM", "FCU not detected, cannot start mission")
                     onResult(false, "FCU not detected")
                     return@launch
                 }
 
                 if (!_missionUploaded.value || lastUploadedCount == 0) {
-                    Log.w("SharedVM", "No mission uploaded or acknowledged, cannot start")
+                    LogUtils.w("SharedVM", "No mission uploaded or acknowledged, cannot start")
                     onResult(false, "No mission uploaded. Please upload a mission first.")
                     return@launch
                 }
-                Log.i("SharedVM", "✓ Mission upload acknowledged (${lastUploadedCount} items)")
+                LogUtils.i("SharedVM", "✓ Mission upload acknowledged (${lastUploadedCount} items)")
 
                 if (!_telemetryState.value.armable) {
-                    Log.w("SharedVM", "Vehicle not armable, cannot start mission")
+                    LogUtils.w("SharedVM", "Vehicle not armable, cannot start mission")
                     onResult(false, "Vehicle not armable. Check sensors and GPS.")
                     return@launch
                 }
 
                 val sats = _telemetryState.value.sats ?: 0
                 if (sats < 6) {
-                    Log.w("SharedVM", "Insufficient GPS satellites ($sats), minimum 6 required")
+                    LogUtils.w("SharedVM", "Insufficient GPS satellites ($sats), minimum 6 required")
                     onResult(false, "Insufficient GPS satellites ($sats). Need at least 6 for mission.")
                     return@launch
                 }
@@ -2350,28 +2370,28 @@ class SharedViewModel : ViewModel() {
                         currentMode?.equals("Loiter", ignoreCase = true) == true
 
                 if (!isInArmableMode) {
-                    Log.i("SharedVM", "Current mode '$currentMode' not suitable for arming, switching to Stabilize")
+                    LogUtils.i("SharedVM", "Current mode '$currentMode' not suitable for arming, switching to Stabilize")
                     repo?.changeMode(MavMode.STABILIZE)
                     val modeTimeout = 5000L
                     val modeStart = System.currentTimeMillis()
                     while (System.currentTimeMillis() - modeStart < modeTimeout) {
                         if (_telemetryState.value.mode?.equals("Stabilize", ignoreCase = true) == true) {
-                            Log.i("SharedVM", "✓ Successfully switched to Stabilize mode")
+                            LogUtils.i("SharedVM", "✓ Successfully switched to Stabilize mode")
                             break
                         }
                         delay(500)
                     }
                     if (!(_telemetryState.value.mode?.equals("Stabilize", ignoreCase = true) == true)) {
-                        Log.w("SharedVM", "Failed to switch to Stabilize mode within timeout")
+                        LogUtils.w("SharedVM", "Failed to switch to Stabilize mode within timeout")
                         onResult(false, "Failed to switch to suitable mode for arming. Current mode: ${_telemetryState.value.mode}")
                         return@launch
                     }
                 } else {
-                    Log.i("SharedVM", "✓ Already in suitable mode for arming: $currentMode")
+                    LogUtils.i("SharedVM", "✓ Already in suitable mode for arming: $currentMode")
                 }
 
                 if (!_telemetryState.value.armed) {
-                    Log.i("SharedVM", "Vehicle not armed - attempting to arm")
+                    LogUtils.i("SharedVM", "Vehicle not armed - attempting to arm")
                     repo?.arm()
                     val armTimeout = 10000L
                     val armStart = System.currentTimeMillis()
@@ -2379,17 +2399,17 @@ class SharedViewModel : ViewModel() {
                         delay(500)
                     }
                     if (!_telemetryState.value.armed) {
-                        Log.w("SharedVM", "Vehicle did not arm within timeout")
+                        LogUtils.w("SharedVM", "Vehicle did not arm within timeout")
                         onResult(false, "Vehicle failed to arm. Check pre-arm conditions.")
                         return@launch
                     }
-                    Log.i("SharedVM", "✓ Vehicle armed successfully")
+                    LogUtils.i("SharedVM", "✓ Vehicle armed successfully")
                 } else {
-                    Log.i("SharedVM", "✓ Vehicle already armed")
+                    LogUtils.i("SharedVM", "✓ Vehicle already armed")
                 }
 
                 if (_telemetryState.value.mode?.contains("Auto", ignoreCase = true) != true) {
-                    Log.i("SharedVM", "Switching vehicle mode to AUTO")
+                    LogUtils.i("SharedVM", "Switching vehicle mode to AUTO")
                     repo?.changeMode(MavMode.AUTO)
                     val autoModeTimeout = 8000L
                     val autoModeStart = System.currentTimeMillis()
@@ -2398,27 +2418,27 @@ class SharedViewModel : ViewModel() {
                         delay(500)
                     }
                     if (_telemetryState.value.mode?.contains("Auto", ignoreCase = true) != true) {
-                        Log.w("SharedVM", "Vehicle did not switch to AUTO mode within timeout")
+                        LogUtils.w("SharedVM", "Vehicle did not switch to AUTO mode within timeout")
                         onResult(false, "Failed to switch to AUTO mode. Current mode: ${_telemetryState.value.mode}")
                         return@launch
                     }
-                    Log.i("SharedVM", "✓ Vehicle mode is now AUTO")
+                    LogUtils.i("SharedVM", "✓ Vehicle mode is now AUTO")
                 } else {
-                    Log.i("SharedVM", "✓ Vehicle already in AUTO mode")
+                    LogUtils.i("SharedVM", "✓ Vehicle already in AUTO mode")
                 }
 
                 delay(1000)
 
-                Log.i("SharedVM", "Sending start mission command")
+                LogUtils.i("SharedVM", "Sending start mission command")
                 val result = repo?.startMission() ?: false
                 if (result) {
-                    Log.i("SharedVM", "✓ Mission start acknowledged by FCU")
+                    LogUtils.i("SharedVM", "✓ Mission start acknowledged by FCU")
 
                     // 🔥 Connect WebSocket when mission starts
                     try {
                         val wsManager = WebSocketManager.getInstance()
                         if (!wsManager.isConnected) {
-                            Log.i("SharedVM", "🔌 Opening WebSocket connection for mission...")
+                            LogUtils.i("SharedVM", "🔌 Opening WebSocket connection for mission...")
 
                             // 🔥 CRITICAL: Get latest pilotId and adminId from SessionManager
                             // This ensures values are up-to-date if user logged in after MainActivity loaded
@@ -2427,29 +2447,29 @@ class SharedViewModel : ViewModel() {
                                 val adminId = com.example.aerogcsclone.api.SessionManager.getAdminId(app)
                                 wsManager.pilotId = pilotId
                                 wsManager.adminId = adminId
-                                Log.i("SharedVM", "📋 Updated WebSocket credentials: pilotId=$pilotId, adminId=$adminId")
+                                LogUtils.i("SharedVM", "📋 Updated WebSocket credentials: pilotId=$pilotId, adminId=$adminId")
 
                                 // Warn if pilot is not logged in
                                 if (pilotId <= 0) {
-                                    Log.e("SharedVM", "⚠️ WARNING: pilotId=$pilotId - User may not be logged in! Telemetry will not be saved.")
+                                    LogUtils.e("SharedVM", "⚠️ WARNING: pilotId=$pilotId - User may not be logged in! Telemetry will not be saved.")
                                 }
                             }
 
                             // 🔥 Set plot name before connecting
                             wsManager.selectedPlotName = _currentPlotName.value
-                            Log.i("SharedVM", "📋 Plot name set for WebSocket: ${_currentPlotName.value}")
+                            LogUtils.i("SharedVM", "📋 Plot name set for WebSocket: ${_currentPlotName.value}")
 
                             // 🔥 Set flight mode (Automatic or Manual)
                             wsManager.selectedFlightMode = _userSelectedFlightMode.value.name
-                            Log.i("SharedVM", "📋 Flight mode set for WebSocket: ${_userSelectedFlightMode.value.name}")
+                            LogUtils.i("SharedVM", "📋 Flight mode set for WebSocket: ${_userSelectedFlightMode.value.name}")
 
                             // 🔥 Set mission type (Grid or Waypoint)
                             wsManager.selectedMissionType = _selectedMissionType.value.name
-                            Log.i("SharedVM", "📋 Mission type set for WebSocket: ${_selectedMissionType.value.name}")
+                            LogUtils.i("SharedVM", "📋 Mission type set for WebSocket: ${_selectedMissionType.value.name}")
 
                             // 🔥 Set grid setup source (KML_IMPORT, MAP_DRAW, DRONE_POSITION, RC_CONTROL)
                             wsManager.gridSetupSource = _gridSetupSource.value.name
-                            Log.i("SharedVM", "📋 Grid setup source set for WebSocket: ${_gridSetupSource.value.name}")
+                            LogUtils.i("SharedVM", "📋 Grid setup source set for WebSocket: ${_gridSetupSource.value.name}")
 
                             wsManager.connect()
 
@@ -2463,11 +2483,11 @@ class SharedViewModel : ViewModel() {
                             // Additional wait for session_ack and mission_created
                             if (wsManager.isConnected) {
                                 delay(500) // Give time for session_ack and mission_created
-                                Log.i("SharedVM", "✅ WebSocket ready after ${waitTime}ms")
+                                LogUtils.i("SharedVM", "✅ WebSocket ready after ${waitTime}ms")
                             }
                         }
                     } catch (e: Exception) {
-                        Log.e("SharedVM", "Failed to connect WebSocket", e)
+                        LogUtils.e("SharedVM", "Failed to connect WebSocket", e)
                     }
 
                     // ✅ Send mission status STARTED to backend (crash-safe)
@@ -2481,27 +2501,27 @@ class SharedViewModel : ViewModel() {
                                 eventStatus = "INFO",
                                 description = "Mission started successfully"
                             )
-                            Log.i("SharedVM", "✅ Mission status STARTED sent to backend")
+                            LogUtils.i("SharedVM", "✅ Mission status STARTED sent to backend")
                         } else {
-                            Log.w("SharedVM", "⚠️ Skipping mission status - WebSocket not ready (connected=${wsManager.isConnected}, missionId=${wsManager.missionId})")
+                            LogUtils.w("SharedVM", "⚠️ Skipping mission status - WebSocket not ready (connected=${wsManager.isConnected}, missionId=${wsManager.missionId})")
                         }
                     } catch (e: Exception) {
-                        Log.e("SharedVM", "Failed to send STARTED status", e)
+                        LogUtils.e("SharedVM", "Failed to send STARTED status", e)
                     }
 
                     // Start yaw enforcement if yaw hold is enabled
                     if (_yawHoldEnabled.value && _lockedYaw.value != null) {
-                        Log.i("SharedVM", "🧭 Starting yaw enforcement for locked yaw: ${_lockedYaw.value}°")
+                        LogUtils.i("SharedVM", "🧭 Starting yaw enforcement for locked yaw: ${_lockedYaw.value}°")
                         startYawEnforcement()
                     }
 
                     onResult(true, null)
                 } else {
-                    Log.e("SharedVM", "Mission start failed or not acknowledged")
+                    LogUtils.e("SharedVM", "Mission start failed or not acknowledged")
                     onResult(false, "Mission start failed. Check vehicle status and try again.")
                 }
             } catch (e: Exception) {
-                Log.e("SharedVM", "Failed to start mission", e)
+                LogUtils.e("SharedVM", "Failed to start mission", e)
                 onResult(false, e.message)
             }
         }
@@ -2510,13 +2530,13 @@ class SharedViewModel : ViewModel() {
     fun readMissionFromFcu() {
         viewModelScope.launch {
             if (repo == null) {
-                Log.w("SharedVM", "No repo available, cannot request mission readback")
+                LogUtils.w("SharedVM", "No repo available, cannot request mission readback")
                 return@launch
             }
             try {
                 repo?.requestMissionAndLog()
             } catch (e: Exception) {
-                Log.e("SharedVM", "Exception during mission readback", e)
+                LogUtils.e("SharedVM", "Exception during mission readback", e)
             }
         }
     }
@@ -2528,12 +2548,18 @@ class SharedViewModel : ViewModel() {
                 val lastAutoWp = _telemetryState.value.lastAutoWaypoint
                 val waypointToStore = if (lastAutoWp > 0) lastAutoWp else currentWp
 
+                // Save spray state before pause for automatic restore on resume
+                // Check both app state and telemetry (RC7 or flow rate indicates active spraying)
+                val sprayTelemetry = _telemetryState.value.sprayTelemetry
+                _sprayWasActiveBeforePause = _sprayEnabled.value || sprayTelemetry.sprayEnabled || (sprayTelemetry.flowRateLiterPerMin ?: 0f) > 0f
+                LogUtils.i("SharedVM", "💧 Spray state before pause: $_sprayWasActiveBeforePause (app=${_sprayEnabled.value}, RC7=${sprayTelemetry.sprayEnabled}, flow=${sprayTelemetry.flowRateLiterPerMin})")
+
                 // DEBUG LOGS
-                Log.i("SharedVM", "=== PAUSE MISSION ===")
-                Log.i("SharedVM", "lastAutoWaypoint: $lastAutoWp")
-                Log.i("SharedVM", "currentWaypoint: $currentWp")
-                Log.i("SharedVM", "waypointToStore (will be pausedAtWaypoint): $waypointToStore")
-                Log.i("DEBUG_PAUSE", "Pausing - lastAutoWp: $lastAutoWp, currentWp: $currentWp, storing: $waypointToStore")
+                LogUtils.i("SharedVM", "=== PAUSE MISSION ===")
+                LogUtils.i("SharedVM", "lastAutoWaypoint: $lastAutoWp")
+                LogUtils.i("SharedVM", "currentWaypoint: $currentWp")
+                LogUtils.i("SharedVM", "waypointToStore (will be pausedAtWaypoint): $waypointToStore")
+                LogUtils.i("DEBUG_PAUSE", "Pausing - lastAutoWp: $lastAutoWp, currentWp: $currentWp, storing: $waypointToStore")
 
                 // Switch to LOITER to hold position
                 // NOTE: The mode change will be detected by TelemetryRepository which will
@@ -2543,7 +2569,7 @@ class SharedViewModel : ViewModel() {
                 if (result) {
                     // Don't set missionPaused here - let the mode change detection handle it
                     // The popup will be shown by onModeChangedToLoiterFromAuto()
-                    Log.i("SharedVM", "LOITER mode change command sent. Waiting for mode change detection...")
+                    LogUtils.i("SharedVM", "LOITER mode change command sent. Waiting for mode change detection...")
 
                     // ✅ Send mission status PAUSED to backend (crash-safe)
                     try {
@@ -2554,7 +2580,7 @@ class SharedViewModel : ViewModel() {
                             description = "Mission paused"
                         )
                     } catch (e: Exception) {
-                        Log.e("SharedVM", "Failed to send PAUSED status", e)
+                        LogUtils.e("SharedVM", "Failed to send PAUSED status", e)
                     }
 
                     // Announce via TTS
@@ -2564,7 +2590,7 @@ class SharedViewModel : ViewModel() {
                     onResult(false, "Failed to pause mission")
                 }
             } catch (e: Exception) {
-                Log.e("SharedVM", "Failed to pause mission", e)
+                LogUtils.e("SharedVM", "Failed to pause mission", e)
                 onResult(false, e.message)
             }
         }
@@ -2590,11 +2616,11 @@ class SharedViewModel : ViewModel() {
                 // Get the resume location (where drone was paused)
                 val resumeLocation = _resumePointLocation.value
 
-                Log.i("ResumeMission", "═══════════════════════════════════════")
-                Log.i("ResumeMission", "Starting Resume Mission")
-                Log.i("ResumeMission", "Resume at waypoint: $resumeWaypointNumber")
-                Log.i("ResumeMission", "Resume location: ${resumeLocation?.latitude}, ${resumeLocation?.longitude}")
-                Log.i("ResumeMission", "═══════════════════════════════════════")
+                LogUtils.i("ResumeMission", "═══════════════════════════════════════")
+                LogUtils.i("ResumeMission", "Starting Resume Mission")
+                LogUtils.i("ResumeMission", "Resume at waypoint: $resumeWaypointNumber")
+                LogUtils.i("ResumeMission", "Resume location: ${resumeLocation?.latitude}, ${resumeLocation?.longitude}")
+                LogUtils.i("ResumeMission", "═══════════════════════════════════════")
 
                 // Step 1: Pre-flight Checks
                 onProgress("Step 1/8: Pre-flight checks...")
@@ -2605,26 +2631,26 @@ class SharedViewModel : ViewModel() {
 
                 // Step 2: Retrieve Current Mission from FC
                 onProgress("Step 2/8: Retrieving mission from flight controller...")
-                Log.i("ResumeMission", "Retrieving current mission from FC...")
+                LogUtils.i("ResumeMission", "Retrieving current mission from FC...")
                 val allWaypoints = repo?.getAllWaypoints()
 
                 if (allWaypoints == null || allWaypoints.isEmpty()) {
-                    Log.e("ResumeMission", "❌ Failed to retrieve mission from FC")
+                    LogUtils.e("ResumeMission", "❌ Failed to retrieve mission from FC")
                     onResult(false, "Failed to retrieve mission from flight controller")
                     return@launch
                 }
 
                 // Log original mission structure
-                Log.i("ResumeMission", "════════════════════════════════")
-                Log.i("ResumeMission", "Original mission count: ${allWaypoints.size}")
-                Log.i("ResumeMission", "Resume from waypoint: $resumeWaypointNumber")
+                LogUtils.i("ResumeMission", "════════════════════════════════")
+                LogUtils.i("ResumeMission", "Original mission count: ${allWaypoints.size}")
+                LogUtils.i("ResumeMission", "Resume from waypoint: $resumeWaypointNumber")
                 allWaypoints.forEach { wp ->
-                    Log.i("ResumeMission", "  Original: seq=${wp.seq} cmd=${wp.command.value} current=${wp.current}")
+                    LogUtils.i("ResumeMission", "  Original: seq=${wp.seq} cmd=${wp.command.value} current=${wp.current}")
                 }
 
                 // Step 3: Filter Waypoints for Resume, inserting resume location as first WP
                 onProgress("Step 3/8: Filtering waypoints...")
-                Log.i("ResumeMission", "Filtering waypoints for resume from waypoint $resumeWaypointNumber...")
+                LogUtils.i("ResumeMission", "Filtering waypoints for resume from waypoint $resumeWaypointNumber...")
                 val filtered = repo?.filterWaypointsForResume(
                     allWaypoints,
                     resumeWaypointNumber,
@@ -2633,75 +2659,75 @@ class SharedViewModel : ViewModel() {
                 )
 
                 if (filtered == null || filtered.isEmpty()) {
-                    Log.e("ResumeMission", "❌ Filtering resulted in empty mission")
+                    LogUtils.e("ResumeMission", "❌ Filtering resulted in empty mission")
                     onResult(false, "Mission filtering failed - no waypoints to resume")
                     return@launch
                 }
 
-                Log.i("ResumeMission", "────────────────────────────────")
-                Log.i("ResumeMission", "Filtered mission count: ${filtered.size}")
+                LogUtils.i("ResumeMission", "────────────────────────────────")
+                LogUtils.i("ResumeMission", "Filtered mission count: ${filtered.size}")
                 filtered.forEach { wp ->
-                    Log.i("ResumeMission", "  Filtered: seq=${wp.seq} cmd=${wp.command.value} current=${wp.current}")
+                    LogUtils.i("ResumeMission", "  Filtered: seq=${wp.seq} cmd=${wp.command.value} current=${wp.current}")
                 }
 
                 // Step 4: Resequence Waypoints
                 onProgress("Step 4/8: Resequencing waypoints...")
-                Log.i("ResumeMission", "Resequencing waypoints...")
+                LogUtils.i("ResumeMission", "Resequencing waypoints...")
                 val resequenced = repo?.resequenceWaypoints(filtered)
 
                 if (resequenced == null || resequenced.isEmpty()) {
-                    Log.e("ResumeMission", "❌ Resequencing resulted in empty mission")
+                    LogUtils.e("ResumeMission", "❌ Resequencing resulted in empty mission")
                     onResult(false, "Mission resequencing failed")
                     return@launch
                 }
 
-                Log.i("ResumeMission", "────────────────────────────────")
-                Log.i("ResumeMission", "Resequenced mission count: ${resequenced.size}")
+                LogUtils.i("ResumeMission", "────────────────────────────────")
+                LogUtils.i("ResumeMission", "Resequenced mission count: ${resequenced.size}")
                 resequenced.forEach { wp ->
-                    Log.i("ResumeMission", "  Resequenced: seq=${wp.seq} cmd=${wp.command.value} current=${wp.current}")
+                    LogUtils.i("ResumeMission", "  Resequenced: seq=${wp.seq} cmd=${wp.command.value} current=${wp.current}")
                 }
-                Log.i("ResumeMission", "════════════════════════════════")
+                LogUtils.i("ResumeMission", "════════════════════════════════")
 
                 // Step 5: Validate Mission Structure
                 onProgress("Step 5/8: Validating mission...")
                 val (isValid, validationError) = validateMissionStructure(resequenced)
                 if (!isValid) {
-                    Log.e("ResumeMission", "❌ Mission validation failed: $validationError")
+                    LogUtils.e("ResumeMission", "❌ Mission validation failed: $validationError")
                     onResult(false, "Mission validation failed: $validationError")
                     return@launch
                 }
-                Log.i("ResumeMission", "✅ Mission validation passed")
+                LogUtils.i("ResumeMission", "✅ Mission validation passed")
 
                 // Step 6: Upload Modified Mission to FC
                 onProgress("Step 6/8: Uploading mission to flight controller...")
-                Log.i("ResumeMission", "Uploading ${resequenced.size} waypoints to FC...")
+                LogUtils.i("ResumeMission", "Uploading ${resequenced.size} waypoints to FC...")
                 val success = repo?.uploadMissionWithAck(resequenced) ?: false
 
                 if (success) {
-                    Log.i("ResumeMission", "✅ Mission upload confirmed by FC")
+                    LogUtils.i("ResumeMission", "✅ Mission upload confirmed by FC")
 
                     // Verify by reading back the mission count
                     // Delay allows FC to fully commit mission to storage before verification
                     delay(1000)
                     val verifyCount = repo?.getMissionCount() ?: 0
                     if (verifyCount != resequenced.size) {
-                        Log.e("ResumeMission", "⚠️ WARNING: FC reports $verifyCount waypoints but we uploaded ${resequenced.size}")
+                        LogUtils.e("ResumeMission", "⚠️ WARNING: FC reports $verifyCount waypoints but we uploaded ${resequenced.size}")
                     } else {
-                        Log.i("ResumeMission", "✅ FC confirms $verifyCount waypoints stored")
+                        LogUtils.i("ResumeMission", "✅ FC confirms $verifyCount waypoints stored")
                     }
                 } else {
-                    Log.e("ResumeMission", "❌ Mission upload FAILED - FC rejected mission")
+                    LogUtils.e("ResumeMission", "❌ Mission upload FAILED - FC rejected mission")
                     onResult(false, "Mission upload failed - flight controller rejected mission")
                     return@launch
                 }
 
                 // Step 7: Set Current Waypoint to start execution
                 onProgress("Step 7/8: Setting current waypoint...")
-                Log.i("ResumeMission", "Setting current waypoint to 1 (start from first mission item after HOME)")
+                LogUtils.i("ResumeMission", "Setting current waypoint to 1 (start from first mission item after HOME)")
                 val setWaypointSuccess = repo?.setCurrentWaypoint(1) ?: false
 
                 if (!setWaypointSuccess) {
-                    Log.w("ResumeMission", "Failed to set current waypoint, continuing anyway")
+                    LogUtils.w("ResumeMission", "Failed to set current waypoint, continuing anyway")
                 }
 
                 delay(500)
@@ -2709,7 +2735,7 @@ class SharedViewModel : ViewModel() {
                 // Step 8: Switch to AUTO Mode
                 onProgress("Step 8/8: Switching to AUTO mode...")
                 val currentMode = _telemetryState.value.mode
-                Log.i("ResumeMission", "Current mode: $currentMode")
+                LogUtils.i("ResumeMission", "Current mode: $currentMode")
 
                 var autoSuccess = false
                 var retryCount = 0
@@ -2717,16 +2743,16 @@ class SharedViewModel : ViewModel() {
 
                 while (!autoSuccess && retryCount < maxRetries) {
                     val attempt = retryCount + 1
-                    Log.i("ResumeMission", "Attempt $attempt/$maxRetries: Sending AUTO mode command...")
+                    LogUtils.i("ResumeMission", "Attempt $attempt/$maxRetries: Sending AUTO mode command...")
 
                     autoSuccess = repo?.changeMode(MavMode.AUTO) ?: false
 
-                    Log.i("ResumeMission", "Attempt $attempt result: ${if (autoSuccess) "SUCCESS" else "FAILED"}")
+                    LogUtils.i("ResumeMission", "Attempt $attempt result: ${if (autoSuccess) "SUCCESS" else "FAILED"}")
 
                     if (!autoSuccess) {
                         retryCount++
                         if (retryCount < maxRetries) {
-                            Log.w("ResumeMission", "Waiting 2 seconds before retry...")
+                            LogUtils.w("ResumeMission", "Waiting 2 seconds before retry...")
                             delay(2000)
                         }
                     }
@@ -2734,13 +2760,13 @@ class SharedViewModel : ViewModel() {
 
                 if (!autoSuccess) {
                     val finalMode = _telemetryState.value.mode
-                    Log.e("ResumeMission", "❌ Failed to switch to AUTO after $maxRetries attempts")
-                    Log.e("ResumeMission", "Final mode: $finalMode")
+                    LogUtils.e("ResumeMission", "❌ Failed to switch to AUTO after $maxRetries attempts")
+                    LogUtils.e("ResumeMission", "Final mode: $finalMode")
                     onResult(false, "Failed to switch to AUTO. Stuck in: $finalMode")
                     return@launch
                 }
 
-                Log.i("ResumeMission", "✅ Successfully switched to AUTO mode")
+                LogUtils.i("ResumeMission", "✅ Successfully switched to AUTO mode")
 
                 // Complete: Update state
                 onProgress("Mission resumed!")
@@ -2760,13 +2786,21 @@ class SharedViewModel : ViewModel() {
                         description = "Mission resumed"
                     )
                 } catch (e: Exception) {
-                    Log.e("SharedVM", "Failed to send RESUMED status", e)
+                    LogUtils.e("SharedVM", "Failed to send RESUMED status", e)
                 }
 
                 // Mark mission as uploaded
                 _missionUploaded.value = true
                 lastUploadedCount = resequenced.size
-                Log.i("ResumeMission", "✅ Mission upload status updated: uploaded=$_missionUploaded, count=$lastUploadedCount")
+                LogUtils.i("ResumeMission", "✅ Mission upload status updated: uploaded=$_missionUploaded, count=$lastUploadedCount")
+
+                // ✅ Restore spray if it was active before pause
+                if (_sprayWasActiveBeforePause) {
+                    LogUtils.i("ResumeMission", "💧 Restoring spray after resume from waypoint $resumeWaypointNumber (was active before pause)")
+                    delay(500) // Small delay to ensure mode change is complete
+                    setSprayEnabled(true)
+                    _sprayWasActiveBeforePause = false
+                }
 
                 // Complete
                 addNotification(
@@ -2777,14 +2811,14 @@ class SharedViewModel : ViewModel() {
                 )
                 ttsManager?.announceMissionResumed()
 
-                Log.i("ResumeMission", "═══════════════════════════════════════")
-                Log.i("ResumeMission", "✅ Resume Mission Complete!")
-                Log.i("ResumeMission", "═══════════════════════════════════════")
+                LogUtils.i("ResumeMission", "═══════════════════════════════════════")
+                LogUtils.i("ResumeMission", "✅ Resume Mission Complete!")
+                LogUtils.i("ResumeMission", "═══════════════════════════════════════")
 
                 onResult(true, null)
 
             } catch (e: Exception) {
-                Log.e("ResumeMission", "❌ Resume mission failed", e)
+                LogUtils.e("ResumeMission", "❌ Resume mission failed", e)
                 addNotification(Notification("Resume mission failed: ${e.message}", NotificationType.ERROR))
                 onResult(false, e.message)
             }
@@ -2802,11 +2836,19 @@ class SharedViewModel : ViewModel() {
 
                 if (pausedWaypoint == null) {
                     // No paused waypoint, just switch to AUTO
-                    Log.i("SharedVM", "Resuming mission from current position")
+                    LogUtils.i("SharedVM", "Resuming mission from current position")
                     val result = repo?.changeMode(MavMode.AUTO) ?: false
 
                     if (result) {
                         _telemetryState.update { it.copy(missionPaused = false) }
+
+                        // ✅ Restore spray if it was active before pause
+                        if (_sprayWasActiveBeforePause) {
+                            LogUtils.i("SharedVM", "💧 Restoring spray after resume (was active before pause)")
+                            delay(500) // Small delay to ensure mode change is complete
+                            setSprayEnabled(true)
+                            _sprayWasActiveBeforePause = false
+                        }
 
                         // ✅ Send mission status RESUMED to backend (crash-safe)
                         try {
@@ -2817,7 +2859,7 @@ class SharedViewModel : ViewModel() {
                                 description = "Mission resumed from current position"
                             )
                         } catch (e: Exception) {
-                            Log.e("SharedVM", "Failed to send RESUMED status", e)
+                            LogUtils.e("SharedVM", "Failed to send RESUMED status", e)
                         }
 
                         addNotification(Notification("Mission resumed", NotificationType.INFO))
@@ -2830,13 +2872,13 @@ class SharedViewModel : ViewModel() {
                 }
 
                 // Resume from specific waypoint
-                Log.i("SharedVM", "Resuming mission from waypoint: $pausedWaypoint")
+                LogUtils.i("SharedVM", "Resuming mission from waypoint: $pausedWaypoint")
 
                 // Set current waypoint in FCU
                 val setWaypointSuccess = repo?.setCurrentWaypoint(pausedWaypoint) ?: false
 
                 if (!setWaypointSuccess) {
-                    Log.w("SharedVM", "Failed to set waypoint, continuing anyway")
+                    LogUtils.w("SharedVM", "Failed to set waypoint, continuing anyway")
                 }
 
                 delay(500)
@@ -2852,6 +2894,14 @@ class SharedViewModel : ViewModel() {
                         )
                     }
 
+                    // ✅ Restore spray if it was active before pause
+                    if (_sprayWasActiveBeforePause) {
+                        LogUtils.i("SharedVM", "💧 Restoring spray after resume from waypoint $pausedWaypoint (was active before pause)")
+                        delay(500) // Small delay to ensure mode change is complete
+                        setSprayEnabled(true)
+                        _sprayWasActiveBeforePause = false
+                    }
+
                     // ✅ Send mission status RESUMED to backend (crash-safe)
                     try {
                         WebSocketManager.getInstance().sendMissionStatus(WebSocketManager.MISSION_STATUS_RESUMED)
@@ -2861,7 +2911,7 @@ class SharedViewModel : ViewModel() {
                             description = "Mission resumed from waypoint $pausedWaypoint"
                         )
                     } catch (e: Exception) {
-                        Log.e("SharedVM", "Failed to send RESUMED status", e)
+                        LogUtils.e("SharedVM", "Failed to send RESUMED status", e)
                     }
 
                     addNotification(
@@ -2876,7 +2926,7 @@ class SharedViewModel : ViewModel() {
                     onResult(false, "Failed to resume mission")
                 }
             } catch (e: Exception) {
-                Log.e("SharedVM", "Failed to resume mission", e)
+                LogUtils.e("SharedVM", "Failed to resume mission", e)
                 onResult(false, e.message)
             }
         }
@@ -2894,7 +2944,7 @@ class SharedViewModel : ViewModel() {
      * This updates the app-side calculation for tank level percentage
      */
     fun updateLevelSensorCalibration(emptyVoltageMv: Int, fullVoltageMv: Int) {
-        Log.i("LevelSensorCal", "Updating calibration: empty=$emptyVoltageMv mV, full=$fullVoltageMv mV")
+        LogUtils.i("LevelSensorCal", "Updating calibration: empty=$emptyVoltageMv mV, full=$fullVoltageMv mV")
         _telemetryState.update { currentState ->
             currentState.copy(
                 sprayTelemetry = currentState.sprayTelemetry.copy(
@@ -2903,7 +2953,7 @@ class SharedViewModel : ViewModel() {
                 )
             )
         }
-        Log.i("LevelSensorCal", "Calibration updated successfully")
+        LogUtils.i("LevelSensorCal", "Calibration updated successfully")
     }
 
     // Spray control configuration
@@ -2943,13 +2993,13 @@ class SharedViewModel : ViewModel() {
             // PWM = 1051 + (rate/100) * 900
             val expectedPwm = (1051 + (rate / 100f * 900f)).toInt()
 
-            Log.i("SprayControl", "═══════════════════════════════════════")
-            Log.i("SprayControl", "🚿 SPRAY COMMAND (Sprayer Library Mode)")
-            Log.i("SprayControl", "   State: ${if (enable) "ON" else "OFF"}")
-            Log.i("SprayControl", "   SPRAY_PUMP_RATE: ${rate.toInt()}%")
-            Log.i("SprayControl", "   Expected PWM: $expectedPwm µs (range 1051-1951)")
-            Log.i("SprayControl", "   Method: MAV_CMD_DO_SPRAYER + SPRAY_PUMP_RATE param")
-            Log.i("SprayControl", "═══════════════════════════════════════")
+            LogUtils.i("SprayControl", "═══════════════════════════════════════")
+            LogUtils.i("SprayControl", "🚿 SPRAY COMMAND (Sprayer Library Mode)")
+            LogUtils.i("SprayControl", "   State: ${if (enable) "ON" else "OFF"}")
+            LogUtils.i("SprayControl", "   SPRAY_PUMP_RATE: ${rate.toInt()}%")
+            LogUtils.i("SprayControl", "   Expected PWM: $expectedPwm µs (range 1051-1951)")
+            LogUtils.i("SprayControl", "   Method: MAV_CMD_DO_SPRAYER + SPRAY_PUMP_RATE param")
+            LogUtils.i("SprayControl", "═══════════════════════════════════════")
 
             repo?.let { repository ->
                 try {
@@ -2957,9 +3007,9 @@ class SharedViewModel : ViewModel() {
                     // This parameter controls the maximum pump output (0-100%)
                     val paramResult = setParameter("SPRAY_PUMP_RATE", rate)
                     if (paramResult != null) {
-                        Log.i("SprayControl", "✓ SPRAY_PUMP_RATE set to ${rate.toInt()}%")
+                        LogUtils.i("SprayControl", "✓ SPRAY_PUMP_RATE set to ${rate.toInt()}%")
                     } else {
-                        Log.w("SprayControl", "⚠ SPRAY_PUMP_RATE set (no confirmation received)")
+                        LogUtils.w("SprayControl", "⚠ SPRAY_PUMP_RATE set (no confirmation received)")
                     }
 
                     // Step 2: Send DO_SPRAYER command to enable/disable
@@ -2968,13 +3018,13 @@ class SharedViewModel : ViewModel() {
                         commandId = MAV_CMD_DO_SPRAYER,
                         param1 = if (enable) 1f else 0f
                     )
-                    Log.i("SprayControl", "✓ DO_SPRAYER command sent: ${if (enable) "ENABLE" else "DISABLE"}")
-                    Log.i("SprayControl", "✓ Command sent successfully")
+                    LogUtils.i("SprayControl", "✓ DO_SPRAYER command sent: ${if (enable) "ENABLE" else "DISABLE"}")
+                    LogUtils.i("SprayControl", "✓ Command sent successfully")
                 } catch (e: Exception) {
-                    Log.e("SprayControl", "✗ Failed to send spray command: ${e.message}", e)
+                    LogUtils.e("SprayControl", "✗ Failed to send spray command: ${e.message}", e)
                 }
             } ?: run {
-                Log.e("SprayControl", "✗ Cannot control spray - not connected to drone")
+                LogUtils.e("SprayControl", "✗ Cannot control spray - not connected to drone")
             }
         }
     }
@@ -2982,7 +3032,7 @@ class SharedViewModel : ViewModel() {
     fun setSprayEnabled(enabled: Boolean) {
         _sprayEnabled.value = enabled
         controlSpray(enabled)
-        Log.i("SprayControl", "Spray ${if (enabled) "ENABLED" else "DISABLED"} at rate: ${_sprayRate.value.toInt()}%")
+        LogUtils.i("SprayControl", "Spray ${if (enabled) "ENABLED" else "DISABLED"} at rate: ${_sprayRate.value.toInt()}%")
 
         // Show notification
         addNotification(
@@ -3000,7 +3050,7 @@ class SharedViewModel : ViewModel() {
      * DO_SPRAYER commands may have turned sprayer on without updating app state.
      */
     fun disableSprayOnModeChange() {
-        Log.i("SprayControl", "🚿 Disabling spray due to mode change from Auto")
+        LogUtils.i("SprayControl", "🚿 Disabling spray due to mode change from Auto")
 
         // Always send DO_SPRAYER(0) to FC to ensure sprayer is OFF
         // This is critical because mission-embedded DO_SPRAYER commands work independently of app state
@@ -3011,9 +3061,9 @@ class SharedViewModel : ViewModel() {
                         commandId = MAV_CMD_DO_SPRAYER,
                         param1 = 0f  // 0 = Disable sprayer
                     )
-                    Log.i("SprayControl", "✓ DO_SPRAYER(0) sent to FC - sprayer disabled")
+                    LogUtils.i("SprayControl", "✓ DO_SPRAYER(0) sent to FC - sprayer disabled")
                 } catch (e: Exception) {
-                    Log.e("SprayControl", "✗ Failed to send DO_SPRAYER disable: ${e.message}", e)
+                    LogUtils.e("SprayControl", "✗ Failed to send DO_SPRAYER disable: ${e.message}", e)
                 }
             }
         }
@@ -3041,10 +3091,10 @@ class SharedViewModel : ViewModel() {
             // Check if RC7 is enabled (spray enabled from RC transmitter)
             val rc7Enabled = _telemetryState.value.sprayTelemetry.sprayEnabled
             if (rc7Enabled) {
-                Log.i("SprayControl", "🚿 Rate changed to ${newRate.toInt()}% - updating SPRAY_PUMP_RATE parameter (RC7 enabled)")
+                LogUtils.i("SprayControl", "🚿 Rate changed to ${newRate.toInt()}% - updating SPRAY_PUMP_RATE parameter (RC7 enabled)")
                 controlSpray(true) // Re-send with new rate
             } else {
-                Log.d("SprayControl", "Rate set to ${newRate.toInt()}% (RC7 disabled, SPRAY_PUMP_RATE will be set when RC7 enabled)")
+                LogUtils.d("SprayControl", "Rate set to ${newRate.toInt()}% (RC7 disabled, SPRAY_PUMP_RATE will be set when RC7 enabled)")
             }
         }
     }
@@ -3062,10 +3112,10 @@ class SharedViewModel : ViewModel() {
             val normalizedYaw = if (currentYaw < 0) currentYaw + 360 else currentYaw
             _lockedYaw.value = normalizedYaw
             _yawHoldEnabled.value = true
-            Log.i("YawHold", "🧭 Yaw hold ENABLED - locked to ${normalizedYaw}°")
+            LogUtils.i("YawHold", "🧭 Yaw hold ENABLED - locked to ${normalizedYaw}°")
             addNotification(Notification("Yaw locked at ${normalizedYaw.toInt()}°", NotificationType.INFO))
         } else {
-            Log.w("YawHold", "⚠️ Cannot enable yaw hold - no heading data available")
+            LogUtils.w("YawHold", "⚠️ Cannot enable yaw hold - no heading data available")
         }
     }
 
@@ -3079,7 +3129,7 @@ class SharedViewModel : ViewModel() {
             _lockedYaw.value = null
             yawEnforcementJob?.cancel()
             yawEnforcementJob = null
-            Log.i("YawHold", "🧭 Yaw hold DISABLED")
+            LogUtils.i("YawHold", "🧭 Yaw hold DISABLED")
         }
     }
 
@@ -3089,7 +3139,7 @@ class SharedViewModel : ViewModel() {
      */
     fun startYawEnforcement() {
         if (!_yawHoldEnabled.value || _lockedYaw.value == null) {
-            Log.w("YawHold", "Cannot start yaw enforcement - yaw hold not enabled or no locked yaw")
+            LogUtils.w("YawHold", "Cannot start yaw enforcement - yaw hold not enabled or no locked yaw")
             return
         }
 
@@ -3097,7 +3147,7 @@ class SharedViewModel : ViewModel() {
         yawEnforcementJob?.cancel()
 
         yawEnforcementJob = viewModelScope.launch {
-            Log.i("YawHold", "🔄 Starting continuous yaw enforcement at ${_lockedYaw.value}°")
+            LogUtils.i("YawHold", "🔄 Starting continuous yaw enforcement at ${_lockedYaw.value}°")
 
             while (currentCoroutineContext().isActive && _yawHoldEnabled.value) {
                 val currentMode = _telemetryState.value.mode
@@ -3114,19 +3164,19 @@ class SharedViewModel : ViewModel() {
 
                     // Only send correction if error exceeds tolerance
                     if (kotlin.math.abs(yawError) > YAW_TOLERANCE) {
-                        Log.d("YawHold", "📐 Yaw error: ${yawError}° - sending correction to ${targetYaw}°")
+                        LogUtils.d("YawHold", "📐 Yaw error: ${yawError}° - sending correction to ${targetYaw}°")
                         sendYawCommand(targetYaw)
                     }
                 } else {
                     // Not in AUTO mode - stop enforcement
-                    Log.i("YawHold", "Mode is $currentMode (not AUTO) - stopping yaw enforcement")
+                    LogUtils.i("YawHold", "Mode is $currentMode (not AUTO) - stopping yaw enforcement")
                     break
                 }
 
                 delay(YAW_ENFORCEMENT_INTERVAL)
             }
 
-            Log.i("YawHold", "🛑 Yaw enforcement loop ended")
+            LogUtils.i("YawHold", "🛑 Yaw enforcement loop ended")
         }
     }
 
@@ -3144,7 +3194,7 @@ class SharedViewModel : ViewModel() {
                 param4 = 0f          // 0 = absolute angle
             )
         } catch (e: Exception) {
-            Log.e("YawHold", "Failed to send yaw command: ${e.message}")
+            LogUtils.e("YawHold", "Failed to send yaw command: ${e.message}")
         }
     }
 
@@ -3157,9 +3207,9 @@ class SharedViewModel : ViewModel() {
     suspend fun setWpYawBehavior(value: Int) {
         try {
             setParameter("WP_YAW_BEHAVIOR", value.toFloat())
-            Log.i("YawHold", "✓ WP_YAW_BEHAVIOR set to $value")
+            LogUtils.i("YawHold", "✓ WP_YAW_BEHAVIOR set to $value")
         } catch (e: Exception) {
-            Log.e("YawHold", "Failed to set WP_YAW_BEHAVIOR: ${e.message}")
+            LogUtils.e("YawHold", "Failed to set WP_YAW_BEHAVIOR: ${e.message}")
         }
     }
 
@@ -3169,7 +3219,7 @@ class SharedViewModel : ViewModel() {
      * This will be sent to the autopilot to update the flow sensor calibration
      */
     fun updateFlowSensorCalibration(calibrationFactor: Float) {
-        Log.i("FlowSensorCal", "Updating flow calibration factor: $calibrationFactor")
+        LogUtils.i("FlowSensorCal", "Updating flow calibration factor: $calibrationFactor")
 
         // Update local state
         _telemetryState.update { currentState ->
@@ -3185,13 +3235,13 @@ class SharedViewModel : ViewModel() {
             try {
                 // Set BATT2_AMP_PERVLT parameter
                 setParameter("BATT2_AMP_PERVLT", calibrationFactor)
-                Log.i("FlowSensorCal", "✓ Calibration factor sent to autopilot")
+                LogUtils.i("FlowSensorCal", "✓ Calibration factor sent to autopilot")
             } catch (e: Exception) {
-                Log.e("FlowSensorCal", "Error sending calibration factor to autopilot", e)
+                LogUtils.e("FlowSensorCal", "Error sending calibration factor to autopilot", e)
             }
         }
 
-        Log.i("FlowSensorCal", "Flow sensor calibration updated successfully")
+        LogUtils.i("FlowSensorCal", "Flow sensor calibration updated successfully")
     }
 
     /**
@@ -3205,7 +3255,7 @@ class SharedViewModel : ViewModel() {
                     triggerEmergencyRTL()
                 }
             } catch (e: Exception) {
-                Log.e("SharedVM", "Error in emergency RTL callback", e)
+                LogUtils.e("SharedVM", "Error in emergency RTL callback", e)
             }
         }
     }
@@ -3215,17 +3265,17 @@ class SharedViewModel : ViewModel() {
      * This sends the RTL command synchronously to ensure it's sent before app termination
      */
     suspend fun triggerEmergencyRTL() {
-        Log.w("SharedVM", "🚨 TRIGGERING EMERGENCY RTL 🚨")
+        LogUtils.w("SharedVM", "🚨 TRIGGERING EMERGENCY RTL 🚨")
         try {
             repo?.let { repository ->
                 // Send RTL mode change command (mode 6 = RTL for ArduPilot)
                 repository.changeMode(6u)
-                Log.i("SharedVM", "✓ Emergency RTL command sent to drone")
+                LogUtils.i("SharedVM", "✓ Emergency RTL command sent to drone")
             } ?: run {
-                Log.e("SharedVM", "❌ Cannot send RTL - repository is null")
+                LogUtils.e("SharedVM", "❌ Cannot send RTL - repository is null")
             }
         } catch (e: Exception) {
-            Log.e("SharedVM", "❌ Failed to send emergency RTL command", e)
+            LogUtils.e("SharedVM", "❌ Failed to send emergency RTL command", e)
         }
     }
 
@@ -3240,7 +3290,7 @@ class SharedViewModel : ViewModel() {
             try {
                 it.closeConnection()
             } catch (e: Exception) {
-                Log.e("SharedVM", "Error closing connection", e)
+                LogUtils.e("SharedVM", "Error closing connection", e)
             }
         }
         DisconnectionRTLHandler.stopMonitoring()
@@ -3253,7 +3303,7 @@ class SharedViewModel : ViewModel() {
         val pausedAtWp = currentState.pausedAtWaypoint
 
         if (wasPaused) {
-            Log.i("SharedVM", "Preserving mission pause state during disconnect (pausedAtWaypoint=$pausedAtWp)")
+            LogUtils.i("SharedVM", "Preserving mission pause state during disconnect (pausedAtWaypoint=$pausedAtWp)")
             // Reset to default but keep mission pause state
             _telemetryState.value = TelemetryState(
                 missionPaused = true,
@@ -3305,7 +3355,7 @@ class SharedViewModel : ViewModel() {
             }
         } else {
             // Not in split plan mode - initiate split
-            Log.i("SharedVM", "Split plan toggle initiated")
+            LogUtils.i("SharedVM", "Split plan toggle initiated")
             // The dialog will be shown in the UI (MainPage), we just need to trigger it
             // by setting a mutable state - but that's handled in the composable
         }
@@ -3317,9 +3367,9 @@ class SharedViewModel : ViewModel() {
     fun confirmSplitPlan() {
         splitPlan { success, error ->
             if (success) {
-                Log.i("SharedVM", "✓ Split plan confirmed and initiated")
+                LogUtils.i("SharedVM", "✓ Split plan confirmed and initiated")
             } else {
-                Log.e("SharedVM", "✗ Split plan failed: $error")
+                LogUtils.e("SharedVM", "✗ Split plan failed: $error")
             }
         }
     }
@@ -3331,16 +3381,16 @@ class SharedViewModel : ViewModel() {
     fun splitPlan(onResult: (Boolean, String?) -> Unit = { _, _ -> }) {
         viewModelScope.launch {
             try {
-                Log.i("SharedVM", "Initiating split plan...")
+                LogUtils.i("SharedVM", "Initiating split plan...")
 
                 if (repo == null) {
-                    Log.w("SharedVM", "No repo available, cannot split plan")
+                    LogUtils.w("SharedVM", "No repo available, cannot split plan")
                     onResult(false, "Not connected to vehicle")
                     return@launch
                 }
 
                 if (!_telemetryState.value.fcuDetected) {
-                    Log.w("SharedVM", "FCU not detected, cannot split plan")
+                    LogUtils.w("SharedVM", "FCU not detected, cannot split plan")
                     onResult(false, "FCU not detected")
                     return@launch
                 }
@@ -3350,7 +3400,7 @@ class SharedViewModel : ViewModel() {
                 val currentLon = _telemetryState.value.longitude
 
                 if (currentLat == null || currentLon == null) {
-                    Log.w("SharedVM", "Current position not available, cannot split plan")
+                    LogUtils.w("SharedVM", "Current position not available, cannot split plan")
                     onResult(false, "Current position not available")
                     return@launch
                 }
@@ -3358,19 +3408,19 @@ class SharedViewModel : ViewModel() {
                 _splitPlanWaypointLat.value = currentLat
                 _splitPlanWaypointLon.value = currentLon
 
-                Log.i("SharedVM", "✓ Stored split waypoint at Lat: $currentLat, Lon: $currentLon")
+                LogUtils.i("SharedVM", "✓ Stored split waypoint at Lat: $currentLat, Lon: $currentLon")
 
                 // Switch to RTL mode
-                Log.i("SharedVM", "Switching to RTL mode...")
+                LogUtils.i("SharedVM", "Switching to RTL mode...")
                 val rtlSuccess = repo?.changeMode(MavMode.RTL) ?: false
 
                 if (!rtlSuccess) {
-                    Log.e("SharedVM", "Failed to switch to RTL mode")
+                    LogUtils.e("SharedVM", "Failed to switch to RTL mode")
                     onResult(false, "Failed to switch to RTL mode")
                     return@launch
                 }
 
-                Log.i("SharedVM", "✓ RTL mode activated")
+                LogUtils.i("SharedVM", "✓ RTL mode activated")
                 addNotification(
                     Notification(
                         message = "Plan split initiated - returning to launch point",
@@ -3379,28 +3429,28 @@ class SharedViewModel : ViewModel() {
                 )
 
                 // Wait for drone to land (altitude becomes 0 or very low)
-                Log.i("SharedVM", "Waiting for drone to land...")
+                LogUtils.i("SharedVM", "Waiting for drone to land...")
                 val landTimeout = 300000L // 5 minutes timeout
                 val landStart = System.currentTimeMillis()
 
                 while (System.currentTimeMillis() - landStart < landTimeout) {
                     val altitude = _telemetryState.value.altitudeRelative ?: 0f
                     if (altitude <= 0.5f) {
-                        Log.i("SharedVM", "✓ Drone has landed (altitude: $altitude)")
+                        LogUtils.i("SharedVM", "✓ Drone has landed (altitude: $altitude)")
                         break
                     }
                     delay(500)
                 }
 
                 // Disarm the drone
-                Log.i("SharedVM", "Disarming drone...")
+                LogUtils.i("SharedVM", "Disarming drone...")
                 repo?.disarm()
                 delay(1000)
 
                 if (!_telemetryState.value.armed) {
-                    Log.i("SharedVM", "✓ Drone disarmed successfully")
+                    LogUtils.i("SharedVM", "✓ Drone disarmed successfully")
                 } else {
-                    Log.w("SharedVM", "Drone may not be fully disarmed yet")
+                    LogUtils.w("SharedVM", "Drone may not be fully disarmed yet")
                 }
 
                 // Mark split plan as active
@@ -3416,7 +3466,7 @@ class SharedViewModel : ViewModel() {
 
                 onResult(true, null)
             } catch (e: Exception) {
-                Log.e("SharedVM", "Failed to split plan", e)
+                LogUtils.e("SharedVM", "Failed to split plan", e)
                 onResult(false, e.message)
             }
         }
@@ -3429,74 +3479,74 @@ class SharedViewModel : ViewModel() {
     fun resumeFromSplitPlan(onResult: (Boolean, String?) -> Unit = { _, _ -> }) {
         viewModelScope.launch {
             try {
-                Log.i("SharedVM", "Resuming from split plan...")
+                LogUtils.i("SharedVM", "Resuming from split plan...")
 
                 if (repo == null) {
-                    Log.w("SharedVM", "No repo available, cannot resume from split")
+                    LogUtils.w("SharedVM", "No repo available, cannot resume from split")
                     onResult(false, "Not connected to vehicle")
                     return@launch
                 }
 
                 if (!_splitPlanActive.value) {
-                    Log.w("SharedVM", "No active split plan to resume")
+                    LogUtils.w("SharedVM", "No active split plan to resume")
                     onResult(false, "No split plan active")
                     return@launch
                 }
 
                 if (!_telemetryState.value.fcuDetected) {
-                    Log.w("SharedVM", "FCU not detected, cannot resume from split")
+                    LogUtils.w("SharedVM", "FCU not detected, cannot resume from split")
                     onResult(false, "FCU not detected")
                     return@launch
                 }
 
                 if (!_missionUploaded.value || lastUploadedCount == 0) {
-                    Log.w("SharedVM", "No mission uploaded, cannot resume")
+                    LogUtils.w("SharedVM", "No mission uploaded, cannot resume")
                     onResult(false, "No mission uploaded")
                     return@launch
                 }
 
                 if (!_telemetryState.value.armable) {
-                    Log.w("SharedVM", "Vehicle not armable")
+                    LogUtils.w("SharedVM", "Vehicle not armable")
                     onResult(false, "Vehicle not armable. Check sensors and GPS.")
                     return@launch
                 }
 
                 val sats = _telemetryState.value.sats ?: 0
                 if (sats < 6) {
-                    Log.w("SharedVM", "Insufficient GPS satellites ($sats)")
+                    LogUtils.w("SharedVM", "Insufficient GPS satellites ($sats)")
                     onResult(false, "Insufficient GPS satellites ($sats). Need at least 6.")
                     return@launch
                 }
 
                 // Arm the vehicle
-                Log.i("SharedVM", "Arming vehicle for split plan resume...")
+                LogUtils.i("SharedVM", "Arming vehicle for split plan resume...")
                 repo?.arm()
                 delay(500)
 
                 if (!_telemetryState.value.armed) {
-                    Log.w("SharedVM", "Failed to arm vehicle")
+                    LogUtils.w("SharedVM", "Failed to arm vehicle")
                     onResult(false, "Failed to arm vehicle")
                     return@launch
                 }
 
-                Log.i("SharedVM", "✓ Vehicle armed successfully")
+                LogUtils.i("SharedVM", "✓ Vehicle armed successfully")
 
                 // Send mission start command
-                Log.i("SharedVM", "Sending mission start command...")
+                LogUtils.i("SharedVM", "Sending mission start command...")
                 repo?.sendMissionStartCommand()
                 delay(500)
 
                 // Switch to AUTO mode
-                Log.i("SharedVM", "Switching to AUTO mode...")
+                LogUtils.i("SharedVM", "Switching to AUTO mode...")
                 val autoSuccess = repo?.changeMode(MavMode.AUTO) ?: false
 
                 if (!autoSuccess) {
-                    Log.e("SharedVM", "Failed to switch to AUTO mode")
+                    LogUtils.e("SharedVM", "Failed to switch to AUTO mode")
                     onResult(false, "Failed to switch to AUTO mode")
                     return@launch
                 }
 
-                Log.i("SharedVM", "✓ Mission resumed from split point")
+                LogUtils.i("SharedVM", "✓ Mission resumed from split point")
                 addNotification(
                     Notification(
                         message = "Mission resumed from split waypoint",
@@ -3510,7 +3560,7 @@ class SharedViewModel : ViewModel() {
 
                 onResult(true, null)
             } catch (e: Exception) {
-                Log.e("SharedVM", "Failed to resume from split plan", e)
+                LogUtils.e("SharedVM", "Failed to resume from split plan", e)
                 onResult(false, e.message)
             }
         }
@@ -3560,7 +3610,7 @@ class SharedViewModel : ViewModel() {
         viewModelScope.launch {
             isConnected.collect { connected ->
                 ttsManager?.announceConnectionStatus(connected)
-                Log.d("SharedVM", "Connection status changed: ${if (connected) "Connected" else "Disconnected"}")
+                LogUtils.d("SharedVM", "Connection status changed: ${if (connected) "Connected" else "Disconnected"}")
 
                 // Start fence monitoring when connected (repo will be available)
                 if (connected && repo != null) {
@@ -3590,7 +3640,7 @@ class SharedViewModel : ViewModel() {
 
                 if (status.breached) {
                     // Just notify - FC is handling everything
-                    Log.w("Geofence", "⚠️ Fence breach detected - FC handling with ${getCurrentFenceAction()}")
+                    LogUtils.w("Geofence", "⚠️ Fence breach detected - FC handling with ${getCurrentFenceAction()}")
                     _geofenceWarningTriggered.value = true
                     geofenceTriggeringModeChange = true
 
@@ -3605,7 +3655,7 @@ class SharedViewModel : ViewModel() {
                     geofenceTriggeringModeChange = false
                 } else if (_geofenceWarningTriggered.value) {
                     // Breach cleared
-                    Log.i("Geofence", "✓ Fence breach cleared - drone back in safe zone")
+                    LogUtils.i("Geofence", "✓ Fence breach cleared - drone back in safe zone")
                     _geofenceWarningTriggered.value = false
                     addNotification(Notification(
                         message = "✓ Geofence clear - drone back in safe zone",
@@ -3657,7 +3707,7 @@ class SharedViewModel : ViewModel() {
     ) {
         viewModelScope.launch {
             try {
-                Log.i("Geofence", "Preparing geofence upload...")
+                LogUtils.i("Geofence", "Preparing geofence upload...")
 
                 // Build fence zones
                 val zones = mutableListOf<FenceZone>()
@@ -3669,7 +3719,7 @@ class SharedViewModel : ViewModel() {
                         isInclusion = true
                     ))
                 } else {
-                    Log.e("Geofence", "Outer boundary must have at least 3 points")
+                    LogUtils.e("Geofence", "Outer boundary must have at least 3 points")
                     addNotification(Notification(
                         message = "❌ Geofence needs at least 3 boundary points",
                         type = NotificationType.ERROR
@@ -3724,18 +3774,18 @@ class SharedViewModel : ViewModel() {
                     // NOTE: Removed geofence upload notification from notification panel
                     speak("Geofence enabled")
 
-                    Log.i("Geofence", "✅ Geofence uploaded successfully:")
-                    Log.i("Geofence", "  - Zones: ${zones.size}")
-                    Log.i("Geofence", "  - Action: $action")
-                    Log.i("Geofence", "  - Margin: ${margin}m")
-                    Log.i("Geofence", "  - Alt Max: ${altitudeMax ?: "none"}m")
+                    LogUtils.i("Geofence", "✅ Geofence uploaded successfully:")
+                    LogUtils.i("Geofence", "  - Zones: ${zones.size}")
+                    LogUtils.i("Geofence", "  - Action: $action")
+                    LogUtils.i("Geofence", "  - Margin: ${margin}m")
+                    LogUtils.i("Geofence", "  - Alt Max: ${altitudeMax ?: "none"}m")
                 } else {
                     // NOTE: Removed geofence upload failure notification from notification panel
                     speak("Geofence upload failed")
                 }
 
             } catch (e: Exception) {
-                Log.e("Geofence", "Error uploading geofence: ${e.message}")
+                LogUtils.e("Geofence", "Error uploading geofence: ${e.message}")
                 // NOTE: Removed geofence upload error notification from notification panel
             }
         }
@@ -3754,7 +3804,7 @@ class SharedViewModel : ViewModel() {
     ) {
         viewModelScope.launch {
             try {
-                Log.i("Geofence", "Uploading circular geofence: radius=${radiusMeters}m")
+                LogUtils.i("Geofence", "Uploading circular geofence: radius=${radiusMeters}m")
 
                 val zones = listOf(
                     FenceZone.Circle(
@@ -3790,7 +3840,7 @@ class SharedViewModel : ViewModel() {
                 }
 
             } catch (e: Exception) {
-                Log.e("Geofence", "Error uploading circular geofence: ${e.message}")
+                LogUtils.e("Geofence", "Error uploading circular geofence: ${e.message}")
             }
         }
     }
@@ -3819,7 +3869,7 @@ class SharedViewModel : ViewModel() {
                         _geofenceEnabled.value = true
                     }
 
-                    Log.i("Geofence", "Downloaded ${zones.size} fence zones from FC")
+                    LogUtils.i("Geofence", "Downloaded ${zones.size} fence zones from FC")
                 } else {
                     addNotification(
                         Notification(
@@ -3830,7 +3880,7 @@ class SharedViewModel : ViewModel() {
                 }
 
             } catch (e: Exception) {
-                Log.e("Geofence", "Error downloading geofence: ${e.message}")
+                LogUtils.e("Geofence", "Error downloading geofence: ${e.message}")
             }
         }
     }
@@ -3847,7 +3897,7 @@ class SharedViewModel : ViewModel() {
                 val message = if (enabled) "✅ Geofence enabled" else "⚠️ Geofence disabled"
                 addNotification(Notification(message, NotificationType.INFO))
                 speak(if (enabled) "Geofence enabled" else "Geofence disabled")
-                Log.i("Geofence", message)
+                LogUtils.i("Geofence", message)
             } else {
                 addNotification(
                     Notification(
@@ -3879,7 +3929,7 @@ class SharedViewModel : ViewModel() {
                         type = NotificationType.SUCCESS
                     ))
                     speak("Geofence cleared")
-                    Log.i("Geofence", "✅ Geofence cleared from FC and UI")
+                    LogUtils.i("Geofence", "✅ Geofence cleared from FC and UI")
                 } else {
                     addNotification(Notification(
                         message = "❌ Failed to clear geofence from FC",
@@ -3888,7 +3938,7 @@ class SharedViewModel : ViewModel() {
                 }
 
             } catch (e: Exception) {
-                Log.e("Geofence", "Error clearing geofence: ${e.message}")
+                LogUtils.e("Geofence", "Error clearing geofence: ${e.message}")
             }
         }
     }
@@ -3900,12 +3950,12 @@ class SharedViewModel : ViewModel() {
         _geofenceViolationDetected.value = false
         _geofenceWarningTriggered.value = false
         geofenceTriggeringModeChange = false
-        Log.i("Geofence", "Geofence state reset")
+        LogUtils.i("Geofence", "Geofence state reset")
     }
 
     override fun onCleared() {
         super.onCleared()
         ttsManager?.shutdown()
-        Log.d("SharedVM", "ViewModel cleared, TTS shutdown")
+        LogUtils.d("SharedVM", "ViewModel cleared, TTS shutdown")
     }
 }

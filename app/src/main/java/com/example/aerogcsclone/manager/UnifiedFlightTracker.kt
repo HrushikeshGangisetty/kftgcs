@@ -1,7 +1,6 @@
 package com.example.aerogcsclone.manager
 
 import android.content.Context
-import android.util.Log
 import com.example.aerogcsclone.GCSApplication
 import com.example.aerogcsclone.Telemetry.TelemetryState
 import com.example.aerogcsclone.api.SessionManager
@@ -12,6 +11,7 @@ import com.example.aerogcsclone.telemetry.Notification
 import com.example.aerogcsclone.telemetry.NotificationType
 import com.example.aerogcsclone.telemetry.SharedViewModel
 import com.example.aerogcsclone.telemetry.WebSocketManager
+import com.example.aerogcsclone.utils.LogUtils
 import com.example.aerogcsclone.viewmodel.TlogViewModel
 import kotlinx.coroutines.*
 import kotlin.math.sqrt
@@ -282,14 +282,14 @@ class UnifiedFlightTracker(
             // If user selected AUTOMATIC, they will use startMission() which handles WebSocket
             val userSelectedManual = sharedViewModel.userSelectedFlightMode.value == SharedViewModel.UserFlightMode.MANUAL
             if (!userSelectedManual) {
-                Log.i("UnifiedFlightTracker", "ℹ️ User selected AUTOMATIC mode - skipping manual WebSocket connection")
-                Log.i("UnifiedFlightTracker", "ℹ️ WebSocket will be connected via startMission() for AUTO flights")
+                LogUtils.i("UnifiedFlightTracker", "ℹ️ User selected AUTOMATIC mode - skipping manual WebSocket connection")
+                LogUtils.i("UnifiedFlightTracker", "ℹ️ WebSocket will be connected via startMission() for AUTO flights")
                 return
             }
 
             val wsManager = WebSocketManager.getInstance()
             if (!wsManager.isConnected) {
-                Log.i("UnifiedFlightTracker", "🔌 Opening WebSocket connection for MANUAL flight...")
+                LogUtils.i("UnifiedFlightTracker", "🔌 Opening WebSocket connection for MANUAL flight...")
 
                 // Get pilotId and adminId from SessionManager
                 GCSApplication.getInstance()?.let { app ->
@@ -297,11 +297,11 @@ class UnifiedFlightTracker(
                     val adminId = SessionManager.getAdminId(app)
                     wsManager.pilotId = pilotId
                     wsManager.adminId = adminId
-                    Log.i("UnifiedFlightTracker", "📋 Updated WebSocket credentials: pilotId=$pilotId, adminId=$adminId")
+                    LogUtils.i("UnifiedFlightTracker", "📋 Updated WebSocket credentials: pilotId=$pilotId, adminId=$adminId")
 
                     // Warn if pilot is not logged in
                     if (pilotId <= 0) {
-                        Log.e("UnifiedFlightTracker", "⚠️ WARNING: pilotId=$pilotId - User may not be logged in! Telemetry will not be saved.")
+                        LogUtils.e("UnifiedFlightTracker", "⚠️ WARNING: pilotId=$pilotId - User may not be logged in! Telemetry will not be saved.")
                         return
                     }
                 }
@@ -309,21 +309,21 @@ class UnifiedFlightTracker(
                 // Get plot name from SharedViewModel if available
                 val plotName = sharedViewModel.currentPlotName.value
                 wsManager.selectedPlotName = plotName
-                Log.i("UnifiedFlightTracker", "📋 Plot name set for WebSocket: $plotName")
+                LogUtils.i("UnifiedFlightTracker", "📋 Plot name set for WebSocket: $plotName")
 
                 // Set flight mode to MANUAL (this is from UnifiedFlightTracker detection)
                 wsManager.selectedFlightMode = "MANUAL"
-                Log.i("UnifiedFlightTracker", "📋 Flight mode set for WebSocket: MANUAL")
+                LogUtils.i("UnifiedFlightTracker", "📋 Flight mode set for WebSocket: MANUAL")
 
                 // Set mission type from SharedViewModel if available, otherwise NONE
                 val missionType = sharedViewModel.selectedMissionType.value.name
                 wsManager.selectedMissionType = missionType
-                Log.i("UnifiedFlightTracker", "📋 Mission type set for WebSocket: $missionType")
+                LogUtils.i("UnifiedFlightTracker", "📋 Mission type set for WebSocket: $missionType")
 
                 // Set grid setup source from SharedViewModel if available, otherwise NONE
                 val gridSource = sharedViewModel.gridSetupSource.value.name
                 wsManager.gridSetupSource = gridSource
-                Log.i("UnifiedFlightTracker", "📋 Grid setup source set for WebSocket: $gridSource")
+                LogUtils.i("UnifiedFlightTracker", "📋 Grid setup source set for WebSocket: $gridSource")
 
                 // Connect WebSocket
                 wsManager.connect()
@@ -338,7 +338,7 @@ class UnifiedFlightTracker(
                 // Additional wait for session_ack and mission_created
                 if (wsManager.isConnected) {
                     delay(500) // Give time for session_ack and mission_created
-                    Log.i("UnifiedFlightTracker", "✅ WebSocket ready after ${waitTime}ms")
+                    LogUtils.i("UnifiedFlightTracker", "✅ WebSocket ready after ${waitTime}ms")
 
                     // Send mission status STARTED
                     if (wsManager.missionId != null) {
@@ -348,18 +348,18 @@ class UnifiedFlightTracker(
                             eventStatus = "INFO",
                             description = "Manual flight started"
                         )
-                        Log.i("UnifiedFlightTracker", "✅ Mission status STARTED sent to backend for manual flight")
+                        LogUtils.i("UnifiedFlightTracker", "✅ Mission status STARTED sent to backend for manual flight")
                     } else {
-                        Log.w("UnifiedFlightTracker", "⚠️ Skipping mission status - missionId not yet received")
+                        LogUtils.w("UnifiedFlightTracker", "⚠️ Skipping mission status - missionId not yet received")
                     }
                 } else {
-                    Log.w("UnifiedFlightTracker", "⚠️ WebSocket connection timeout for manual flight")
+                    LogUtils.w("UnifiedFlightTracker", "⚠️ WebSocket connection timeout for manual flight")
                 }
             } else {
-                Log.i("UnifiedFlightTracker", "✅ WebSocket already connected for manual flight")
+                LogUtils.i("UnifiedFlightTracker", "✅ WebSocket already connected for manual flight")
             }
         } catch (e: Exception) {
-            Log.e("UnifiedFlightTracker", "❌ Failed to connect WebSocket for manual flight: ${e.message}", e)
+            LogUtils.e("UnifiedFlightTracker", "❌ Failed to connect WebSocket for manual flight: ${e.message}")
         }
     }
 
@@ -377,7 +377,7 @@ class UnifiedFlightTracker(
         try {
             val wsManager = WebSocketManager.getInstance()
             if (wsManager.isConnected && wsManager.missionId != null) {
-                Log.i("UnifiedFlightTracker", "📤 Sending mission end status for MANUAL flight")
+                LogUtils.i("UnifiedFlightTracker", "📤 Sending mission end status for MANUAL flight")
 
                 // Send mission status ENDED
                 wsManager.sendMissionStatus(WebSocketManager.MISSION_STATUS_ENDED)
@@ -415,12 +415,12 @@ class UnifiedFlightTracker(
                     cropType = cropType
                 )
 
-                Log.i("UnifiedFlightTracker", "✅ Mission summary sent for manual flight (plot=$plotName, project=$projectName)")
+                LogUtils.i("UnifiedFlightTracker", "✅ Mission summary sent for manual flight (plot=$plotName, project=$projectName)")
             } else {
-                Log.w("UnifiedFlightTracker", "⚠️ Cannot send mission end - WebSocket not connected or no missionId")
+                LogUtils.w("UnifiedFlightTracker", "⚠️ Cannot send mission end - WebSocket not connected or no missionId")
             }
         } catch (e: Exception) {
-            Log.e("UnifiedFlightTracker", "❌ Failed to send mission end for manual flight: ${e.message}", e)
+            LogUtils.e("UnifiedFlightTracker", "❌ Failed to send mission end for manual flight: ${e.message}")
         }
     }
 
@@ -432,7 +432,6 @@ class UnifiedFlightTracker(
         val altitude = telemetry.altitudeRelative ?: 0f
         if (!hasTakenOff && altitude > groundLevelAltitude + MIN_TAKEOFF_ALTITUDE) {
             hasTakenOff = true
-            android.util.Log.i("UnifiedFlightTracker", "✈️ Takeoff confirmed at altitude ${altitude}m (ground level: ${groundLevelAltitude}m)")
         }
 
         // Update distance (if GPS is valid)
@@ -451,10 +450,6 @@ class UnifiedFlightTracker(
                 val flowRate = telemetry.sprayTelemetry.flowRateLiterPerMin ?: 0f
                 if (isSprayActive || flowRate > 0f) {
                     totalSprayedDistanceMeters += distance
-                    // Log every 50 meters of sprayed distance
-                    if (totalSprayedDistanceMeters.toInt() % 50 == 0) {
-                        android.util.Log.d("UnifiedFlightTracker", "🔄 Sprayed distance: ${totalSprayedDistanceMeters}m (isSprayActive=$isSprayActive, flowRate=$flowRate)")
-                    }
                 }
             }
             lastLat = lat
@@ -620,9 +615,6 @@ class UnifiedFlightTracker(
         // Show mission completion dialog with time, acres (converted from distance), sprayed acres, and consumed litres
         val consumedLitresStr = finalConsumedLitres?.let { "%.2f L".format(it) } ?: "N/A"
 
-        // Debug logging for sprayed acres calculation
-        android.util.Log.d("UnifiedFlightTracker", "🔥 FINAL VALUES: totalSprayedDistanceMeters=$totalSprayedDistanceMeters, finalSprayedDistance=$finalSprayedDistance")
-        android.util.Log.d("UnifiedFlightTracker", "🔥 formatAcres(finalSprayedDistance)=${formatAcres(finalSprayedDistance)}")
 
         sharedViewModel.showMissionCompletionDialog(
             totalTime = formatTime(finalTime),
