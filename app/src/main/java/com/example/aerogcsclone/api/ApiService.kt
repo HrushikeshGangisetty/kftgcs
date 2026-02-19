@@ -435,7 +435,8 @@ data class PilotRegisterRequest(
 
 data class VerifyOtpRequest(
     val email: String,
-    val otp: Int
+    val otp: Int,
+    val device_id: String
 )
 
 data class ResendOtpRequest(
@@ -444,7 +445,8 @@ data class ResendOtpRequest(
 
 data class PilotLoginRequest(
     val email: String,
-    val password: String
+    val password: String,
+    val device_id: String
 )
 
 data class PilotLogoutRequest(

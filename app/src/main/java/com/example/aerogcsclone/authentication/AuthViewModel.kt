@@ -116,7 +116,8 @@ class AuthViewModel : ViewModel() {
 
         viewModelScope.launch {
             try {
-                val request = PilotLoginRequest(email, password)
+                val deviceId = getDeviceId(context)
+                val request = PilotLoginRequest(email, password, deviceId)
                 when (val response = ApiService.pilotLogin(request)) {
                     is ApiResponse.Success -> {
                         SessionManager.saveSession(context, email, response.data.pilot_id)
@@ -146,6 +147,19 @@ class AuthViewModel : ViewModel() {
 
         SessionManager.saveSession(context, devEmail, devPilotId)
         _authState.value = AuthState.Authenticated
+    }
+
+    /**
+     * Get a stable device identifier using Android ID.
+     * This persists across app restarts and only resets on factory reset.
+     * Used instead of IP address for device identification to prevent
+     * issues with mobile carrier NAT and changing IP addresses.
+     */
+    private fun getDeviceId(context: Context): String {
+        return android.provider.Settings.Secure.getString(
+            context.contentResolver,
+            android.provider.Settings.Secure.ANDROID_ID
+        )
     }
 
     fun signup(
@@ -192,7 +206,7 @@ class AuthViewModel : ViewModel() {
         }
     }
 
-    fun verifyOtp(email: String, otp: String) {
+    fun verifyOtp(context: Context, email: String, otp: String) {
         if (otp.isEmpty()) {
             _authState.value = AuthState.Error("OTP cannot be empty")
             return
@@ -208,7 +222,8 @@ class AuthViewModel : ViewModel() {
 
         viewModelScope.launch {
             try {
-                val request = VerifyOtpRequest(email, otpInt)
+                val deviceId = getDeviceId(context)
+                val request = VerifyOtpRequest(email, otpInt, deviceId)
                 when (val response = ApiService.verifyOtp(request)) {
                     is ApiResponse.Success -> {
                         _authState.value = AuthState.OtpVerified(response.data.message)
