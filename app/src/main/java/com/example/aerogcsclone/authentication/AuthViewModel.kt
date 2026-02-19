@@ -8,6 +8,7 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.aerogcsclone.api.*
 import kotlinx.coroutines.launch
+import timber.log.Timber
 
 class AuthViewModel : ViewModel() {
     private val _authState = MutableLiveData<AuthState>()
@@ -106,28 +107,39 @@ class AuthViewModel : ViewModel() {
     }
 
     fun login(context: Context, email: String, password: String) {
+        Timber.d("=== LOGIN INITIATED ===")
+        Timber.d("Login attempt for email: $email")
+
         val validationError = validateLoginInput(email, password)
         if (validationError != null) {
+            Timber.e("Login validation failed: $validationError")
             _authState.value = AuthState.Error(validationError)
             return
         }
+        Timber.d("Login validation passed")
 
         _authState.value = AuthState.Loading
+        Timber.d("Auth state set to Loading")
 
         viewModelScope.launch {
             try {
-                val deviceId = getDeviceId(context)
-                val request = PilotLoginRequest(email, password, deviceId)
+                val request = PilotLoginRequest(email, password)
+                Timber.d("PilotLoginRequest created - email: ${request.email}, password length: ${request.password.length}")
+
+                Timber.d("Calling ApiService.pilotLogin...")
                 when (val response = ApiService.pilotLogin(request)) {
                     is ApiResponse.Success -> {
+                        Timber.d("Login SUCCESS - pilot_id: ${response.data.pilot_id}, message: ${response.data.message}")
                         SessionManager.saveSession(context, email, response.data.pilot_id)
                         _authState.value = AuthState.Authenticated
                     }
                     is ApiResponse.Error -> {
+                        Timber.e("Login ERROR - statusCode: ${response.statusCode}, message: ${response.message}")
                         _authState.value = AuthState.Error(response.message)
                     }
                 }
             } catch (e: Exception) {
+                Timber.e(e, "Login EXCEPTION: ${e.message}")
                 _authState.value = AuthState.Error("Unexpected error: ${e.message}")
             }
         }
@@ -149,18 +161,6 @@ class AuthViewModel : ViewModel() {
         _authState.value = AuthState.Authenticated
     }
 
-    /**
-     * Get a stable device identifier using Android ID.
-     * This persists across app restarts and only resets on factory reset.
-     * Used instead of IP address for device identification to prevent
-     * issues with mobile carrier NAT and changing IP addresses.
-     */
-    private fun getDeviceId(context: Context): String {
-        return android.provider.Settings.Secure.getString(
-            context.contentResolver,
-            android.provider.Settings.Secure.ANDROID_ID
-        )
-    }
 
     fun signup(
         context: Context,
@@ -206,7 +206,7 @@ class AuthViewModel : ViewModel() {
         }
     }
 
-    fun verifyOtp(context: Context, email: String, otp: String) {
+    fun verifyOtp(email: String, otp: String) {
         if (otp.isEmpty()) {
             _authState.value = AuthState.Error("OTP cannot be empty")
             return
@@ -222,8 +222,7 @@ class AuthViewModel : ViewModel() {
 
         viewModelScope.launch {
             try {
-                val deviceId = getDeviceId(context)
-                val request = VerifyOtpRequest(email, otpInt, deviceId)
+                val request = VerifyOtpRequest(email, otpInt)
                 when (val response = ApiService.verifyOtp(request)) {
                     is ApiResponse.Success -> {
                         _authState.value = AuthState.OtpVerified(response.data.message)

@@ -328,8 +328,12 @@ object ApiService {
     suspend fun pilotLogin(request: PilotLoginRequest): ApiResponse<PilotLoginResponse> {
         return withContext(Dispatchers.IO) {
             try {
+                Timber.d("=== PILOT LOGIN API CALL ===")
                 Timber.d("Attempting login for email: ${request.email}")
+
                 val json = gson.toJson(request)
+                Timber.d("Request JSON (password masked): ${json.replace(Regex("\"password\":\"[^\"]*\""), "\"password\":\"***\"")}")
+
                 val requestBody = json.toRequestBody(jsonMediaType)
 
                 val httpRequest = Request.Builder()
@@ -340,11 +344,16 @@ object ApiService {
                     .build()
 
                 Timber.d("Sending login request to: ${httpRequest.url}")
+                Timber.d("Request headers: ${httpRequest.headers}")
+
                 val response = client.newCall(httpRequest).execute()
                 val responseBody = response.body?.string() ?: ""
                 Timber.d("Login response code: ${response.code}")
+                Timber.d("Login response body (first 500 chars): ${responseBody.take(500)}")
+                Timber.d("Response headers: ${response.headers}")
 
                 if (responseBody.trimStart().startsWith("<") || responseBody.contains("<!DOCTYPE")) {
+                    Timber.e("Received HTML response instead of JSON - server error")
                     return@withContext ApiResponse.Error("Server configuration error", response.code)
                 }
 
@@ -352,18 +361,21 @@ object ApiService {
                     try {
                         val successResponse = gson.fromJson(responseBody, PilotLoginResponse::class.java)
                         Timber.d("Login successful for pilot ID: ${successResponse.pilot_id}")
+                        Timber.d("Login success message: ${successResponse.message}")
                         ApiResponse.Success(successResponse)
                     } catch (e: Exception) {
                         Timber.e(e, "Failed to parse login success response")
                         ApiResponse.Error("Invalid response format: ${e.message}", response.code)
                     }
                 } else {
+                    Timber.w("Login request failed with status code: ${response.code}")
                     try {
                         val errorResponse = gson.fromJson(responseBody, ErrorResponse::class.java)
-                        Timber.e("Login failed: ${errorResponse.error}")
+                        Timber.e("Login failed: ${errorResponse.error}, status_code: ${errorResponse.status_code}")
                         ApiResponse.Error(errorResponse.error, errorResponse.status_code)
                     } catch (e: Exception) {
                         Timber.e(e, "Failed to parse login error response")
+                        Timber.e("Raw response body: $responseBody")
                         ApiResponse.Error(responseBody.take(200).ifEmpty { "Unknown error" }, response.code)
                     }
                 }
@@ -435,8 +447,7 @@ data class PilotRegisterRequest(
 
 data class VerifyOtpRequest(
     val email: String,
-    val otp: Int,
-    val device_id: String
+    val otp: Int
 )
 
 data class ResendOtpRequest(
@@ -445,8 +456,7 @@ data class ResendOtpRequest(
 
 data class PilotLoginRequest(
     val email: String,
-    val password: String,
-    val device_id: String
+    val password: String
 )
 
 data class PilotLogoutRequest(

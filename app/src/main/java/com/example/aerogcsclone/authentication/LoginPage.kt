@@ -28,6 +28,7 @@ import androidx.navigation.NavController
 import com.example.aerogcsclone.R
 import com.example.aerogcsclone.navigation.Screen
 import com.example.aerogcsclone.utils.AppStrings
+import timber.log.Timber
 
 @Composable
 fun LoginPage(modifier: Modifier = Modifier, navController: NavController, authViewModel: AuthViewModel) {
@@ -37,11 +38,16 @@ fun LoginPage(modifier: Modifier = Modifier, navController: NavController, authV
     val context = LocalContext.current
 
     LaunchedEffect(authState.value) {
+        Timber.d("LoginPage: Auth state changed to: ${authState.value}")
         when (val state = authState.value) {
-            is AuthState.Authenticated -> navController.navigate(Screen.LanguageSelection.route) {
-                popUpTo(Screen.Login.route) { inclusive = true }
+            is AuthState.Authenticated -> {
+                Timber.d("LoginPage: User authenticated, navigating to LanguageSelection")
+                navController.navigate(Screen.LanguageSelection.route) {
+                    popUpTo(Screen.Login.route) { inclusive = true }
+                }
             }
             is AuthState.Error -> {
+                Timber.e("LoginPage: Auth error: ${state.message}")
                 Toast.makeText(context, state.message, Toast.LENGTH_SHORT).show()
                 authViewModel.resetAuthState()
             }
@@ -114,7 +120,10 @@ fun LoginPage(modifier: Modifier = Modifier, navController: NavController, authV
                 if (authState.value is AuthState.Loading) {
                     CircularProgressIndicator(color = Color.Black)
                 } else {
-                    Button(onClick = { authViewModel.login(context, email, password) }) {
+                    Button(onClick = {
+                        Timber.d("LoginPage: Login button clicked - email: $email, password length: ${password.length}")
+                        authViewModel.login(context, email, password)
+                    }) {
                         Text(text = AppStrings.login, color = Color.Black)
                     }
                 }
