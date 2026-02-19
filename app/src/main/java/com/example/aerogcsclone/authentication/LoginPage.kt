@@ -124,6 +124,19 @@ fun LoginPage(modifier: Modifier = Modifier, navController: NavController, authV
                 TextButton(onClick = { navController.navigate(Screen.Signup.route) }) {
                     Text(text = "Signup", color = Color.Black)
                 }
+
+                Spacer(modifier = Modifier.height(16.dp))
+
+                // DEV ONLY: Direct login button to bypass authentication when backend is down
+                Button(
+                    onClick = { authViewModel.devLogin(context) },
+                    modifier = Modifier.fillMaxWidth(0.8f),
+                    colors = androidx.compose.material3.ButtonDefaults.buttonColors(
+                        containerColor = Color(0xFFFF5722)
+                    )
+                ) {
+                    Text(text = "Dev Login (Skip Auth)", color = Color.White)
+                }
             }
         }
     }

@@ -132,6 +132,22 @@ class AuthViewModel : ViewModel() {
         }
     }
 
+    /**
+     * DEV ONLY: Direct login without authentication
+     * This bypasses the backend authentication for development/testing purposes
+     * when the backend server is unavailable or has issues.
+     *
+     * WARNING: Remove or disable this in production builds!
+     */
+    fun devLogin(context: Context) {
+        // Use a dummy dev account
+        val devEmail = "dev@test.com"
+        val devPilotId = 9999
+
+        SessionManager.saveSession(context, devEmail, devPilotId)
+        _authState.value = AuthState.Authenticated
+    }
+
     fun signup(
         context: Context,
         firstName: String,

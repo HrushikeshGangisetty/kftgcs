@@ -53,8 +53,8 @@ class WebSocketManager {
          */
 
         // Toggle for production vs development mode
-        // Set to true when deploying to production with a real backend
-        private const val USE_SECURE_CONNECTION = true
+        // Set to false to use WS/HTTP (no SSL), true for WSS/HTTPS
+        private const val USE_SECURE_CONNECTION = false
 
         // Production server (WSS - encrypted)
         // Using secure WebSocket connection for AWS EC2
