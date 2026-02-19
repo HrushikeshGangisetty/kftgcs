@@ -1,5 +1,6 @@
 package com.example.aerogcsclone.ui.components
 
+import android.content.Context
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import androidx.compose.animation.AnimatedVisibility
@@ -32,17 +33,28 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.compose.ui.zIndex
+import com.example.aerogcsclone.Telemetry.TelemetryState
+import com.example.aerogcsclone.videotracking.*
+import com.example.aerogcsclone.videotracking.ui.GimbalControlOverlay
+import com.example.aerogcsclone.videotracking.ui.VideoStreamPlayer
+import com.example.aerogcsclone.videotracking.ui.VideoStreamSettings
+import com.example.aerogcsclone.videotracking.ui.VideoTrackingOverlay
+import kotlinx.coroutines.launch
 import kotlin.math.roundToInt
 
 /**
- * Drone Camera Feed Overlay
+ * Drone Camera Feed Overlay with MissionPlanner-like Video Tracking
  *
- * Shows a live camera feed from the drone in a resizable overlay window.
- * - Small mode: Picture-in-Picture style at the bottom-right corner
- * - Full mode: Expanded to fill the screen
- *
- * The video stream URL can be configured (RTSP, HTTP, or WebRTC).
- * When no stream is available, shows a placeholder with camera icon.
+ * Features:
+ * - Live RTSP/UDP video stream via MediaPlayer SurfaceView
+ * - Point tracking (tap on object) — sends MAV_CMD_CAMERA_TRACK_POINT
+ * - Rectangle tracking (drag bounding box) — sends MAV_CMD_CAMERA_TRACK_RECTANGLE
+ * - Visual overlay rendering (red ellipse/rectangle for tracking status)
+ * - Gimbal control (D-pad for pitch/yaw, ROI setting via long-press)
+ * - Geo-referencing (image point → GPS location)
+ * - Camera info display (model, capabilities, tracking status)
+ * - Stream settings dialog (detected MAVLink streams + custom URL)
+ * - PiP mode (small) and fullscreen mode (expanded)
  */
 @Composable
 fun DroneCameraFeedOverlay(
@@ -50,11 +62,41 @@ fun DroneCameraFeedOverlay(
     onDismiss: () -> Unit,
     modifier: Modifier = Modifier,
     videoStreamUrl: String? = null,
-    isConnected: Boolean = false
+    isConnected: Boolean = false,
+    // Video tracking integration
+    trackingState: CameraTrackingState = CameraTrackingState(),
+    telemetryState: TelemetryState = TelemetryState(),
+    onVideoTap: ((Float, Float) -> Unit)? = null,
+    onVideoDragComplete: ((Float, Float, Float, Float) -> Unit)? = null,
+    onVideoLongPress: ((Float, Float) -> Unit)? = null,
+    onStopTracking: (() -> Unit)? = null,
+    onGimbalNudge: ((Float, Float) -> Unit)? = null,
+    onGimbalClearROI: (() -> Unit)? = null,
+    onStreamSelected: ((String) -> Unit)? = null
 ) {
     var isExpanded by remember { mutableStateOf(false) }
     var offsetX by remember { mutableFloatStateOf(0f) }
     var offsetY by remember { mutableFloatStateOf(0f) }
+    var showStreamSettings by remember { mutableStateOf(false) }
+    var showGimbalControls by remember { mutableStateOf(false) }
+    var activeStreamUrl by remember { mutableStateOf(videoStreamUrl) }
+
+    // Use tracking state stream URL if available, or the passed-in URL
+    val effectiveStreamUrl = activeStreamUrl
+        ?: trackingState.selectedStreamUri
+        ?: videoStreamUrl
+
+    // Load saved custom URL from preferences
+    val context = LocalContext.current
+    LaunchedEffect(Unit) {
+        if (activeStreamUrl == null) {
+            val prefs = context.getSharedPreferences("video_stream_prefs", Context.MODE_PRIVATE)
+            val saved = prefs.getString("custom_stream_url", null)
+            if (!saved.isNullOrBlank()) {
+                activeStreamUrl = saved
+            }
+        }
+    }
 
     // Reset offset when switching between expanded/collapsed
     LaunchedEffect(isExpanded) {
@@ -80,16 +122,16 @@ fun DroneCameraFeedOverlay(
         label = "height"
     )
 
+    val coroutineScope = rememberCoroutineScope()
+
     AnimatedVisibility(
         visible = isVisible,
         enter = slideInVertically(initialOffsetY = { it }) + fadeIn(),
         exit = slideOutVertically(targetOffsetY = { it }) + fadeOut(),
-        modifier = modifier
-            .zIndex(10f)
+        modifier = modifier.zIndex(10f)
     ) {
         Box(
-            modifier = Modifier
-                .fillMaxSize(),
+            modifier = Modifier.fillMaxSize(),
             contentAlignment = if (isExpanded) Alignment.Center else Alignment.BottomEnd
         ) {
             // Semi-transparent backdrop when expanded
@@ -126,35 +168,88 @@ fun DroneCameraFeedOverlay(
                 elevation = CardDefaults.cardElevation(defaultElevation = 8.dp)
             ) {
                 Box(modifier = Modifier.fillMaxSize()) {
-                    // Video content area
-                    if (videoStreamUrl != null && isConnected) {
-                        // Live video stream via WebView
+                    // ═══════════════════════════════════════════════════════
+                    // VIDEO CONTENT: RTSP/MediaPlayer stream or placeholder
+                    // ═══════════════════════════════════════════════════════
+                    if (effectiveStreamUrl != null && isConnected) {
+                        VideoStreamPlayer(
+                            streamUri = effectiveStreamUrl,
+                            modifier = Modifier.fillMaxSize(),
+                            isConnected = isConnected
+                        )
+                    } else if (videoStreamUrl != null && isConnected) {
+                        // Fallback to WebView for HTTP streams
                         VideoStreamView(
                             url = videoStreamUrl,
                             modifier = Modifier.fillMaxSize()
                         )
                     } else {
-                        // Placeholder when no stream available
                         CameraPlaceholder(
                             isConnected = isConnected,
                             modifier = Modifier.fillMaxSize()
                         )
                     }
 
-                    // Top control bar
+                    // ═══════════════════════════════════════════════════════
+                    // TRACKING OVERLAY: touch interaction + visual feedback
+                    // ═══════════════════════════════════════════════════════
+                    if (isExpanded && isConnected && (effectiveStreamUrl != null || videoStreamUrl != null)) {
+                        VideoTrackingOverlay(
+                            trackingState = trackingState,
+                            onTap = { x, y ->
+                                onVideoTap?.invoke(x, y)
+                            },
+                            onDragComplete = { x1, y1, x2, y2 ->
+                                onVideoDragComplete?.invoke(x1, y1, x2, y2)
+                            },
+                            onLongPress = { x, y ->
+                                onVideoLongPress?.invoke(x, y)
+                            },
+                            onStopTracking = {
+                                onStopTracking?.invoke()
+                            },
+                            modifier = Modifier.fillMaxSize(),
+                            showControls = true
+                        )
+                    }
+
+                    // ═══════════════════════════════════════════════════════
+                    // GIMBAL CONTROLS: D-pad overlay (expanded mode only)
+                    // ═══════════════════════════════════════════════════════
+                    if (isExpanded && showGimbalControls) {
+                        GimbalControlOverlay(
+                            gimbalState = trackingState.gimbalState,
+                            onNudge = { pitch, yaw ->
+                                onGimbalNudge?.invoke(pitch, yaw)
+                            },
+                            onClearROI = {
+                                onGimbalClearROI?.invoke()
+                            },
+                            modifier = Modifier
+                                .align(Alignment.CenterEnd)
+                                .padding(end = 8.dp)
+                        )
+                    }
+
+                    // ═══════════════════════════════════════════════════════
+                    // TOP CONTROL BAR
+                    // ═══════════════════════════════════════════════════════
                     Row(
                         modifier = Modifier
                             .fillMaxWidth()
                             .background(
                                 Color.Black.copy(alpha = 0.6f),
-                                shape = RoundedCornerShape(topStart = if (isExpanded) 16.dp else 12.dp, topEnd = if (isExpanded) 16.dp else 12.dp)
+                                shape = RoundedCornerShape(
+                                    topStart = if (isExpanded) 16.dp else 12.dp,
+                                    topEnd = if (isExpanded) 16.dp else 12.dp
+                                )
                             )
                             .padding(horizontal = 8.dp, vertical = 4.dp)
                             .align(Alignment.TopCenter),
                         horizontalArrangement = Arrangement.SpaceBetween,
                         verticalAlignment = Alignment.CenterVertically
                     ) {
-                        // Camera label with live indicator
+                        // Camera label with live indicator + tracking status
                         Row(
                             verticalAlignment = Alignment.CenterVertically,
                             horizontalArrangement = Arrangement.spacedBy(4.dp)
@@ -165,16 +260,31 @@ fun DroneCameraFeedOverlay(
                                     .size(8.dp)
                                     .clip(CircleShape)
                                     .background(
-                                        if (isConnected && videoStreamUrl != null) Color.Red
-                                        else Color.Gray
+                                        when {
+                                            trackingState.isTrackingActive -> Color(0xFF4CAF50) // Green when tracking
+                                            isConnected && effectiveStreamUrl != null -> Color.Red // Red when streaming
+                                            else -> Color.Gray
+                                        }
                                     )
                             )
                             Text(
-                                text = if (isConnected && videoStreamUrl != null) "LIVE" else "CAMERA",
+                                text = when {
+                                    trackingState.isTrackingActive -> "TRACKING"
+                                    isConnected && effectiveStreamUrl != null -> "LIVE"
+                                    else -> "CAMERA"
+                                },
                                 color = Color.White,
                                 fontSize = if (isExpanded) 14.sp else 10.sp,
                                 fontWeight = FontWeight.Bold
                             )
+                            // Camera model name (when detected)
+                            if (trackingState.cameraDetected && isExpanded) {
+                                Text(
+                                    text = "• ${trackingState.cameraInfo.modelName.ifBlank { "Camera" }}",
+                                    color = Color.White.copy(alpha = 0.6f),
+                                    fontSize = 10.sp
+                                )
+                            }
                         }
 
                         // Control buttons
@@ -182,6 +292,34 @@ fun DroneCameraFeedOverlay(
                             horizontalArrangement = Arrangement.spacedBy(2.dp),
                             verticalAlignment = Alignment.CenterVertically
                         ) {
+                            // Stream settings button
+                            if (isExpanded) {
+                                IconButton(
+                                    onClick = { showStreamSettings = !showStreamSettings },
+                                    modifier = Modifier.size(36.dp)
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Default.Settings,
+                                        contentDescription = "Stream Settings",
+                                        tint = Color.White,
+                                        modifier = Modifier.size(18.dp)
+                                    )
+                                }
+
+                                // Gimbal toggle button
+                                IconButton(
+                                    onClick = { showGimbalControls = !showGimbalControls },
+                                    modifier = Modifier.size(36.dp)
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Default.ControlCamera,
+                                        contentDescription = "Gimbal Controls",
+                                        tint = if (showGimbalControls) Color(0xFF4CAF50) else Color.White,
+                                        modifier = Modifier.size(18.dp)
+                                    )
+                                }
+                            }
+
                             // Expand/Collapse button
                             IconButton(
                                 onClick = { isExpanded = !isExpanded },
@@ -210,6 +348,72 @@ fun DroneCameraFeedOverlay(
                                     modifier = Modifier.size(if (isExpanded) 22.dp else 16.dp)
                                 )
                             }
+                        }
+                    }
+
+                    // ═══════════════════════════════════════════════════════
+                    // STREAM SETTINGS DIALOG (when toggled)
+                    // ═══════════════════════════════════════════════════════
+                    if (showStreamSettings && isExpanded) {
+                        Box(
+                            modifier = Modifier
+                                .fillMaxSize()
+                                .background(Color.Black.copy(alpha = 0.7f)),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            VideoStreamSettings(
+                                detectedStreams = trackingState.videoStreams,
+                                onStreamSelected = { url ->
+                                    activeStreamUrl = url
+                                    onStreamSelected?.invoke(url)
+                                    showStreamSettings = false
+                                },
+                                onDismiss = { showStreamSettings = false }
+                            )
+                        }
+                    }
+
+                    // ═══════════════════════════════════════════════════════
+                    // TRACKING HELP HINT (bottom bar in expanded mode)
+                    // ═══════════════════════════════════════════════════════
+                    if (isExpanded && isConnected && !trackingState.isTrackingActive) {
+                        Row(
+                            modifier = Modifier
+                                .align(Alignment.BottomCenter)
+                                .padding(bottom = 8.dp)
+                                .background(
+                                    Color.Black.copy(alpha = 0.5f),
+                                    RoundedCornerShape(8.dp)
+                                )
+                                .padding(horizontal = 10.dp, vertical = 4.dp),
+                            horizontalArrangement = Arrangement.spacedBy(12.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(
+                                text = "Tap: Track Point",
+                                color = Color.White.copy(alpha = 0.6f),
+                                fontSize = 9.sp
+                            )
+                            Text(
+                                text = "•",
+                                color = Color.White.copy(alpha = 0.3f),
+                                fontSize = 9.sp
+                            )
+                            Text(
+                                text = "Drag: Track Region",
+                                color = Color.White.copy(alpha = 0.6f),
+                                fontSize = 9.sp
+                            )
+                            Text(
+                                text = "•",
+                                color = Color.White.copy(alpha = 0.3f),
+                                fontSize = 9.sp
+                            )
+                            Text(
+                                text = "Long-press: Move Gimbal",
+                                color = Color.White.copy(alpha = 0.6f),
+                                fontSize = 9.sp
+                            )
                         }
                     }
                 }
@@ -252,7 +456,7 @@ private fun CameraPlaceholder(
             Spacer(modifier = Modifier.height(4.dp))
             Text(
                 text = if (isConnected)
-                    "Waiting for drone camera feed..."
+                    "Tap ⚙ to configure stream or wait for detection"
                 else
                     "Connect to drone to view camera",
                 color = Color.Gray.copy(alpha = 0.6f),
@@ -264,8 +468,7 @@ private fun CameraPlaceholder(
 }
 
 /**
- * WebView-based video stream viewer
- * Supports HTTP video streams and RTSP-over-HTTP
+ * WebView-based video stream viewer (fallback for HTTP streams)
  */
 @android.annotation.SuppressLint("SetJavaScriptEnabled")
 @Composable
@@ -299,4 +502,3 @@ private fun VideoStreamView(
         modifier = modifier
     )
 }
-

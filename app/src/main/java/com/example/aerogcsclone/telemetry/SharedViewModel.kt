@@ -40,6 +40,8 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.isActive
 import com.example.aerogcsclone.grid.GridUtils
+import com.example.aerogcsclone.videotracking.CameraTrackingState
+import com.example.aerogcsclone.videotracking.TrackingManager
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.withTimeoutOrNull
 
@@ -445,6 +447,52 @@ class SharedViewModel : ViewModel() {
         ttsManager?.speak(text)
     }
 
+    // ═══════════════════════════════════════════════════════════════
+    //  VIDEO TRACKING ACTIONS
+    // ═══════════════════════════════════════════════════════════════
+
+    /** Handle single tap on video feed — initiate point tracking */
+    fun onVideoTap(normX: Float, normY: Float) {
+        viewModelScope.launch {
+            trackingManager?.onVideoTap(normX, normY, _telemetryState.value)
+        }
+    }
+
+    /** Handle drag on video feed — initiate rectangle tracking */
+    fun onVideoDragComplete(startX: Float, startY: Float, endX: Float, endY: Float) {
+        viewModelScope.launch {
+            trackingManager?.onVideoDragComplete(startX, startY, endX, endY, _telemetryState.value)
+        }
+    }
+
+    /** Handle long-press on video feed — move gimbal to point */
+    fun onVideoLongPress(normX: Float, normY: Float) {
+        viewModelScope.launch {
+            trackingManager?.onVideoLongPress(normX, normY, _telemetryState.value)
+        }
+    }
+
+    /** Stop active tracking */
+    fun stopVideoTracking() {
+        viewModelScope.launch {
+            trackingManager?.stopTracking()
+        }
+    }
+
+    /** Nudge gimbal by delta angles */
+    fun nudgeGimbal(deltaPitchDeg: Float, deltaYawDeg: Float) {
+        viewModelScope.launch {
+            trackingManager?.nudgeGimbal(deltaPitchDeg, deltaYawDeg)
+        }
+    }
+
+    /** Clear gimbal ROI / return to neutral */
+    fun clearGimbalROI() {
+        viewModelScope.launch {
+            trackingManager?.gimbalController?.clearROI()
+        }
+    }
+
     /**
      * Reset TTS "spoken keys" so speakOnce can be used again for the same logical keys.
      * Call this at the start or end of a calibration run to allow announcements to replay.
@@ -547,6 +595,11 @@ class SharedViewModel : ViewModel() {
 
     // --- Telemetry & Repository ---
     private var repo: MavlinkTelemetryRepository? = null
+
+    // --- Video Tracking Manager ---
+    private var trackingManager: TrackingManager? = null
+    private val _cameraTrackingState = MutableStateFlow(CameraTrackingState())
+    val cameraTrackingState: StateFlow<CameraTrackingState> = _cameraTrackingState.asStateFlow()
 
     // Public accessor for repository (needed by ObstacleDetectionManager)
     val repository: MavlinkTelemetryRepository?
@@ -866,6 +919,28 @@ class SharedViewModel : ViewModel() {
             repo = newRepo
             newRepo.start()
             DisconnectionRTLHandler.startMonitoring(_telemetryState, newRepo, viewModelScope)
+
+            // Initialize video tracking manager
+            trackingManager?.destroy()
+            val newTrackingManager = TrackingManager(newRepo)
+            trackingManager = newTrackingManager
+
+            // Start tracking manager when FCU is detected
+            viewModelScope.launch {
+                newRepo.state.collect { state ->
+                    if (state.fcuDetected && state.connected) {
+                        newTrackingManager.initialize()
+                        return@collect // Only need to initialize once
+                    }
+                }
+            }
+
+            // Collect tracking state
+            viewModelScope.launch {
+                newTrackingManager.cameraTrackingState.collect { trackingState ->
+                    _cameraTrackingState.value = trackingState
+                }
+            }
 
             viewModelScope.launch {
                 newRepo.state.collect { repoState ->

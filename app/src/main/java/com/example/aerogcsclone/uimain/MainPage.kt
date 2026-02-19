@@ -234,12 +234,23 @@ fun MainPage(
             }
 
             // Drone Camera Feed Overlay (Picture-in-Picture at bottom-end, expandable)
+            // With MissionPlanner-like video tracking integration
+            val cameraTrackingState by telemetryViewModel.cameraTrackingState.collectAsState()
             DroneCameraFeedOverlay(
                 isVisible = showCameraFeed,
                 onDismiss = { showCameraFeed = false },
                 modifier = Modifier.matchParentSize(),
                 videoStreamUrl = null, // Set to drone camera stream URL when available (e.g., RTSP/HTTP)
-                isConnected = telemetryState.connected
+                isConnected = telemetryState.connected,
+                // Video tracking integration
+                trackingState = cameraTrackingState,
+                telemetryState = telemetryState,
+                onVideoTap = { x, y -> telemetryViewModel.onVideoTap(x, y) },
+                onVideoDragComplete = { x1, y1, x2, y2 -> telemetryViewModel.onVideoDragComplete(x1, y1, x2, y2) },
+                onVideoLongPress = { x, y -> telemetryViewModel.onVideoLongPress(x, y) },
+                onStopTracking = { telemetryViewModel.stopVideoTracking() },
+                onGimbalNudge = { pitch, yaw -> telemetryViewModel.nudgeGimbal(pitch, yaw) },
+                onGimbalClearROI = { telemetryViewModel.clearGimbalROI() }
             )
 
             // TopNavBar removed - it's already handled in AppNavGraph.kt
