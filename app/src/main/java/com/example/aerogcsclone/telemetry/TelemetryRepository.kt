@@ -2823,14 +2823,36 @@ class MavlinkTelemetryRepository(
         resumeWaypointSeq: Int,
         resumeLatitude: Double? = null,
         resumeLongitude: Double? = null,
-        resumeAltitude: Float? = null
+        resumeAltitude: Float? = null,
+        restoreSpray: Boolean = false
     ): List<MissionItemInt> {
         val filtered = mutableListOf<MissionItemInt>()
 
+        // MAV_CMD_DO_SPRAYER command ID (216)
+        val MAV_CMD_DO_SPRAYER = 216u
 
         // Log original mission for debugging
         allWaypoints.forEach { wp ->
             val cmdName = wp.command.entry?.name ?: "CMD_${wp.command.value}"
+        }
+
+        // Determine if spray should be restored:
+        // Either explicitly requested via restoreSpray parameter, or
+        // check the last DO_SPRAYER command before the resume point in the original mission
+        var shouldInsertSprayerOn = restoreSpray
+        if (!shouldInsertSprayerOn) {
+            // Check the last DO_SPRAYER command before the resume point
+            val lastSprayerCmd = allWaypoints
+                .filter { it.seq.toInt() < resumeWaypointSeq && it.command.value == MAV_CMD_DO_SPRAYER }
+                .maxByOrNull { it.seq.toInt() }
+            if (lastSprayerCmd != null && lastSprayerCmd.param1 == 1f) {
+                // The last sprayer command before resume point was ON, so spray was active
+                shouldInsertSprayerOn = true
+            }
+        }
+
+        if (shouldInsertSprayerOn) {
+            // Will insert DO_SPRAYER(1) in resumed mission to restore spray
         }
 
         // Find the target waypoint to get its altitude if resumeAltitude is not provided
@@ -2865,6 +2887,29 @@ class MavlinkTelemetryRepository(
                         z = effectiveAltitude
                     )
                     filtered.add(resumeWp)
+                }
+
+                // Insert DO_SPRAYER(1) command right after resume waypoint (or after HOME if no resume WP)
+                // This ensures spray is turned ON as a mission item so FC executes it during AUTO mode
+                if (shouldInsertSprayerOn) {
+                    val sprayerOnWp = MissionItemInt(
+                        targetSystem = fcuSystemId,
+                        targetComponent = fcuComponentId,
+                        seq = 2u, // Will be resequenced later
+                        frame = MavEnumValue.of(com.divpundir.mavlink.definitions.common.MavFrame.GLOBAL_RELATIVE_ALT_INT),
+                        command = MavEnumValue.fromValue(MAV_CMD_DO_SPRAYER),
+                        current = 0u,
+                        autocontinue = 1u,
+                        param1 = 1f, // 1 = Enable/START spraying
+                        param2 = 0f,
+                        param3 = 0f,
+                        param4 = 0f,
+                        x = 0,
+                        y = 0,
+                        z = 0f
+                    )
+                    filtered.add(sprayerOnWp)
+                    // DO_SPRAYER(1) mission item inserted after resume waypoint
                 }
                 continue
             }
@@ -3657,6 +3702,51 @@ class MavlinkTelemetryRepository(
                     return@withContext false
                 }
 
+            } catch (e: Exception) {
+                false
+            }
+        }
+    }
+
+    /**
+     * Clear all mission data from flight controller.
+     * Sends MISSION_CLEAR_ALL with MISSION type to remove all waypoints from the FC.
+     */
+    suspend fun clearMissionFromFC(): Boolean {
+        return withContext(Dispatchers.IO) {
+            try {
+                val clearAckDeferred = CompletableDeferred<Boolean>()
+
+                val clearCollectorJob = AppScope.launch {
+                    mavFrame
+                        .filter { it.systemId == fcuSystemId && it.componentId == fcuComponentId }
+                        .map { it.message }
+                        .filterIsInstance<MissionAck>()
+                        .collect { ack ->
+                            if (ack.type.value == MavMissionResult.MAV_MISSION_ACCEPTED.value) {
+                                if (!clearAckDeferred.isCompleted) {
+                                    clearAckDeferred.complete(true)
+                                }
+                            }
+                        }
+                }
+
+                delay(50)
+
+                val clearCmd = MissionClearAll(
+                    targetSystem = fcuSystemId,
+                    targetComponent = fcuComponentId,
+                    missionType = MavEnumValue.of(MavMissionType.MISSION)
+                )
+                connection.trySendUnsignedV2(gcsSystemId, gcsComponentId, clearCmd)
+
+                val ackReceived = withTimeoutOrNull(5000L) {
+                    clearAckDeferred.await()
+                } ?: false
+
+                clearCollectorJob.cancel()
+
+                return@withContext ackReceived
             } catch (e: Exception) {
                 false
             }

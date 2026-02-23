@@ -36,13 +36,16 @@ fun SelectFlyingMethodScreen(navController: NavController, sharedViewModel: Shar
     val telemetryState by sharedViewModel.telemetryState.collectAsState()
     val resumePointLocation by sharedViewModel.resumePointLocation.collectAsState()
 
-    // Clear mission data from map when user comes back to select a new flying mode
-    // BUT NOT if mission is paused (user might be changing batteries and will resume)
+    // Always clear mission data when user navigates to this screen (home tab / back)
+    // This clears mission from FC, map, and resets all pause/resume state
     LaunchedEffect(Unit) {
         val missionPaused = telemetryState.missionPaused
         val hasResumePoint = resumePointLocation != null
 
-        if (!missionPaused && !hasResumePoint) {
+        if (missionPaused || hasResumePoint) {
+            // Mission is paused or has resume point - clear everything including FC
+            sharedViewModel.clearMissionCompletely()
+        } else {
             sharedViewModel.clearMissionFromMap()
         }
     }

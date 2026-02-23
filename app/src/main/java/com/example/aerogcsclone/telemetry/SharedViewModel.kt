@@ -205,6 +205,50 @@ class SharedViewModel : ViewModel() {
     }
 
     /**
+     * Clear mission completely - from both FC and map.
+     * Also resets all pause/resume state.
+     * Called when user navigates to home tab or goes back while mission is paused.
+     */
+    fun clearMissionCompletely() {
+        LogUtils.i("SharedVM", "🧹 Clearing mission completely (FC + map + pause/resume state)")
+
+        // Step 1: Clear mission from FC
+        viewModelScope.launch {
+            try {
+                val cleared = repo?.clearMissionFromFC() ?: false
+                if (cleared) {
+                    LogUtils.i("SharedVM", "✅ Mission cleared from FC")
+                } else {
+                    LogUtils.w("SharedVM", "⚠️ Failed to clear mission from FC (may not be connected)")
+                }
+            } catch (e: Exception) {
+                LogUtils.e("SharedVM", "❌ Error clearing mission from FC", e)
+            }
+        }
+
+        // Step 2: Clear map data
+        clearMissionFromMap()
+
+        // Step 3: Reset all pause/resume state
+        _resumePointLocation.value = null
+        _resumePointWaypoint.value = null
+        _resumeMissionReady.value = false
+        _showAddResumeHerePopup.value = false
+        _pendingResumeLocation = null
+        _sprayWasActiveBeforePause = false
+
+        // Step 4: Reset telemetry paused state
+        _telemetryState.update {
+            it.copy(
+                missionPaused = false,
+                pausedAtWaypoint = null
+            )
+        }
+
+        LogUtils.i("SharedVM", "✅ Mission completely cleared")
+    }
+
+    /**
      * Clear the geofence polygon and disable geofence monitoring.
      * Called when navigating away from mission or when user disables geofence.
      * Uses Mission Planner-style approach to clear fence from FC.
@@ -1730,7 +1774,8 @@ class SharedViewModel : ViewModel() {
                     allWaypoints,
                     waypointNumber,
                     resumeLatitude = resumeLocation?.latitude,
-                    resumeLongitude = resumeLocation?.longitude
+                    resumeLongitude = resumeLocation?.longitude,
+                    restoreSpray = _sprayWasActiveBeforePause
                 )
                 if (filtered == null || filtered.isEmpty()) {
                     LogUtils.e("SharedVM", "Filtering resulted in empty mission")
@@ -1851,7 +1896,8 @@ class SharedViewModel : ViewModel() {
                     allWaypoints,
                     resumeWaypoint,
                     resumeLatitude = resumeLocation?.latitude,
-                    resumeLongitude = resumeLocation?.longitude
+                    resumeLongitude = resumeLocation?.longitude,
+                    restoreSpray = _sprayWasActiveBeforePause
                 )
                 if (filtered == null || filtered.isEmpty()) {
                     LogUtils.e("SharedVM", "Filtering resulted in empty mission")
@@ -2730,7 +2776,8 @@ class SharedViewModel : ViewModel() {
                     allWaypoints,
                     resumeWaypointNumber,
                     resumeLatitude = resumeLocation?.latitude,
-                    resumeLongitude = resumeLocation?.longitude
+                    resumeLongitude = resumeLocation?.longitude,
+                    restoreSpray = _sprayWasActiveBeforePause
                 )
 
                 if (filtered == null || filtered.isEmpty()) {
