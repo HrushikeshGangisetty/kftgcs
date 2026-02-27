@@ -1,8 +1,8 @@
 <?xml version="1.0" encoding="utf-8"?>
 <network-security-config>
     <!--
-        SECURITY: Cleartext traffic enabled for WebSocket connections to AWS.
-        Android → WebSocket → AWS EC2 (65.0.76.31:8000) → PostgreSQL DB
+        SECURITY: Cleartext traffic enabled for WebSocket connections.
+        Android → WebSocket → kftgcs.com (HTTPS/WSS) → PostgreSQL DB
     -->
 
     <!-- Base configuration: Allow cleartext traffic for development/testing -->
@@ -13,10 +13,13 @@
     </base-config>
 
     <!--
-        Allow cleartext for AWS EC2 and local network drone connections.
+        Allow cleartext for local network drone connections.
     -->
     <domain-config cleartextTrafficPermitted="true">
-        <!-- AWS EC2 Server for WebSocket telemetry -->
+        <!-- Production Server Domain -->
+        <domain includeSubdomains="true">kftgcs.com</domain>
+
+        <!-- Legacy AWS EC2 Server (for backward compatibility) -->
         <domain includeSubdomains="true">65.0.76.31</domain>
 
         <!-- Localhost for emulator/local testing -->

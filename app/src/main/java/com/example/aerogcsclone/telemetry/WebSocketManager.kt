@@ -54,24 +54,23 @@ class WebSocketManager {
 
         // Toggle for production vs development mode
         // Set to false to use WS/HTTP (no SSL), true for WSS/HTTPS
-        private const val USE_SECURE_CONNECTION = false
+        private const val USE_SECURE_CONNECTION = true  // Use your domain (important)
 
         // Production server (WSS - encrypted)
-        // Using secure WebSocket connection for AWS EC2
-        private const val PRODUCTION_WSS_URL = "wss://65.0.76.31:8000/ws/telemetry/"
+        // Using secure WebSocket connection with domain name
+        private const val PRODUCTION_WSS_URL = "wss://kftgcs.com/ws/telemetry/"
 
-        // Production server hostname for certificate pinning
-        private const val PRODUCTION_HOST = "65.0.76.31"
+        // Host for certificate validation
+        private const val PRODUCTION_HOST = "kftgcs.com"
 
         // Certificate pin (SHA-256 hash of server's public key)
         // TODO: Generate and add your server's certificate pin before production release
         // Use: openssl s_client -connect your-server.com:443 | openssl x509 -pubkey -noout | openssl pkey -pubin -outform der | openssl dgst -sha256 -binary | openssl enc -base64
         private const val CERTIFICATE_PIN = "sha256/AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
 
-        // AWS EC2 Server URL (WS - unencrypted)
-        // Direct connection: Android → WebSocket → AWS EC2 → PostgreSQL DB
-        // ❌ No 127.0.0.1 ❌ No 10.0.2.2 ✅ Direct AWS IP + port
-        private const val LOCAL_DEV_URL = "ws://65.0.76.31:8000/ws/telemetry/"
+        // Fallback URL (WS - unencrypted) - for local development only
+        // Direct connection: Android → WebSocket → Server → PostgreSQL DB
+        private const val LOCAL_DEV_URL = "wss://kftgcs.com/ws/telemetry/"
 
         /**
          * Get the appropriate WebSocket URL based on configuration
@@ -238,9 +237,11 @@ class WebSocketManager {
     fun connect() {
         // ✅ Validate pilotId and adminId are set from SessionManager
         if (pilotId <= 0) {
+            android.util.Log.e("WebSocketManager", "❌ Cannot connect - pilotId not set: $pilotId")
             return
         }
         if (adminId <= 0) {
+            android.util.Log.w("WebSocketManager", "⚠️ adminId not set, using default 1")
             adminId = 1
         }
 
@@ -252,12 +253,18 @@ class WebSocketManager {
         isReconnecting = false
 
         try {
+            android.util.Log.i("WebSocketManager", "🔌 Connecting to WebSocket URL: $wsUrl")
+            android.util.Log.i("WebSocketManager", "📋 Connection params: pilotId=$pilotId, adminId=$adminId")
+            android.util.Log.i("WebSocketManager", "🔒 Secure connection: ${isSecureConnectionEnabled()}")
+
             val request = Request.Builder()
                 .url(wsUrl)
                 .build()
 
             webSocket = client.newWebSocket(request, socketListener)
+            android.util.Log.i("WebSocketManager", "✅ WebSocket connection request sent")
         } catch (e: Exception) {
+            android.util.Log.e("WebSocketManager", "❌ WebSocket connection failed: ${e.message}", e)
             e.printStackTrace()
         }
     }
@@ -266,6 +273,7 @@ class WebSocketManager {
 
         // ✅ STEP 2 — Send session_start on connection
         override fun onOpen(webSocket: WebSocket, response: Response) {
+            android.util.Log.i("WebSocketManager", "✅ WebSocket CONNECTED! Response: ${response.code} ${response.message}")
             isConnected = true
             sessionStarted = false
             readyForTelemetry = false
@@ -300,8 +308,11 @@ class WebSocketManager {
                 }
 
                 val payload = sessionStart.toString()
+                android.util.Log.i("WebSocketManager", "📤 Sending session_start: $payload")
                 webSocket?.send(payload)
+                android.util.Log.i("WebSocketManager", "✅ session_start sent successfully")
             } catch (e: Exception) {
+                android.util.Log.e("WebSocketManager", "❌ Failed to send session_start: ${e.message}", e)
                 e.printStackTrace()
             }
 
@@ -324,9 +335,11 @@ class WebSocketManager {
             try {
                 val msg = JSONObject(text)
                 val messageType = msg.getString("type")
+                android.util.Log.i("WebSocketManager", "📥 Received message type: $messageType")
 
                 when (messageType) {
                     "session_ack" -> {
+                        android.util.Log.i("WebSocketManager", "✅ Received session_ack from backend!")
                         // Cancel the timeout since we got the ack
                         sessionAckTimeoutRunnable?.let { handler.removeCallbacks(it) }
 
@@ -347,6 +360,7 @@ class WebSocketManager {
                     }
                     "mission_created" -> {
                         missionId = msg.getString("mission_id")
+                        android.util.Log.i("WebSocketManager", "✅ Received mission_created: missionId=$missionId")
                         readyForTelemetry = true
                         // 🔥 Reset reconnect attempts on successful mission creation
                         reconnectAttempts = 0
@@ -355,6 +369,7 @@ class WebSocketManager {
                         startDelayedDroneUidMonitoring()
                     }
                     "error" -> {
+                        android.util.Log.e("WebSocketManager", "❌ Received error from backend: $text")
                         // Handle error silently
                     }
                     else -> {
@@ -369,6 +384,34 @@ class WebSocketManager {
         override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
             // Cancel timeout
             sessionAckTimeoutRunnable?.let { handler.removeCallbacks(it) }
+
+            android.util.Log.e("WebSocketManager", "❌ WebSocket FAILURE: ${t.message}")
+            android.util.Log.e("WebSocketManager", "❌ Response: ${response?.code} ${response?.message}")
+            android.util.Log.e("WebSocketManager", "❌ URL was: $wsUrl")
+
+            // 🔥 Detailed error diagnosis
+            when {
+                t.message?.contains("Unable to resolve host") == true -> {
+                    android.util.Log.e("WebSocketManager", "🔍 DNS RESOLUTION FAILED - Device cannot resolve domain name")
+                    android.util.Log.e("WebSocketManager", "🔍 Check: 1) Device internet connection 2) DNS settings 3) Try mobile data instead of WiFi")
+                }
+                t.message?.contains("Connection refused") == true -> {
+                    android.util.Log.e("WebSocketManager", "🔍 CONNECTION REFUSED - Server not accepting connections on port 443")
+                    android.util.Log.e("WebSocketManager", "🔍 Check: 1) Server is running 2) Firewall allows port 443 3) Nginx/Daphne is running")
+                }
+                t.message?.contains("Connection reset") == true -> {
+                    android.util.Log.e("WebSocketManager", "🔍 CONNECTION RESET - Server closed the connection")
+                    android.util.Log.e("WebSocketManager", "🔍 Check: 1) SSL certificate is valid 2) Server WebSocket endpoint exists")
+                }
+                t.message?.contains("SSL") == true || t.message?.contains("Certificate") == true -> {
+                    android.util.Log.e("WebSocketManager", "🔍 SSL/CERTIFICATE ERROR - TLS handshake failed")
+                    android.util.Log.e("WebSocketManager", "🔍 Check: 1) SSL certificate is valid 2) Certificate is not expired 3) Domain matches certificate")
+                }
+                t.message?.contains("timeout") == true -> {
+                    android.util.Log.e("WebSocketManager", "🔍 CONNECTION TIMEOUT - Server not responding")
+                    android.util.Log.e("WebSocketManager", "🔍 Check: 1) Server is running 2) Network connectivity 3) Firewall rules")
+                }
+            }
 
             isConnected = false
             sessionStarted = false

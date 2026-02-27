@@ -582,7 +582,7 @@ class SharedViewModel : ViewModel() {
     private val _connectionType = mutableStateOf(ConnectionType.TCP)
     val connectionType: State<ConnectionType> = _connectionType
 
-    private val _ipAddress = mutableStateOf("65.0.76.31")
+    private val _ipAddress = mutableStateOf("kftgcs.com")
     val ipAddress: State<String> = _ipAddress
 
     private val _port = mutableStateOf("5762")

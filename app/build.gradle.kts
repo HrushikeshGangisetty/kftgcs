@@ -38,9 +38,9 @@ android {
 
             // API Configuration for DEBUG builds
             // Uses local.properties values or defaults for development
-            val debugApiUrl = localProperties.getProperty("DEBUG_API_URL") ?: "http://65.0.76.31:8000"
-            val debugServerIp = localProperties.getProperty("DEBUG_SERVER_IP") ?: "65.0.76.31"
-            val debugServerPort = localProperties.getProperty("DEBUG_SERVER_PORT") ?: "8000"
+            val debugApiUrl = localProperties.getProperty("DEBUG_API_URL") ?: "https://kftgcs.com"
+            val debugServerIp = localProperties.getProperty("DEBUG_SERVER_IP") ?: "kftgcs.com"
+            val debugServerPort = localProperties.getProperty("DEBUG_SERVER_PORT") ?: "443"
 
             buildConfigField("String", "API_BASE_URL", "\"$debugApiUrl\"")
             buildConfigField("String", "SERVER_IP", "\"$debugServerIp\"")
@@ -57,7 +57,7 @@ android {
 
             // API Configuration for RELEASE builds
             // IMPORTANT: Set PRODUCTION_API_URL in local.properties before release
-            val productionApiUrl = localProperties.getProperty("PRODUCTION_API_URL") ?: "https://api.your-domain.com"
+            val productionApiUrl = localProperties.getProperty("PRODUCTION_API_URL") ?: "https://kftgcs.com"
 
             buildConfigField("String", "API_BASE_URL", "\"$productionApiUrl\"")
             buildConfigField("String", "SERVER_IP", "\"\"") // Not used in production

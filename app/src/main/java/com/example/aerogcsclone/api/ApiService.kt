@@ -24,11 +24,11 @@ object ApiService {
      * Attempts to read from BuildConfig first, falls back to defaults for development
      */
     private object ServerConfig {
-        // Default values for development (physical device connects to AWS EC2)
-        private const val DEFAULT_SERVER_IP = "65.0.76.31"
-        private const val DEFAULT_SERVER_PORT = "8000"
+        // Default values for production (using domain)
+        private const val DEFAULT_SERVER_IP = "kftgcs.com"
+        private const val DEFAULT_SERVER_PORT = "443"
         // SECURITY: Use HTTPS for secure communication
-        private const val DEFAULT_API_URL = "http://65.0.76.31:8000"
+        private const val DEFAULT_API_URL = "https://kftgcs.com"
 
         val apiBaseUrl: String
             get() = tryGetBuildConfigString("API_BASE_URL") ?: DEFAULT_API_URL
@@ -83,8 +83,8 @@ object ApiService {
             // If using production server (release builds)
             ServerConfig.useProductionServer -> ServerConfig.apiBaseUrl
 
-            // Use configured server IP (physical device)
-            else -> "http://${ServerConfig.serverIp}:${ServerConfig.serverPort}"
+            // Use configured server IP (physical device) - HTTPS for production domain
+            else -> "https://${ServerConfig.serverIp}"
         }
         Timber.d("BASE_URL selected: $url (useProduction=${ServerConfig.useProductionServer})")
         url
