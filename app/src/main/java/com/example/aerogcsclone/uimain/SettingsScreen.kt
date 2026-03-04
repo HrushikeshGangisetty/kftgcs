@@ -1,5 +1,7 @@
 package com.example.aerogcsclone.uimain
 
+import android.content.Intent
+import androidx.core.net.toUri
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
@@ -15,7 +17,7 @@ import androidx.compose.material.icons.filled.Speed
 import androidx.compose.material.icons.filled.Explore
 import androidx.compose.material.icons.filled.Gamepad
 import androidx.compose.material.icons.filled.Opacity
-import androidx.compose.material.icons.filled.Info
+import androidx.compose.material.icons.filled.Policy
 import androidx.compose.material.icons.filled.Thermostat
 import androidx.compose.material.icons.filled.Home
 import androidx.compose.material3.IconButton
@@ -23,6 +25,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -32,6 +35,7 @@ import androidx.compose.ui.graphics.vector.ImageVector
 
 @Composable
 fun SettingsScreen(navController: NavHostController) {
+    val context = LocalContext.current
     Box(
         modifier = Modifier
             .fillMaxSize()
@@ -141,12 +145,18 @@ fun SettingsScreen(navController: NavHostController) {
 
             Spacer(modifier = Modifier.height(buttonSpacing))
 
-            // 6. About App
+            // 6. Privacy Policy
             NumberedButton(
                 number = 6,
-                icon = Icons.Filled.Info,
-                title = "About App",
-                onClick = { navController.navigate("about_app") },
+                icon = Icons.Filled.Policy,
+                title = "Privacy Policy",
+                onClick = {
+                    val intent = Intent(
+                        Intent.ACTION_VIEW,
+                        "https://sreenijagangadari.github.io/pavamanGCS-privacy-policy/".toUri()
+                    )
+                    context.startActivity(intent)
+                },
                 height = buttonHeight
             )
 

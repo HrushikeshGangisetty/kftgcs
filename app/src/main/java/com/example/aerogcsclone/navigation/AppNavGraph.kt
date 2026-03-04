@@ -42,6 +42,7 @@ import com.example.aerogcsclone.uimain.CalibrationsScreen
 import com.example.aerogcsclone.uimain.SprayCalibrationScreen
 import com.example.aerogcsclone.uimain.LevelSensorCalibrationScreen
 import com.example.aerogcsclone.uimain.FlowSensorCalibrationScreen
+import com.example.aerogcsclone.uimain.AboutAppScreen
 import com.example.aerogcsclone.ui.components.PlotTemplatesScreen
 import com.example.aerogcsclone.ui.logs.LogsScreen
 import com.example.aerogcsclone.ui.LanguageSelectionPage
@@ -326,8 +327,8 @@ fun AppNavGraph(navController: NavHostController) {
         composable(Screen.AboutApp.route) {
             val telemetryState by sharedViewModel.telemetryState.collectAsState()
 
-            // TopNavBar removed
-            PlaceholderScreen("About App", "Ground Control Station v1.0\nDeveloped for drone operations")
+            // TopNavBar removed - show About App screen with privacy policy link
+            AboutAppScreen(navController = navController)
         }
 
         // Spray Calibration screens
