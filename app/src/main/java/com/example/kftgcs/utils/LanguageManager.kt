@@ -331,7 +331,7 @@ object AppStrings {
     val undoneActionWarning get() = getString("⚠️ This action cannot be undone.", "⚠️ ఈ చర్యను రద్దు చేయలేము.")
 
     // TopNavBar Strings
-    val pavamanAviation get() = getString("Pavaman Aviation", "పవమాన్ ఏవియేషన్")
+    val pavamanAviation get() = getString("KFTGcs", "పవమాన్ ఏవియేషన్")
     val menu get() = getString("Menu", "మెనూ")
     val home get() = getString("Home", "హోమ్")
     val spray get() = getString("Spray", "స్ప్రే")
