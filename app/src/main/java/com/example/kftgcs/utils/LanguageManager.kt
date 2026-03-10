@@ -217,8 +217,8 @@ object AppStrings {
     val generateGrid get() = getString("Generate Grid", "గ్రిడ్ సృష్టించు")
 
     // Authentication Screens
-    val loginWithPavaman get() = getString("Login with pavaman", "పవమాన్‌తో లాగిన్ చేయండి")
-    val loginCredentials get() = getString("Login with pavaman credentials", "పవమాన్ ఆధారాలతో లాగిన్ చేయండి")
+    val loginWithPavaman get() = getString("Login with mail", "పవమాన్‌తో లాగిన్ చేయండి")
+    val loginCredentials get() = getString("Login with mail credentials", "పవమాన్ ఆధారాలతో లాగిన్ చేయండి")
     val firstName get() = getString("First Name", "మొదటి పేరు")
     val lastName get() = getString("Last Name", "చివరి పేరు")
     val email get() = getString("Email", "ఇమెయిల్")
@@ -228,7 +228,7 @@ object AppStrings {
     val re_password get() = getString("Re-Password", "పాస్‌వర్డ్ మళ్లీ నమోదు చేయండి")
     val login get() = getString("Login", "లాగిన్")
     val signInWithGoogle get() = getString("Sign in with Google", "గూగుల్‌తో సైన్ ఇన్ చేయండి")
-    val signupWithPavaman get() = getString("Signup with Pavaman", "పవమాన్‌తో సైన్అప్ చేయండి")
+    val signupWithPavaman get() = getString("Signup with mail", "పవమాన్‌తో సైన్అప్ చేయండి")
     val createCustomCredentials get() = getString("Create your custom mail and password", "మీ కస్టమ్ మెయిల్ మరియు పాస్‌వర్డ్ సృష్టించండి")
     val createAccount get() = getString("Create account", "ఖాతా సృష్టించు")
     val alreadyHaveAccount get() = getString("if already have an account, Login", "ఇప్పటికే ఖాతా ఉంటే, లాగిన్ చేయండి")
