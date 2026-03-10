@@ -1,6 +1,7 @@
 package com.example.kftgcs.api
 
 import com.google.gson.Gson
+import com.google.gson.annotations.SerializedName
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import okhttp3.CertificatePinner
@@ -48,7 +49,7 @@ object ApiService {
          */
         private fun tryGetBuildConfigString(fieldName: String): String? {
             return try {
-                val buildConfigClass = Class.forName("com.example.aerogcsclone.BuildConfig")
+                val buildConfigClass = Class.forName("com.example.kftgcs.BuildConfig")
                 val field = buildConfigClass.getField(fieldName)
                 field.get(null) as? String
             } catch (e: Exception) {
@@ -63,7 +64,7 @@ object ApiService {
          */
         private fun tryGetBuildConfigBoolean(fieldName: String): Boolean? {
             return try {
-                val buildConfigClass = Class.forName("com.example.aerogcsclone.BuildConfig")
+                val buildConfigClass = Class.forName("com.example.kftgcs.BuildConfig")
                 val field = buildConfigClass.getField(fieldName)
                 field.get(null) as? Boolean
             } catch (e: Exception) {
@@ -436,54 +437,55 @@ object ApiService {
 }
 
 // Request models
+// @SerializedName annotations ensure field names survive R8/ProGuard obfuscation in release builds
 data class PilotRegisterRequest(
-    val first_name: String,
-    val last_name: String,
-    val email: String,
-    val mobile_no: String,
-    val password: String,
-    val re_password: String
+    @SerializedName("first_name") val first_name: String,
+    @SerializedName("last_name") val last_name: String,
+    @SerializedName("email") val email: String,
+    @SerializedName("mobile_no") val mobile_no: String,
+    @SerializedName("password") val password: String,
+    @SerializedName("re_password") val re_password: String
 )
 
 data class VerifyOtpRequest(
-    val email: String,
-    val otp: Int
+    @SerializedName("email") val email: String,
+    @SerializedName("otp") val otp: Int
 )
 
 data class ResendOtpRequest(
-    val email: String
+    @SerializedName("email") val email: String
 )
 
 data class PilotLoginRequest(
-    val email: String,
-    val password: String
+    @SerializedName("email") val email: String,
+    @SerializedName("password") val password: String
 )
 
 data class PilotLogoutRequest(
-    val email: String
+    @SerializedName("email") val email: String
 )
 
 // Response models
 data class PilotRegisterResponse(
-    val message: String,
-    val id: Int,
-    val status_code: Int
+    @SerializedName("message") val message: String,
+    @SerializedName("id") val id: Int,
+    @SerializedName("status_code") val status_code: Int
 )
 
 data class PilotLoginResponse(
-    val message: String,
-    val pilot_id: Int,
-    val status_code: Int
+    @SerializedName("message") val message: String,
+    @SerializedName("pilot_id") val pilot_id: Int,
+    @SerializedName("status_code") val status_code: Int
 )
 
 data class MessageResponse(
-    val message: String,
-    val status_code: Int? = null
+    @SerializedName("message") val message: String,
+    @SerializedName("status_code") val status_code: Int? = null
 )
 
 data class ErrorResponse(
-    val error: String,
-    val status_code: Int
+    @SerializedName("error") val error: String,
+    @SerializedName("status_code") val status_code: Int
 )
 
 sealed class ApiResponse<out T> {
