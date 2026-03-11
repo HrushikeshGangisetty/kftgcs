@@ -167,7 +167,7 @@ fun OtpVerificationPage(
                     CircularProgressIndicator(color = Color.Black)
                 } else {
                     Button(
-                        onClick = { authViewModel.verifyOtp(email, otp) },
+                        onClick = { authViewModel.verifyOtp(context, email, otp) },
                         modifier = Modifier.fillMaxWidth()
                     ) {
                         Text(text = "Verify OTP", color = Color.Black)

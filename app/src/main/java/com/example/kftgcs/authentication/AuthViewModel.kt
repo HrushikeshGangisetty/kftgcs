@@ -130,8 +130,9 @@ class AuthViewModel : ViewModel() {
 
         viewModelScope.launch {
             try {
-                val request = PilotLoginRequest(email, password)
-                Timber.d("PilotLoginRequest created - email: ${request.email}, password length: ${request.password.length}")
+                val deviceId = SessionManager.getDeviceId(context)
+                val request = PilotLoginRequest(email, password, deviceId)
+                Timber.d("PilotLoginRequest created - email: ${request.email}, password length: ${request.password.length}, device_id: ${request.device_id}")
 
                 Timber.d("Calling ApiService.pilotLogin...")
                 when (val response = ApiService.pilotLogin(request)) {
@@ -213,7 +214,7 @@ class AuthViewModel : ViewModel() {
         }
     }
 
-    fun verifyOtp(email: String, otp: String) {
+    fun verifyOtp(context: Context, email: String, otp: String) {
         if (otp.isEmpty()) {
             _authState.value = AuthState.Error("OTP cannot be empty")
             return
@@ -229,7 +230,8 @@ class AuthViewModel : ViewModel() {
 
         viewModelScope.launch {
             try {
-                val request = VerifyOtpRequest(email, otpInt)
+                val deviceId = SessionManager.getDeviceId(context)
+                val request = VerifyOtpRequest(email, otpInt, deviceId)
                 when (val response = ApiService.verifyOtp(request)) {
                     is ApiResponse.Success -> {
                         _authState.value = AuthState.OtpVerified(response.data.message)

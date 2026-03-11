@@ -449,7 +449,8 @@ data class PilotRegisterRequest(
 
 data class VerifyOtpRequest(
     @SerializedName("email") val email: String,
-    @SerializedName("otp") val otp: Int
+    @SerializedName("otp") val otp: Int,
+    @SerializedName("device_id") val device_id: String
 )
 
 data class ResendOtpRequest(
@@ -458,7 +459,8 @@ data class ResendOtpRequest(
 
 data class PilotLoginRequest(
     @SerializedName("email") val email: String,
-    @SerializedName("password") val password: String
+    @SerializedName("password") val password: String,
+    @SerializedName("device_id") val device_id: String
 )
 
 data class PilotLogoutRequest(

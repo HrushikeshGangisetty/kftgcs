@@ -2,6 +2,7 @@ package com.example.kftgcs.api
 
 import android.content.Context
 import android.content.SharedPreferences
+import android.provider.Settings
 import androidx.core.content.edit
 import androidx.security.crypto.EncryptedSharedPreferences
 import androidx.security.crypto.MasterKey
@@ -161,6 +162,15 @@ object SessionManager {
         getPreferences(context).edit {
             clear()
         }
+    }
+
+    /**
+     * Get a stable unique device identifier using ANDROID_ID.
+     * This value persists across app reinstalls (reset only on factory reset)
+     * and is unique per device + user combination.
+     */
+    fun getDeviceId(context: Context): String {
+        return Settings.Secure.getString(context.contentResolver, Settings.Secure.ANDROID_ID) ?: "unknown"
     }
 }
 
