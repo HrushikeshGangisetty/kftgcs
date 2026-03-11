@@ -928,38 +928,43 @@ class SharedViewModel : ViewModel() {
 
     fun connect() {
         viewModelScope.launch {
-            val provider: MavConnectionProvider? = when (_connectionType.value) {
-                ConnectionType.TCP -> {
-                    val portInt = port.value.toIntOrNull()
-                    if (portInt != null) {
-                        TcpConnectionProvider(ipAddress.value, portInt)
-                    } else {
-                        LogUtils.e("SharedVM", "Invalid port number.")
-                        null
+            try {
+                val provider: MavConnectionProvider? = when (_connectionType.value) {
+                    ConnectionType.TCP -> {
+                        val portInt = port.value.toIntOrNull()
+                        if (portInt != null) {
+                            TcpConnectionProvider(ipAddress.value, portInt)
+                        } else {
+                            LogUtils.e("SharedVM", "Invalid port number.")
+                            null
+                        }
+                    }
+                    ConnectionType.BLUETOOTH -> {
+                        selectedDevice.value?.device?.let {
+                            BluetoothConnectionProvider(it)
+                        } ?: run {
+                            LogUtils.e("SharedVM", "No Bluetooth device selected.")
+                            null
+                        }
                     }
                 }
-                ConnectionType.BLUETOOTH -> {
-                    selectedDevice.value?.device?.let {
-                        BluetoothConnectionProvider(it)
-                    } ?: run {
-                        LogUtils.e("SharedVM", "No Bluetooth device selected.")
-                        null
-                    }
+
+                if (provider == null) {
+                    LogUtils.e("SharedVM", "Failed to create connection provider.")
+                    return@launch
                 }
-            }
 
-            if (provider == null) {
-                LogUtils.e("SharedVM", "Failed to create connection provider.")
-                return@launch
-            }
+                // If there's an old repo, close its connection first
+                try {
+                    repo?.closeConnection()
+                } catch (e: Exception) {
+                    LogUtils.e("SharedVM", "Error closing old connection", e)
+                }
 
-            // If there's an old repo, close its connection first
-            repo?.closeConnection()
-
-            val newRepo = MavlinkTelemetryRepository(provider, this@SharedViewModel)
-            repo = newRepo
-            newRepo.start()
-            DisconnectionRTLHandler.startMonitoring(_telemetryState, newRepo, viewModelScope)
+                val newRepo = MavlinkTelemetryRepository(provider, this@SharedViewModel)
+                repo = newRepo
+                newRepo.start()
+                DisconnectionRTLHandler.startMonitoring(_telemetryState, newRepo, viewModelScope)
 
             // Initialize video tracking manager
             trackingManager?.destroy()
@@ -1015,25 +1020,39 @@ class SharedViewModel : ViewModel() {
             }
 
             viewModelScope.launch {
-                newRepo.mavFrame
-                    .map { it.message }
-                    .filterIsInstance<Statustext>()
-                    .collect {
-                        val statusText = it.text
-                        // Surface common calibration-related prompts, including accel/compass/barometer keywords
-                        val lower = statusText.lowercase()
-                        val keys = listOf(
-                            // generic
-                            "calib", "progress",
-                            // accel prompts
-                            "place", "position", "level", "nose", "left", "right", "back",
-                            // barometer
-                            "baro", "barometer", "pressure"
-                        )
-                        if (keys.any { key -> lower.contains(key) }) {
-                            _calibrationStatus.value = statusText
+                try {
+                    newRepo.mavFrame
+                        .map { it.message }
+                        .filterIsInstance<Statustext>()
+                        .collect {
+                            val statusText = it.text
+                            // Surface common calibration-related prompts, including accel/compass/barometer keywords
+                            val lower = statusText.lowercase()
+                            val keys = listOf(
+                                // generic
+                                "calib", "progress",
+                                // accel prompts
+                                "place", "position", "level", "nose", "left", "right", "back",
+                                // barometer
+                                "baro", "barometer", "pressure"
+                            )
+                            if (keys.any { key -> lower.contains(key) }) {
+                                _calibrationStatus.value = statusText
+                            }
                         }
-                    }
+                } catch (e: Exception) {
+                    LogUtils.e("SharedVM", "Error collecting status text", e)
+                }
+            }
+            } catch (e: Exception) {
+                LogUtils.e("SharedVM", "Connection failed with error: ${e.message}", e)
+                // Clean up on failure
+                try {
+                    repo?.closeConnection()
+                } catch (cleanupError: Exception) {
+                    LogUtils.e("SharedVM", "Error during connection cleanup", cleanupError)
+                }
+                repo = null
             }
         }
     }

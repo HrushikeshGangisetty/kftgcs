@@ -75,3 +75,37 @@
     public static *** wtf(...);
 }
 
+# ============================================
+# MAVLink Libraries: Keep all MAVLink classes
+# These use reflection and serialization internally.
+# Without these rules, R8 strips/obfuscates them causing
+# RuntimeException on TCP/Bluetooth connect.
+# ============================================
+
+# divpundir MAVLink library (definitions, TCP connection, coroutines adapter)
+-keep class com.divpundir.mavlink.** { *; }
+-keepclassmembers class com.divpundir.mavlink.** { *; }
+-dontwarn com.divpundir.mavlink.**
+
+# dronefleet MAVLink library
+-keep class io.dronefleet.mavlink.** { *; }
+-keepclassmembers class io.dronefleet.mavlink.** { *; }
+-dontwarn io.dronefleet.mavlink.**
+
+# ============================================
+# Kotlin Coroutines: Prevent stripping of coroutine internals
+# ============================================
+-keepnames class kotlinx.coroutines.internal.MainDispatcherFactory {}
+-keepnames class kotlinx.coroutines.CoroutineExceptionHandler {}
+-keepclassmembers class kotlinx.coroutines.** {
+    volatile <fields>;
+}
+
+# ============================================
+# App Telemetry: Keep telemetry data classes and enums
+# These are used with reflection and flow serialization
+# ============================================
+-keep class com.example.kftgcs.Telemetry.** { *; }
+-keep class com.example.kftgcs.telemetry.** { *; }
+-keep enum com.example.kftgcs.telemetry.ConnectionType { *; }
+

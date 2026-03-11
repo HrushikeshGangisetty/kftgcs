@@ -38,7 +38,7 @@ class GCSApplication : Application() {
          */
         fun isDebugBuild(): Boolean {
             return try {
-                val buildConfigClass = Class.forName("com.example.aerogcsclone.BuildConfig")
+                val buildConfigClass = Class.forName("com.example.kftgcs.BuildConfig")
                 val debugField = buildConfigClass.getField("DEBUG")
                 debugField.getBoolean(null)
             } catch (e: Exception) {

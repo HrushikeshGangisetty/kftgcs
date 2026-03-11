@@ -70,18 +70,28 @@ fun ConnectionPage(navController: NavController, viewModel: SharedViewModel) {
         errorMessage = ""
         connectionJob?.cancel() // Cancel any previous job
         connectionJob = coroutineScope.launch {
-            viewModel.connect() // Ask the ViewModel to connect
+            try {
+                viewModel.connect() // Ask the ViewModel to connect
 
-            // Set a timeout for the connection attempt
-            delay(10000) // 10-second timeout
+                // Set a timeout for the connection attempt
+                delay(10000) // 10-second timeout
 
-            // If we are still in a 'connecting' state after the timeout, it failed.
-            if (isConnecting) {
+                // If we are still in a 'connecting' state after the timeout, it failed.
+                if (isConnecting) {
+                    isConnecting = false
+                    errorMessage = AppStrings.connectionTimedOut
+                    showPopup = true
+                    viewModel.cancelConnection() // Clean up the failed attempt
+                    // Announce connection failure via TTS
+                    viewModel.announceConnectionFailed()
+                }
+            } catch (e: Exception) {
                 isConnecting = false
-                errorMessage = AppStrings.connectionTimedOut
+                errorMessage = "Connection error: ${e.message ?: "Unknown error"}"
                 showPopup = true
-                viewModel.cancelConnection() // Clean up the failed attempt
-                // Announce connection failure via TTS
+                try {
+                    viewModel.cancelConnection()
+                } catch (_: Exception) { }
                 viewModel.announceConnectionFailed()
             }
         }

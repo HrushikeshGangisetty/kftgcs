@@ -21,6 +21,7 @@ import com.example.kftgcs.navigation.AppNavGraph
 import com.example.kftgcs.integration.TlogIntegration
 import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.viewbinding.BuildConfig
+//import com.example.kftgcs.BuildConfig
 import com.google.accompanist.systemuicontroller.rememberSystemUiController
 import com.example.kftgcs.telemetry.SharedViewModel
 import com.example.kftgcs.telemetry.WebSocketManager
