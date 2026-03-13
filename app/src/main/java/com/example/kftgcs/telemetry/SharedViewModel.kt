@@ -626,6 +626,11 @@ class SharedViewModel : ViewModel() {
     // --- Telemetry & Repository ---
     private var repo: MavlinkTelemetryRepository? = null
 
+    // 🔥 FIX: Track all coroutines launched during connect() so they can be cancelled on disconnect.
+    // Without this, orphaned collect coroutines keep updating _telemetryState after disconnect,
+    // making the app think it's connected (has telemetry data) when repo is actually null.
+    private var connectionJobs = mutableListOf<Job>()
+
     // --- Video Tracking Manager ---
     private var trackingManager: TrackingManager? = null
     private val _cameraTrackingState = MutableStateFlow(CameraTrackingState())
@@ -950,10 +955,26 @@ class SharedViewModel : ViewModel() {
                     LogUtils.e("SharedVM", "Error closing old connection", e)
                 }
 
+                // 🔥 CRITICAL FIX: Clear ALL stale geofence state when establishing a new connection.
+                // The ViewModel survives in memory across sessions (Activity not destroyed),
+                // so old geofence polygon/waypoints from a previous FC/session can persist for days.
+                // Without this, the app would upload the OLD geofence (from days ago) to a NEW FC.
+                LogUtils.i("Geofence", "🧹 New connection: clearing stale geofence state from previous session")
+                stopFenceStatusMonitoring()
+                _geofenceEnabled.value = false
+                _geofencePolygon.value = emptyList()
+                _fenceConfiguration.value = null
+                _homePosition.value = null
+                resetGeofenceState()
+
                 val newRepo = MavlinkTelemetryRepository(provider, this@SharedViewModel)
                 repo = newRepo
                 newRepo.start()
                 DisconnectionRTLHandler.startMonitoring(_telemetryState, newRepo, viewModelScope)
+
+                // 🔥 FIX: Cancel any previous connection collection jobs to prevent orphaned coroutines
+                connectionJobs.forEach { it.cancel() }
+                connectionJobs.clear()
 
             // Initialize video tracking manager
             trackingManager?.destroy()
@@ -961,7 +982,7 @@ class SharedViewModel : ViewModel() {
             trackingManager = newTrackingManager
 
             // Start tracking manager when FCU is detected
-            viewModelScope.launch {
+            connectionJobs += viewModelScope.launch {
                 newRepo.state.collect { state ->
                     if (state.fcuDetected && state.connected) {
                         newTrackingManager.initialize()
@@ -971,13 +992,13 @@ class SharedViewModel : ViewModel() {
             }
 
             // Collect tracking state
-            viewModelScope.launch {
+            connectionJobs += viewModelScope.launch {
                 newTrackingManager.cameraTrackingState.collect { trackingState ->
                     _cameraTrackingState.value = trackingState
                 }
             }
 
-            viewModelScope.launch {
+            connectionJobs += viewModelScope.launch {
                 newRepo.state.collect { repoState ->
                     // Preserve SharedViewModel-managed fields (pause state, mission active state) while updating from repository
                     _telemetryState.update { currentState ->
@@ -1008,7 +1029,7 @@ class SharedViewModel : ViewModel() {
                 }
             }
 
-            viewModelScope.launch {
+            connectionJobs += viewModelScope.launch {
                 try {
                     newRepo.mavFrame
                         .map { it.message }
@@ -1035,13 +1056,18 @@ class SharedViewModel : ViewModel() {
             }
             } catch (e: Exception) {
                 LogUtils.e("SharedVM", "Connection failed with error: ${e.message}", e)
-                // Clean up on failure
-                try {
-                    repo?.closeConnection()
-                } catch (cleanupError: Exception) {
-                    LogUtils.e("SharedVM", "Error during connection cleanup", cleanupError)
+                // Clean up on failure - cancel collection jobs and close connection
+                connectionJobs.forEach { it.cancel() }
+                connectionJobs.clear()
+                // 🔥 FIX: Only clean up repo if it was set during this connect() call.
+                // The old working aerogcsclone code had NO try-catch here at all.
+                // If repo.start() succeeded but a later step (TrackingManager, collect setup) threw,
+                // we should NOT null out repo — the MAVLink connection is still alive.
+                // Instead, just log the error and let the connection continue working.
+                if (repo != null) {
+                    LogUtils.w("SharedVM", "⚠️ connect() threw after repo was created - NOT nulling repo (connection may still be alive)")
+                    LogUtils.w("SharedVM", "⚠️ Exception was: ${e.javaClass.simpleName}: ${e.message}")
                 }
-                repo = null
             }
         }
     }
@@ -1263,31 +1289,59 @@ class SharedViewModel : ViewModel() {
     fun setFenceRadius(radius: Float) {
         // Ensure minimum 5m radius
         val newRadius = radius.coerceAtLeast(5f)
-        val oldRadius = _fenceRadius.value
-
-        // Calculate the delta (change in buffer distance)
-        val deltaMeters = (newRadius - oldRadius).toDouble()
 
         _fenceRadius.value = newRadius
 
-        // If geofence is enabled and we have an existing polygon, scale it
-        if (_geofenceEnabled.value && _geofencePolygon.value.size >= 3 && deltaMeters != 0.0) {
-            // Scale the existing polygon by the delta
-            val scaledPolygon = GeofenceUtils.scalePolygon(_geofencePolygon.value, deltaMeters)
-            if (scaledPolygon.size >= 3) {
-                _geofencePolygon.value = scaledPolygon
-                LogUtils.d("Geofence", "Geofence polygon scaled by ${deltaMeters}m (new buffer: ${newRadius}m)")
-
-                // Schedule debounced upload - will upload after user stops adjusting slider
-                scheduleGeofenceUpload(scaledPolygon)
+        // 🔥 FIX: Regenerate geofence from current waypoints instead of scaling a potentially
+        // stale polygon. But ONLY update the local polygon for display — use debounced upload
+        // to avoid flooding the FC with upload attempts on every slider tick.
+        if (_geofenceEnabled.value) {
+            // Regenerate the polygon shape locally for immediate UI feedback
+            regenerateGeofencePolygonLocally()
+            // Schedule debounced upload to FC (will upload after user stops adjusting)
+            if (_geofencePolygon.value.size >= 3) {
+                scheduleGeofenceUpload(_geofencePolygon.value)
             }
-        } else {
-            // No existing polygon, generate a new one
-            updateGeofencePolygon()
         }
 
         // Update the previous radius tracker
         _previousFenceRadius = newRadius
+    }
+
+    /**
+     * Regenerate geofence polygon locally (UI only, no FC upload).
+     * Used during slider adjustments for immediate visual feedback.
+     */
+    private fun regenerateGeofencePolygonLocally() {
+        if (!_geofenceEnabled.value) {
+            _geofencePolygon.value = emptyList()
+            return
+        }
+
+        val allWaypoints = mutableListOf<LatLng>()
+
+        val homePos = _homePosition.value
+        if (homePos != null) allWaypoints.add(homePos)
+
+        if (_uploadedWaypoints.value.isNotEmpty()) {
+            allWaypoints.addAll(_uploadedWaypoints.value)
+        } else {
+            allWaypoints.addAll(_planningWaypoints.value)
+        }
+        allWaypoints.addAll(_surveyPolygon.value)
+        allWaypoints.addAll(_gridWaypoints.value)
+
+        if (allWaypoints.isNotEmpty()) {
+            val bufferDistance = _fenceRadius.value.toDouble().coerceAtLeast(7.0)
+            val geofenceShape = if (_useSquareGeofence.value) {
+                GeofenceUtils.generateSquareGeofence(allWaypoints, bufferDistance)
+            } else {
+                GeofenceUtils.generatePolygonBuffer(allWaypoints, bufferDistance)
+            }
+            if (geofenceShape.size >= 3) {
+                _geofencePolygon.value = geofenceShape
+            }
+        }
     }
 
     fun setGeofenceEnabled(enabled: Boolean) {
@@ -1296,15 +1350,23 @@ class SharedViewModel : ViewModel() {
             // Reset geofence state for fresh monitoring
             resetGeofenceState()
 
-            // Capture current drone position as home position if not set
+            // 🔥 CRITICAL FIX: Clear any stale geofence polygon and home position BEFORE
+            // regenerating. This ensures we never re-use a geofence from a previous session
+            // even if the ViewModel has been alive for days with old data.
+            _geofencePolygon.value = emptyList()
+            _fenceConfiguration.value = null
+            _homePosition.value = null
+            LogUtils.i("Geofence", "🧹 Cleared stale geofence data before enabling fresh geofence")
+
+            // Capture current drone position as home position
             val droneLat = _telemetryState.value.latitude
             val droneLon = _telemetryState.value.longitude
-            if (_homePosition.value == null && droneLat != null && droneLon != null) {
+            if (droneLat != null && droneLon != null) {
                 _homePosition.value = LatLng(droneLat, droneLon)
                 LogUtils.i("Geofence", "Home position captured: $droneLat, $droneLon")
             }
 
-            // Generate geofence polygon from waypoints and upload to FC
+            // Generate geofence polygon from CURRENT waypoints and upload to FC
             // This will call uploadGeofenceToFC which uses the new Mission Planner approach
             updateGeofencePolygon()
 
@@ -1394,6 +1456,18 @@ class SharedViewModel : ViewModel() {
 
         val allWaypoints = mutableListOf<LatLng>()
 
+        // Count mission waypoints SEPARATELY from home position
+        val missionWaypointCount = _uploadedWaypoints.value.size +
+            _planningWaypoints.value.size +
+            _surveyPolygon.value.size +
+            _gridWaypoints.value.size
+
+        // 🔥 Log all waypoint sources to help diagnose stale geofence issues
+        LogUtils.i("Geofence", "📊 Waypoint sources: uploaded=${_uploadedWaypoints.value.size}, " +
+            "planning=${_planningWaypoints.value.size}, survey=${_surveyPolygon.value.size}, " +
+            "grid=${_gridWaypoints.value.size}, home=${if (_homePosition.value != null) "set" else "null"}, " +
+            "total_mission_wps=$missionWaypointCount")
+
         // ALWAYS include home position (where drone was when geofence was enabled)
         val homePos = _homePosition.value
         if (homePos != null) {
@@ -1438,39 +1512,50 @@ class SharedViewModel : ViewModel() {
                 _geofencePolygon.value = geofenceShape
                 LogUtils.i("Geofence", "✓ Geofence ${if (_useSquareGeofence.value) "square" else "polygon"} generated successfully with ${geofenceShape.size} vertices")
 
-                // 🔥 VALIDATION: Verify all source waypoints are inside the generated geofence
-                var allInside = true
-                for ((index, wp) in allWaypoints.withIndex()) {
-                    val isInside = GeofenceUtils.isPointInPolygon(wp, geofenceShape)
-                    val distToEdge = GeofenceUtils.distanceToPolygonEdge(wp, geofenceShape)
-                    if (!isInside) {
-                        LogUtils.e("Geofence", "❌ VALIDATION FAILED: Waypoint $index at ${wp.latitude}, ${wp.longitude} is OUTSIDE generated geofence!")
-                        allInside = false
-                    } else {
-                        LogUtils.d("Geofence", "✓ Waypoint $index inside geofence, ${String.format("%.1f", distToEdge)}m from edge")
+                // 🔥 CRITICAL FIX: Only upload to FC if we have ACTUAL MISSION WAYPOINTS.
+                // When there's only home position (0 mission waypoints), the generated fence
+                // is a tiny square around the drone's current position — uploading this to the
+                // FC would either fail or create a useless fence that the drone immediately breaches.
+                // The FC upload will happen automatically when mission waypoints are set
+                // (via setPlanningWaypoints/setSurveyPolygon/setGridWaypoints/uploadMission which
+                // all call updateGeofencePolygon again).
+                if (missionWaypointCount > 0) {
+                    // 🔥 VALIDATION: Verify all source waypoints are inside the generated geofence
+                    var allInside = true
+                    for ((index, wp) in allWaypoints.withIndex()) {
+                        val isInside = GeofenceUtils.isPointInPolygon(wp, geofenceShape)
+                        val distToEdge = GeofenceUtils.distanceToPolygonEdge(wp, geofenceShape)
+                        if (!isInside) {
+                            LogUtils.e("Geofence", "❌ VALIDATION FAILED: Waypoint $index at ${wp.latitude}, ${wp.longitude} is OUTSIDE generated geofence!")
+                            allInside = false
+                        } else {
+                            LogUtils.d("Geofence", "✓ Waypoint $index inside geofence, ${String.format("%.1f", distToEdge)}m from edge")
+                        }
                     }
-                }
 
-                if (!allInside) {
-                    LogUtils.e("Geofence", "⚠️ WARNING: Some waypoints are outside the geofence! Buffer may be too small.")
-                    // Increase buffer and regenerate
-                    val largerBuffer = bufferDistance + 5.0
-                    LogUtils.i("Geofence", "Attempting to regenerate with larger buffer: ${largerBuffer}m")
-                    val largerGeofence = if (_useSquareGeofence.value) {
-                        GeofenceUtils.generateSquareGeofence(allWaypoints, largerBuffer)
+                    if (!allInside) {
+                        LogUtils.e("Geofence", "⚠️ WARNING: Some waypoints are outside the geofence! Buffer may be too small.")
+                        // Increase buffer and regenerate
+                        val largerBuffer = bufferDistance + 5.0
+                        LogUtils.i("Geofence", "Attempting to regenerate with larger buffer: ${largerBuffer}m")
+                        val largerGeofence = if (_useSquareGeofence.value) {
+                            GeofenceUtils.generateSquareGeofence(allWaypoints, largerBuffer)
+                        } else {
+                            GeofenceUtils.generatePolygonBuffer(allWaypoints, largerBuffer)
+                        }
+                        _geofencePolygon.value = largerGeofence
+                        LogUtils.i("Geofence", "✓ Regenerated geofence with larger buffer")
+
+                        // Upload regenerated geofence to FC immediately
+                        if (largerGeofence.size >= 3) {
+                            uploadGeofenceImmediately(largerGeofence)
+                        }
                     } else {
-                        GeofenceUtils.generatePolygonBuffer(allWaypoints, largerBuffer)
-                    }
-                    _geofencePolygon.value = largerGeofence
-                    LogUtils.i("Geofence", "✓ Regenerated geofence with larger buffer")
-
-                    // Upload regenerated geofence to FC immediately (first-time enable)
-                    if (largerGeofence.size >= 3) {
-                        uploadGeofenceImmediately(largerGeofence)
+                        // Upload geofence to FC immediately
+                        uploadGeofenceImmediately(geofenceShape)
                     }
                 } else {
-                    // Upload original geofence to FC immediately (first-time enable)
-                    uploadGeofenceImmediately(geofenceShape)
+                    LogUtils.i("Geofence", "📌 Geofence generated for display only (0 mission waypoints) — FC upload deferred until mission is uploaded")
                 }
             } else {
                 LogUtils.w("Geofence", "Failed to generate valid geofence")
@@ -1552,6 +1637,25 @@ class SharedViewModel : ViewModel() {
      * Uses mutex to prevent concurrent uploads.
      */
     private suspend fun uploadGeofenceToFCInternal(polygon: List<LatLng>) {
+        // 🔥 FIX: Check connection state BEFORE attempting upload
+        // Prevents flooding FC with doomed upload attempts when not connected
+        // NOTE: Use _telemetryState.value.connected directly instead of isConnected.value
+        // because isConnected uses SharingStarted.WhileSubscribed(5000) which defaults to
+        // false when no UI collector is active — causing uploads to be silently skipped.
+        val currentState = _telemetryState.value
+        if (repo == null) {
+            LogUtils.w("Geofence", "⏭️ Skipping fence upload: not connected to FC (repo is null)")
+            return
+        }
+        if (!currentState.fcuDetected) {
+            LogUtils.w("Geofence", "⏭️ Skipping fence upload: FCU not yet detected")
+            return
+        }
+        if (!currentState.connected) {
+            LogUtils.w("Geofence", "⏭️ Skipping fence upload: connection not active (telemetryState.connected=false)")
+            return
+        }
+
         // Use mutex to prevent concurrent uploads
         if (!fenceUploadMutex.tryLock()) {
             LogUtils.w("Geofence", "⏳ Upload already in progress, skipping...")
@@ -1560,6 +1664,10 @@ class SharedViewModel : ViewModel() {
 
         try {
             LogUtils.i("Geofence", "🔥 Starting geofence upload to FC: ${polygon.size} points")
+            // Log actual polygon coordinates for debugging stale fence issues
+            polygon.forEachIndexed { idx, pt ->
+                LogUtils.d("Geofence", "  Fence vertex[$idx]: ${pt.latitude}, ${pt.longitude}")
+            }
 
             // Use the new Mission Planner-style upload
             val config = FenceConfiguration(
@@ -3437,6 +3545,13 @@ class SharedViewModel : ViewModel() {
 
 
     suspend fun cancelConnection() {
+        // 🔥 FIX: Cancel ALL collection coroutines FIRST, before closing connection.
+        // This prevents orphaned coroutines from updating _telemetryState with stale data
+        // after repo is set to null, which caused the app to think it was connected
+        // (had lat/lon in telemetryState) when repo was actually null.
+        connectionJobs.forEach { it.cancel() }
+        connectionJobs.clear()
+
         repo?.let {
             try {
                 it.closeConnection()
@@ -3446,6 +3561,16 @@ class SharedViewModel : ViewModel() {
         }
         DisconnectionRTLHandler.stopMonitoring()
         repo = null
+
+        // 🔥 FIX: Clear geofence state on disconnect to prevent stale fence data
+        // from persisting into the next connection (possibly a different FC).
+        LogUtils.i("Geofence", "🧹 Disconnect: clearing geofence state")
+        stopFenceStatusMonitoring()
+        _geofenceEnabled.value = false
+        _geofencePolygon.value = emptyList()
+        _fenceConfiguration.value = null
+        _homePosition.value = null
+        resetGeofenceState()
 
         // Preserve mission pause state when disconnecting (e.g., for battery change)
         // Only reset connection-related fields, NOT mission pause state

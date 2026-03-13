@@ -32,6 +32,7 @@ import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlin.coroutines.resume
 import com.divpundir.mavlink.api.MavFrame
 import com.divpundir.mavlink.api.MavMessage
+import com.example.kftgcs.utils.LogUtils
 import kotlinx.coroutines.withTimeoutOrNull
 import timber.log.Timber
 import java.util.concurrent.atomic.AtomicLong
@@ -3009,19 +3010,31 @@ class MavlinkTelemetryRepository(
     suspend fun uploadGeofence(configuration: FenceConfiguration): Boolean {
         return withContext(Dispatchers.IO) {
             try {
+                Timber.i("Geofence: Starting upload - fcuSystemId=$fcuSystemId, fcuComponentId=$fcuComponentId, connected=${state.value.connected}, fcuDetected=${state.value.fcuDetected}")
+
+                // 🔥 FIX: Verify connection is ready before attempting upload
+                if (!state.value.connected || !state.value.fcuDetected) {
+                    Timber.e("Geofence: ❌ Cannot upload - connected=${state.value.connected}, fcuDetected=${state.value.fcuDetected}")
+                    return@withContext false
+                }
+
                 // Step 1: Convert fence zones to MAVLink mission items
                 val fenceItems = convertFenceToMissionItems(configuration.zones)
 
                 if (fenceItems.isEmpty()) {
+                    Timber.e("Geofence: ❌ Failed at Step 1: convertFenceToMissionItems returned empty list")
                     return@withContext false
                 }
+                Timber.i("Geofence: Step 1 OK - ${fenceItems.size} fence items created")
 
                 // Step 2: Upload fence using mission protocol with FENCE type
                 val uploadSuccess = uploadFenceItemsInternal(fenceItems)
 
                 if (!uploadSuccess) {
+                    Timber.e("Geofence: ❌ Failed at Step 2: uploadFenceItemsInternal returned false")
                     return@withContext false
                 }
+                Timber.i("Geofence: Step 2 OK - fence items uploaded")
 
                 // Step 3: Configure fence parameters
                 delay(500)  // Let FC process fence upload
@@ -3029,28 +3042,30 @@ class MavlinkTelemetryRepository(
                 val paramsSet = configureFenceParameters(configuration)
 
                 if (!paramsSet) {
+                    Timber.e("Geofence: ❌ Failed at Step 3: configureFenceParameters returned false")
                     return@withContext false
                 }
+                Timber.i("Geofence: Step 3 OK - fence parameters configured")
 
                 // Step 4: Enable fence
                 delay(500)
                 val enabled = enableFence(true)
 
                 if (!enabled) {
+                    Timber.e("Geofence: ❌ Failed at Step 4: enableFence(true) returned false")
                     return@withContext false
                 }
+                Timber.i("Geofence: Step 4 OK - fence enabled")
 
                 // Step 5: Verify fence is actually enabled by reading back parameters
                 delay(300)
-                verifyFenceEnabled()
-
-                // NOTE: Removed geofence upload notification from notification panel
-                // The upload status is communicated via logs and TTS
+                val verified = verifyFenceEnabled()
+                Timber.i("Geofence: Step 5 - verifyFenceEnabled returned $verified")
 
                 true
 
             } catch (e: Exception) {
-                e.printStackTrace()
+                Timber.e(e, "Geofence: ❌ Upload failed with exception")
                 false
             }
         }
@@ -3162,7 +3177,7 @@ class MavlinkTelemetryRepository(
         return suspendCancellableCoroutine { continuation ->
             val job = AppScope.launch {
                 try {
-                    // Step 1: Clear existing fence
+                    // Step 1: Clear existing fence (CRITICAL for preventing stale fence data)
                     val clearCmd = MissionClearAll(
                         targetSystem = fcuSystemId,
                         targetComponent = fcuComponentId,
@@ -3170,13 +3185,33 @@ class MavlinkTelemetryRepository(
                     )
                     connection.trySendUnsignedV2(gcsSystemId, gcsComponentId, clearCmd)
 
-                    // Wait for clear ACK
-                    withTimeoutOrNull(2000) {
+                    // Wait for clear ACK and verify it succeeded
+                    val clearAck = withTimeoutOrNull(2000) {
                         mavFrame
                             .filter { it.systemId == fcuSystemId }
                             .map { it.message }
                             .filterIsInstance<MissionAck>()
                             .first { it.missionType.value == MavMissionType.FENCE.value }
+                    }
+
+                    if (clearAck == null) {
+                        // No ACK received - retry once
+                        Timber.w("Geofence: ⚠️ No ACK for fence clear, retrying...")
+                        connection.trySendUnsignedV2(gcsSystemId, gcsComponentId, clearCmd)
+                        val retryAck = withTimeoutOrNull(2000) {
+                            mavFrame
+                                .filter { it.systemId == fcuSystemId }
+                                .map { it.message }
+                                .filterIsInstance<MissionAck>()
+                                .first { it.missionType.value == MavMissionType.FENCE.value }
+                        }
+                        if (retryAck == null) {
+                            Timber.w("Geofence: ⚠️ Fence clear retry also got no ACK - proceeding with upload anyway")
+                        }
+                    } else if (clearAck.type.value != MavMissionResult.MAV_MISSION_ACCEPTED.value) {
+                        Timber.w("Geofence: ⚠️ Fence clear ACK was not ACCEPTED (type=${clearAck.type.value}) - proceeding anyway")
+                    } else {
+                        Timber.i("Geofence: ✅ Old fence cleared from FC successfully")
                     }
                     delay(500)
 

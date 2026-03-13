@@ -86,6 +86,15 @@ fun ConnectionPage(navController: NavController, viewModel: SharedViewModel) {
                     viewModel.announceConnectionFailed()
                 }
             } catch (e: Exception) {
+                // 🔥 CRITICAL FIX: Do NOT treat CancellationException as an error.
+                // When connection succeeds, the LaunchedEffect cancels connectionJob (the timeout).
+                // This throws CancellationException inside delay(10000), which was being caught here
+                // and incorrectly treated as a connection error — showing "k0 cancelled" popup and
+                // calling cancelConnection() which set repo = null, killing the working connection.
+                if (e is kotlinx.coroutines.CancellationException) {
+                    // Normal cancellation (connection succeeded or user cancelled) - just rethrow
+                    throw e
+                }
                 isConnecting = false
                 errorMessage = "Connection error: ${e.message ?: "Unknown error"}"
                 showPopup = true
