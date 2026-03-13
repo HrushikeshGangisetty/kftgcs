@@ -33,6 +33,7 @@ import kotlin.coroutines.resume
 import com.divpundir.mavlink.api.MavFrame
 import com.divpundir.mavlink.api.MavMessage
 import kotlinx.coroutines.withTimeoutOrNull
+import timber.log.Timber
 import java.util.concurrent.atomic.AtomicLong
 
 
@@ -1230,6 +1231,21 @@ class MavlinkTelemetryRepository(
 
                 .collect { status ->
                     val message = status.text.toString()
+
+                    // Filter out fence-related STATUSTEXT messages when GCS geofence is disabled.
+                    // ArduPilot sends messages like "approaching polygon fence", "fence breach",
+                    // "polygon fence error" etc. via STATUSTEXT even if GCS didn't intend to
+                    // have a fence active. This happens when stale fence data remains on the FC
+                    // from a previous session. Suppress these to prevent false warnings and
+                    // confusion about why the drone won't arm.
+                    val isFenceMessage = message.contains("fence", ignoreCase = true)
+                    if (isFenceMessage && !sharedViewModel.geofenceEnabled.value) {
+                        // GCS geofence is off but FC is sending fence messages - stale fence data
+                        // Log it but don't show to user as a notification
+                        Timber.w("Fence STATUSTEXT suppressed (geofence disabled in GCS): %s", message)
+                        return@collect
+                    }
+
                     val type = when (status.severity.value) {
                         MavSeverity.EMERGENCY.value, MavSeverity.ALERT.value, MavSeverity.CRITICAL.value, MavSeverity.ERROR.value -> NotificationType.ERROR
                         MavSeverity.WARNING.value -> NotificationType.WARNING
@@ -2610,6 +2626,8 @@ class MavlinkTelemetryRepository(
 
     suspend fun closeConnection() {
         try {
+            // Stop fence monitoring to prevent stale state from old connection
+            stopFenceMonitoring()
             // Mark this as an intentional disconnect to prevent auto-reconnect
             intentionalDisconnect = true
             // Attempt to close the TCP connection gracefully
@@ -3620,13 +3638,19 @@ class MavlinkTelemetryRepository(
         return zones
     }
 
+    // Job reference for fence monitoring coroutine - allows cancellation on stop/reconnect
+    private var fenceMonitoringJob: kotlinx.coroutines.Job? = null
+
     /**
      * Start monitoring fence status from flight controller.
      * This monitors SYS_STATUS for fence breach flags.
      * Should be called when connection is established.
      */
     fun startFenceMonitoring() {
-        AppScope.launch {
+        // Cancel any previous monitoring coroutine to prevent stale state
+        stopFenceMonitoring()
+
+        fenceMonitoringJob = AppScope.launch {
             // Monitor SYS_STATUS for fence breach flags
             mavFrame
                 .filter { state.value.fcuDetected && it.systemId == fcuSystemId }
@@ -3638,6 +3662,19 @@ class MavlinkTelemetryRepository(
                     val fenceHealthy = (sysStatus.onboardControlSensorsHealth.value and 0x100u) != 0u
                     val fenceEnabled = (sysStatus.onboardControlSensorsEnabled.value and 0x100u) != 0u
                     val fenceBreached = fenceEnabled && !fenceHealthy
+
+                    // IMPORTANT: Only report breach if GCS geofence is actually enabled.
+                    // The FC may have stale fence data from a previous session.
+                    // If geofence is disabled in GCS, ignore FC fence status to prevent
+                    // false "approaching polygon fence" warnings and arm blocks.
+                    val gcsGeofenceEnabled = sharedViewModel.geofenceEnabled.value
+                    if (!gcsGeofenceEnabled) {
+                        // GCS says geofence is off - ensure we report clean state
+                        if (_fenceStatus.value.enabled || _fenceStatus.value.breached) {
+                            _fenceStatus.value = FenceStatus()
+                        }
+                        return@collect
+                    }
 
                     val previousStatus = _fenceStatus.value
 
@@ -3661,6 +3698,16 @@ class MavlinkTelemetryRepository(
                     }
                 }
         }
+    }
+
+    /**
+     * Stop fence monitoring coroutine and reset fence status.
+     * Called on disconnection or when geofence is disabled.
+     */
+    fun stopFenceMonitoring() {
+        fenceMonitoringJob?.cancel()
+        fenceMonitoringJob = null
+        _fenceStatus.value = FenceStatus()
     }
 
     /**

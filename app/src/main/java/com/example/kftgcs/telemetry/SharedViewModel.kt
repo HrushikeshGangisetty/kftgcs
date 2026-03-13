@@ -253,43 +253,32 @@ class SharedViewModel : ViewModel() {
     fun clearGeofence() {
         LogUtils.i("SharedVM", "🔥 Clearing geofence from UI and FC")
 
-        // STEP 1: Disable and clear geofence on the Flight Controller
-        viewModelScope.launch {
-            try {
-                // Use the new clearGeofenceFromFC function
-                val cleared = repo?.clearGeofenceFromFC() ?: false
-                if (cleared) {
-                    LogUtils.i("Geofence", "✅ Geofence cleared from FC")
-                    addNotification(
-                        Notification(
-                            message = "Geofence cleared from Flight Controller",
-                            type = NotificationType.INFO
-                        )
-                    )
-                } else {
-                    // Fallback: just disable the fence
-                    repo?.enableFence(false)
-                    LogUtils.i("Geofence", "✅ Geofence disabled on FC")
-                }
-            } catch (e: Exception) {
-                LogUtils.e("Geofence", "❌ Failed to clear geofence from FC", e)
-                addNotification(
-                    Notification(
-                        message = "Failed to clear geofence from FC: ${e.message}",
-                        type = NotificationType.ERROR
-                    )
-                )
-            }
-        }
-
-        // STEP 2: Clear UI state
+        // STEP 1: Immediately clear ALL local state FIRST
+        // This prevents stale fence state from causing false warnings or arm blocks
+        stopFenceStatusMonitoring()
         _geofenceEnabled.value = false
         _geofencePolygon.value = emptyList()
         _fenceConfiguration.value = null
         _homePosition.value = null
-
-        // STEP 3: Reset geofence warning/violation states
         resetGeofenceState()
+
+        // STEP 2: Then attempt to clear geofence on FC (best effort, async)
+        viewModelScope.launch {
+            try {
+                val cleared = repo?.clearGeofenceFromFC() ?: false
+                if (cleared) {
+                    LogUtils.i("Geofence", "✅ Geofence cleared from FC")
+                } else {
+                    // Fallback: just disable the fence parameter
+                    repo?.enableFence(false)
+                    LogUtils.i("Geofence", "✅ Geofence disabled on FC (fallback)")
+                }
+            } catch (e: Exception) {
+                LogUtils.e("Geofence", "❌ Failed to clear geofence from FC", e)
+                // Best-effort fallback
+                try { repo?.enableFence(false) } catch (_: Exception) {}
+            }
+        }
 
         LogUtils.i("SharedVM", "✅ Geofence cleared from UI and FC")
     }
@@ -1319,6 +1308,11 @@ class SharedViewModel : ViewModel() {
             // This will call uploadGeofenceToFC which uses the new Mission Planner approach
             updateGeofencePolygon()
 
+            // Restart fence status monitoring with current repo
+            if (repo != null) {
+                startFenceStatusMonitoring()
+            }
+
             LogUtils.i("Geofence", "✓ Geofence ENABLED - uploading to FC")
             addNotification(
                 Notification(
@@ -1327,29 +1321,48 @@ class SharedViewModel : ViewModel() {
                 )
             )
         } else {
-            // Disable geofence on FC and reset ALL state
-            viewModelScope.launch {
-                try {
-                    // Use the new clearGeofenceFromFC function
-                    val cleared = repo?.clearGeofenceFromFC() ?: false
-                    if (cleared) {
-                        LogUtils.i("Geofence", "✅ Geofence cleared from FC")
-                    } else {
-                        // Fallback: just disable the fence
-                        repo?.enableFence(false)
-                        LogUtils.i("Geofence", "✅ Geofence disabled on FC")
-                    }
-                } catch (e: Exception) {
-                    LogUtils.e("Geofence", "❌ Failed to disable geofence on FC", e)
-                }
-            }
-
-            // Reset ALL geofence state
+            // IMMEDIATELY reset ALL local geofence state FIRST
+            // This prevents stale state from causing false warnings or arm blocks
+            // even if the FC communication below fails
+            stopFenceStatusMonitoring()
             resetGeofenceState()
             _geofencePolygon.value = emptyList()
             _fenceConfiguration.value = null
             _homePosition.value = null
-            LogUtils.i("Geofence", "Geofence DISABLED - all state reset")
+            LogUtils.i("Geofence", "Geofence DISABLED - all local state reset")
+
+            // Then attempt to disable/clear geofence on FC (best effort)
+            viewModelScope.launch {
+                try {
+                    // Try clearing fence data from FC completely
+                    val cleared = repo?.clearGeofenceFromFC() ?: false
+                    if (cleared) {
+                        LogUtils.i("Geofence", "✅ Geofence cleared from FC")
+                    } else {
+                        // Fallback 1: just disable the fence parameter
+                        LogUtils.w("Geofence", "⚠️ clearGeofenceFromFC failed, trying enableFence(false)")
+                        val disabled = repo?.enableFence(false) ?: false
+                        if (disabled) {
+                            LogUtils.i("Geofence", "✅ Geofence disabled on FC via FENCE_ENABLE=0")
+                        } else {
+                            LogUtils.e("Geofence", "❌ Failed to disable fence on FC - fence may remain active on FC!")
+                            addNotification(
+                                Notification(
+                                    message = "⚠️ Could not disable fence on FC. Power-cycle FC to clear.",
+                                    type = NotificationType.WARNING
+                                )
+                            )
+                        }
+                    }
+                } catch (e: Exception) {
+                    LogUtils.e("Geofence", "❌ Exception disabling geofence on FC", e)
+                    // Best-effort fallback: try enableFence(false) one more time
+                    try {
+                        repo?.enableFence(false)
+                    } catch (_: Exception) {}
+                }
+            }
+
             addNotification(
                 Notification(
                     message = "Geofence disabled",
@@ -3750,16 +3763,26 @@ class SharedViewModel : ViewModel() {
                 ttsManager?.announceConnectionStatus(connected)
                 LogUtils.d("SharedVM", "Connection status changed: ${if (connected) "Connected" else "Disconnected"}")
 
-                // Start fence monitoring when connected (repo will be available)
                 if (connected && repo != null) {
+                    // Start fence monitoring when connected (repo will be available)
                     startFenceStatusMonitoring()
+                } else if (!connected) {
+                    // Stop fence monitoring on disconnect to prevent stale state
+                    stopFenceStatusMonitoring()
+                    // Reset all geofence warning/violation states so stale fence
+                    // data from previous session doesn't block arming on reconnect
+                    _geofenceViolationDetected.value = false
+                    _geofenceWarningTriggered.value = false
+                    geofenceTriggeringModeChange = false
+                    _localFenceStatus.value = FenceStatus()
+                    LogUtils.i("Geofence", "Connection lost - fence monitoring stopped, fence state reset")
                 }
             }
         }
     }
 
-    // Flag to prevent multiple fence monitoring jobs
-    private var fenceMonitoringStarted = false
+    // Job reference for fence status monitoring - allows cancellation on reconnect/disable
+    private var fenceMonitoringJob: Job? = null
 
     /**
      * Monitor fence status from flight controller.
@@ -3767,12 +3790,25 @@ class SharedViewModel : ViewModel() {
      * GCS just monitors and notifies user.
      */
     private fun startFenceStatusMonitoring() {
-        if (fenceMonitoringStarted) return
-        fenceMonitoringStarted = true
+        // Cancel any previous monitoring job (e.g. from old repo on reconnect)
+        stopFenceStatusMonitoring()
 
-        viewModelScope.launch {
+        fenceMonitoringJob = viewModelScope.launch {
             // Collect fence status updates from repository
             repo?.fenceStatus?.collect { status ->
+                // GUARD: Only process fence status if GCS geofence is enabled.
+                // Prevents stale FC fence data from causing false warnings
+                // like "approaching polygon fence" when geofence is off.
+                if (!_geofenceEnabled.value) {
+                    // Geofence is off in GCS - ensure clean state
+                    if (_geofenceViolationDetected.value || _geofenceWarningTriggered.value) {
+                        _geofenceViolationDetected.value = false
+                        _geofenceWarningTriggered.value = false
+                        geofenceTriggeringModeChange = false
+                    }
+                    return@collect
+                }
+
                 // Update backward-compatible violation state
                 _geofenceViolationDetected.value = status.breached
 
@@ -3802,6 +3838,15 @@ class SharedViewModel : ViewModel() {
                 }
             }
         }
+    }
+
+    /**
+     * Stop fence status monitoring and reset all fence-related state.
+     * Called on disconnect, reconnect, or when geofence is disabled.
+     */
+    private fun stopFenceStatusMonitoring() {
+        fenceMonitoringJob?.cancel()
+        fenceMonitoringJob = null
     }
 
     /**
@@ -4027,6 +4072,12 @@ class SharedViewModel : ViewModel() {
      * Enable/disable geofence on FC
      */
     fun setFenceEnabled(enabled: Boolean) {
+        if (!enabled) {
+            // Reset local state immediately when disabling
+            stopFenceStatusMonitoring()
+            resetGeofenceState()
+        }
+
         viewModelScope.launch {
             val success = repo?.enableFence(enabled) ?: false
 
@@ -4036,6 +4087,11 @@ class SharedViewModel : ViewModel() {
                 addNotification(Notification(message, NotificationType.INFO))
                 speak(if (enabled) "Geofence enabled" else "Geofence disabled")
                 LogUtils.i("Geofence", message)
+
+                // Restart monitoring if enabling, or ensure stopped if disabling
+                if (enabled && repo != null) {
+                    startFenceStatusMonitoring()
+                }
             } else {
                 addNotification(
                     Notification(
@@ -4051,17 +4107,19 @@ class SharedViewModel : ViewModel() {
      * Clear geofence from FC and UI
      */
     fun clearGeofenceFromFC() {
+        // Immediately reset all local state to prevent stale warnings
+        stopFenceStatusMonitoring()
+        _fenceConfiguration.value = null
+        _geofenceEnabled.value = false
+        _geofencePolygon.value = emptyList()
+        _homePosition.value = null
+        resetGeofenceState()
+
         viewModelScope.launch {
             try {
                 val success = repo?.clearGeofenceFromFC() ?: false
 
                 if (success) {
-                    _fenceConfiguration.value = null
-                    _geofenceEnabled.value = false
-                    _geofencePolygon.value = emptyList()
-                    _geofenceViolationDetected.value = false
-                    _geofenceWarningTriggered.value = false
-
                     addNotification(Notification(
                         message = "✅ Geofence cleared from FC",
                         type = NotificationType.SUCCESS
@@ -4069,30 +4127,43 @@ class SharedViewModel : ViewModel() {
                     speak("Geofence cleared")
                     LogUtils.i("Geofence", "✅ Geofence cleared from FC and UI")
                 } else {
+                    // Fallback: try to at least disable the fence parameter
+                    repo?.enableFence(false)
                     addNotification(Notification(
-                        message = "❌ Failed to clear geofence from FC",
-                        type = NotificationType.ERROR
+                        message = "⚠️ Geofence disabled (clear may be incomplete)",
+                        type = NotificationType.WARNING
                     ))
                 }
 
             } catch (e: Exception) {
                 LogUtils.e("Geofence", "Error clearing geofence: ${e.message}")
+                try { repo?.enableFence(false) } catch (_: Exception) {}
             }
         }
     }
 
     /**
-     * Reset geofence state - call this when starting a new mission
+     * Reset geofence state - call this when starting a new mission or disabling geofence.
+     * Clears all warning/violation flags AND internal fence status to prevent
+     * stale state from blocking arming or showing false warnings.
      */
     fun resetGeofenceState() {
         _geofenceViolationDetected.value = false
         _geofenceWarningTriggered.value = false
         geofenceTriggeringModeChange = false
-        LogUtils.i("Geofence", "Geofence state reset")
+        _localFenceStatus.value = FenceStatus()
+        // Cancel any pending fence uploads
+        fenceUploadJob?.cancel()
+        fenceUploadJob = null
+        pendingFenceUpload = null
+        // Also reset fence status in repo if available
+        repo?.stopFenceMonitoring()
+        LogUtils.i("Geofence", "Geofence state fully reset (warnings, violations, local fence status, pending uploads)")
     }
 
     override fun onCleared() {
         super.onCleared()
+        stopFenceStatusMonitoring()
         ttsManager?.shutdown()
         LogUtils.d("SharedVM", "ViewModel cleared, TTS shutdown")
     }
