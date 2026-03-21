@@ -1,5 +1,13 @@
 package com.example.kftgcs.telemetry
 
+import android.content.Context
+import com.example.kftgcs.database.MissionTemplateDatabase
+import com.example.kftgcs.database.offline.OfflineMessageDao
+import com.example.kftgcs.database.offline.OfflineMessageEntity
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.launch
 import okhttp3.*
 import okhttp3.CertificatePinner
 import org.json.JSONObject
@@ -38,6 +46,20 @@ class WebSocketManager {
         fun getInstance(): WebSocketManager {
             return INSTANCE ?: synchronized(this) {
                 INSTANCE ?: WebSocketManager().also { INSTANCE = it }
+            }
+        }
+
+        /**
+         * Initialize with application context to enable offline queue support.
+         * Call this once from Application.onCreate() or before the first connect().
+         */
+        fun initWithContext(context: Context) {
+            getInstance().apply {
+                if (offlineMessageDao == null) {
+                    offlineMessageDao = MissionTemplateDatabase
+                        .getDatabase(context.applicationContext)
+                        .offlineMessageDao()
+                }
             }
         }
 
@@ -96,6 +118,10 @@ class WebSocketManager {
     }
 
     private val TAG = "WebSocketManager"
+
+    // Offline queue - null until initWithContext() is called
+    private var offlineMessageDao: OfflineMessageDao? = null
+    private val ioScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
     // Fallback timeout handler (in case backend doesn't send session_ack)
     private val sessionAckTimeout = 3000L  // 3 seconds timeout
@@ -362,11 +388,14 @@ class WebSocketManager {
                         missionId = msg.getString("mission_id")
                         android.util.Log.i("WebSocketManager", "✅ Received mission_created: missionId=$missionId")
                         readyForTelemetry = true
-                        // 🔥 Reset reconnect attempts on successful mission creation
+                        // Reset reconnect attempts on successful mission creation
                         reconnectAttempts = 0
 
-                        // 🔥 START DELAYED DRONE UID MONITORING
+                        // START DELAYED DRONE UID MONITORING
                         startDelayedDroneUidMonitoring()
+
+                        // Flush any messages that were queued while offline
+                        flushOfflineQueue()
                     }
                     "error" -> {
                         android.util.Log.e("WebSocketManager", "❌ Received error from backend: $text")
@@ -544,26 +573,22 @@ class WebSocketManager {
      * @param status One of MISSION_STATUS_* constants
      */
     fun sendMissionStatus(status: Int) {
-        // Safety checks
-        if (!isConnected || missionId == null) {
-            return
-        }
+        val payload = JSONObject().apply {
+            put("type", "mission_status")
+            put("mission_id", missionId)
+            put("status", status)
+            put("drone_uid", resolveDroneUid())
+        }.toString()
 
-        if (!::webSocket.isInitialized) {
+        if (!isConnected || !::webSocket.isInitialized || missionId == null) {
+            enqueueOffline("mission_status", payload)
             return
         }
 
         try {
-            val msg = JSONObject().apply {
-                put("type", "mission_status")
-                put("mission_id", missionId)
-                put("status", status)
-                put("drone_uid", resolveDroneUid())
-            }
-
-            webSocket.send(msg.toString())
+            webSocket.send(payload)
         } catch (e: Exception) {
-            // Ignore
+            enqueueOffline("mission_status", payload)
         }
     }
 
@@ -571,33 +596,29 @@ class WebSocketManager {
      * Send mission event to backend
      */
     fun sendMissionEvent(eventType: String, eventStatus: String, description: String) {
-        // Safety checks
-        if (!isConnected) {
-            return
+        val payload = JSONObject().apply {
+            put("type", "mission_event")
+            put("event_type", eventType)
+            put("event_status", eventStatus)
+            put("description", description)
+            put("drone_uid", resolveDroneUid())
+            missionId?.let { put("mission_id", it) }
+        }.toString()
+
+        // Always increment alerts count regardless of connectivity
+        if (eventStatus in listOf("WARNING", "ERROR", "CRITICAL")) {
+            missionAlertsCount++
         }
 
-        if (!::webSocket.isInitialized) {
+        if (!isConnected || !::webSocket.isInitialized) {
+            enqueueOffline("mission_event", payload)
             return
         }
 
         try {
-            val msg = JSONObject().apply {
-                put("type", "mission_event")
-                put("event_type", eventType)
-                put("event_status", eventStatus)
-                put("description", description)
-                put("drone_uid", resolveDroneUid())
-                missionId?.let { put("mission_id", it) }
-            }
-
-            webSocket.send(msg.toString())
-
-            // 🔥 Auto-increment alerts count for WARNING/ERROR/CRITICAL events
-            if (eventStatus in listOf("WARNING", "ERROR", "CRITICAL")) {
-                missionAlertsCount++
-            }
+            webSocket.send(payload)
         } catch (e: Exception) {
-            // Ignore
+            enqueueOffline("mission_event", payload)
         }
     }
 
@@ -618,41 +639,89 @@ class WebSocketManager {
         cropType: String = "",
         totalSprayedAcres: Double = 0.0
     ) {
-        if (!isConnected || missionId == null) {
-            return
-        }
+        val payload = JSONObject().apply {
+            put("type", "mission_summary")
+            put("mission_id", missionId)
+            put("drone_uid", resolveDroneUid())
+            put("total_acres", totalAcres)
+            put("total_spray_used", totalSprayUsed)
+            put("flying_time_minutes", flyingTimeMinutes)
+            put("average_speed", averageSpeed)
+            put("battery_start", batteryStart)
+            put("battery_end", batteryEnd)
+            put("alerts_count", alertsCount)
+            put("status", status)
+            put("project_name", projectName)
+            put("plot_name", plotName)
+            put("crop_type", cropType)
+            put("total_sprayed_acres", totalSprayedAcres)
+        }.toString()
 
-        if (!::webSocket.isInitialized) {
+        if (!isConnected || !::webSocket.isInitialized || missionId == null) {
+            enqueueOffline("mission_summary", payload)
             return
         }
 
         try {
-            val msg = JSONObject().apply {
-                put("type", "mission_summary")
-
-                put("mission_id", missionId)
-                put("drone_uid", resolveDroneUid())
-
-                put("total_acres", totalAcres)
-                put("total_spray_used", totalSprayUsed)
-                put("flying_time_minutes", flyingTimeMinutes)
-                put("average_speed", averageSpeed)
-
-                put("battery_start", batteryStart)
-                put("battery_end", batteryEnd)
-
-                put("alerts_count", alertsCount)
-                put("status", status)
-
-                put("project_name", projectName)
-                put("plot_name", plotName)
-                put("crop_type", cropType)
-                put("total_sprayed_acres", totalSprayedAcres)
-            }
-
-            webSocket.send(msg.toString())
+            webSocket.send(payload)
         } catch (e: Exception) {
-            // Ignore
+            enqueueOffline("mission_summary", payload)
+        }
+    }
+
+    /**
+     * Persist a message to the local offline queue so it can be sent when connectivity returns.
+     */
+    private fun enqueueOffline(messageType: String, payload: String) {
+        val dao = offlineMessageDao ?: run {
+            android.util.Log.w(TAG, "offlineMessageDao not initialized — message dropped: $messageType")
+            return
+        }
+        ioScope.launch {
+            try {
+                dao.insert(OfflineMessageEntity(messageType = messageType, payload = payload))
+                android.util.Log.i(TAG, "Queued offline message: $messageType (queue size: ${dao.count()})")
+            } catch (e: Exception) {
+                android.util.Log.e(TAG, "Failed to queue offline message: ${e.message}")
+            }
+        }
+    }
+
+    /**
+     * Send all queued offline messages in order, updating mission_id to the current session.
+     * Called automatically after mission_created is received.
+     */
+    private fun flushOfflineQueue() {
+        val dao = offlineMessageDao ?: return
+        val currentMissionId = missionId ?: return
+
+        ioScope.launch {
+            try {
+                val pending = dao.getAllPending()
+                if (pending.isEmpty()) return@launch
+
+                android.util.Log.i(TAG, "Flushing ${pending.size} offline message(s)...")
+
+                for (msg in pending) {
+                    if (!isConnected || !::webSocket.isInitialized) {
+                        android.util.Log.w(TAG, "Connection lost during flush — stopping at message ${msg.id}")
+                        break
+                    }
+                    try {
+                        // Rewrite mission_id to the current live session
+                        val json = JSONObject(msg.payload)
+                        json.put("mission_id", currentMissionId)
+                        webSocket.send(json.toString())
+                        dao.deleteById(msg.id)
+                        android.util.Log.i(TAG, "Flushed offline message: ${msg.messageType} (id=${msg.id})")
+                    } catch (e: Exception) {
+                        android.util.Log.e(TAG, "Failed to flush message id=${msg.id}: ${e.message}")
+                        break  // Stop on error; retry on next reconnect
+                    }
+                }
+            } catch (e: Exception) {
+                android.util.Log.e(TAG, "Offline queue flush error: ${e.message}")
+            }
         }
     }
 

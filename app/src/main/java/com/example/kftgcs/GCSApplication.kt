@@ -3,6 +3,7 @@ package com.example.kftgcs
 import android.app.Application
 import com.example.kftgcs.api.SessionManager
 import com.example.kftgcs.security.SecurePinManager
+import com.example.kftgcs.telemetry.WebSocketManager
 import com.google.android.gms.maps.MapsInitializer
 import timber.log.Timber
 
@@ -66,6 +67,9 @@ class GCSApplication : Application() {
         } catch (e: Exception) {
             Timber.e(e, "Failed to pre-initialize Maps SDK")
         }
+
+        // Initialize offline queue support in WebSocketManager
+        WebSocketManager.initWithContext(this)
 
         // Migrate any plaintext data to secure encrypted storage (one-time operation)
         migrateToSecureStorage()

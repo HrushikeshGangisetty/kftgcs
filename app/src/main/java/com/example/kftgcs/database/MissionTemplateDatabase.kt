@@ -7,6 +7,8 @@ import androidx.room.TypeConverters
 import androidx.room.migration.Migration
 import androidx.sqlite.db.SupportSQLiteDatabase
 import android.content.Context
+import com.example.kftgcs.database.offline.OfflineMessageDao
+import com.example.kftgcs.database.offline.OfflineMessageEntity
 import com.example.kftgcs.database.tlog.*
 
 /**
@@ -18,9 +20,10 @@ import com.example.kftgcs.database.tlog.*
         FlightEntity::class,
         TelemetryEntity::class,
         EventEntity::class,
-        MapDataEntity::class
+        MapDataEntity::class,
+        OfflineMessageEntity::class
     ],
-    version = 7,
+    version = 8,
     exportSchema = false
 )
 @TypeConverters(MissionTemplateTypeConverters::class, TlogTypeConverters::class)
@@ -31,6 +34,7 @@ abstract class MissionTemplateDatabase : RoomDatabase() {
     abstract fun telemetryDao(): TelemetryDao
     abstract fun eventDao(): EventDao
     abstract fun mapDataDao(): MapDataDao
+    abstract fun offlineMessageDao(): OfflineMessageDao
 
     companion object {
         @Volatile
@@ -57,6 +61,20 @@ abstract class MissionTemplateDatabase : RoomDatabase() {
             }
         }
 
+        // Migration from version 7 to 8 (adds offline_messages table for offline sync)
+        private val MIGRATION_7_8 = object : Migration(7, 8) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    """CREATE TABLE IF NOT EXISTS offline_messages (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+                        messageType TEXT NOT NULL,
+                        payload TEXT NOT NULL,
+                        createdAt INTEGER NOT NULL
+                    )"""
+                )
+            }
+        }
+
         // Direct migration from version 4 to 6
         private val MIGRATION_4_6 = object : Migration(4, 6) {
             override fun migrate(db: SupportSQLiteDatabase) {
@@ -71,7 +89,7 @@ abstract class MissionTemplateDatabase : RoomDatabase() {
                     MissionTemplateDatabase::class.java,
                     "mission_template_database"
                 )
-                .addMigrations(MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7, MIGRATION_4_6)
+                .addMigrations(MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7, MIGRATION_4_6, MIGRATION_7_8)
                 .fallbackToDestructiveMigration()  // Fallback if migration fails
                 .build()
                 INSTANCE = instance
