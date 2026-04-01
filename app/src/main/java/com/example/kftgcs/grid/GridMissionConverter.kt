@@ -32,7 +32,8 @@ object GridMissionConverter {
         initialYaw: Float = 0f,
         autoSpray: Boolean = false,
         fcuSystemId: UByte = 0u,
-        fcuComponentId: UByte = 0u
+        fcuComponentId: UByte = 0u,
+        completionAction: String = "RTL"
     ): List<MissionItemInt> {
 
         val missionItems = mutableListOf<MissionItemInt>()
@@ -307,22 +308,25 @@ object GridMissionConverter {
             sequenceNumber++
         }
 
-        // Add RTL (Return to Launch) at the end
-        // ArduPilot MAV_CMD_NAV_RETURN_TO_LAUNCH (20):
-        //   All params unused - vehicle will return to launch location at RTL_ALT
+        // Add completion action at the end (configurable: RTL, LAND, or LOITER)
+        val completionCommand = when (completionAction) {
+            "LAND" -> MavEnumValue.of(MavCmd.NAV_LAND)
+            "LOITER" -> MavEnumValue.of(MavCmd.NAV_LOITER_UNLIM)
+            else -> MavEnumValue.of(MavCmd.NAV_RETURN_TO_LAUNCH)
+        }
         missionItems.add(
             MissionItemInt(
                 targetSystem = fcuSystemId,
                 targetComponent = fcuComponentId,
                 seq = sequenceNumber.toUShort(),
                 frame = MavEnumValue.of(MavFrame.GLOBAL_RELATIVE_ALT_INT),
-                command = MavEnumValue.of(MavCmd.NAV_RETURN_TO_LAUNCH),
+                command = completionCommand,
                 current = 0u,
                 autocontinue = 1u,
-                param1 = 0f,  // Unused
-                param2 = 0f,  // Unused
-                param3 = 0f,  // Unused
-                param4 = 0f,  // Unused
+                param1 = 0f,
+                param2 = 0f,
+                param3 = 0f,
+                param4 = 0f,
                 x = 0,
                 y = 0,
                 z = 0f

@@ -274,6 +274,7 @@ fun ConnectionPage(navController: NavController, viewModel: SharedViewModel) {
                 }
             }
 
+
             if (errorMessage.isNotEmpty() && !showPopup) {
                 Spacer(modifier = Modifier.height(10.dp))
                 Card(

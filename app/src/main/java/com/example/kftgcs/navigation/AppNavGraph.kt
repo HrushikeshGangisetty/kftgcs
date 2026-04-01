@@ -44,6 +44,7 @@ import com.example.kftgcs.uimain.SprayCalibrationScreen
 import com.example.kftgcs.uimain.LevelSensorCalibrationScreen
 import com.example.kftgcs.uimain.FlowSensorCalibrationScreen
 import com.example.kftgcs.uimain.AboutAppScreen
+import com.example.kftgcs.uimain.OptionsScreen
 import com.example.kftgcs.ui.components.PlotTemplatesScreen
 import com.example.kftgcs.ui.logs.LogsScreen
 import com.example.kftgcs.ui.LanguageSelectionPage
@@ -81,6 +82,7 @@ sealed class Screen(val route: String) {
     object SpraySystemTest : Screen("spray_system_test")
     object Security : Screen("security")
     object TermsAndConditions : Screen("terms_and_conditions")
+    object Options : Screen("options")
 }
 
 @Composable
@@ -281,6 +283,10 @@ fun AppNavGraph(navController: NavHostController) {
 
             // TopNavBar removed - show settings directly
             SettingsScreen(navController = navController)
+        }
+
+        composable(Screen.Options.route) {
+            OptionsScreen(navController = navController, sharedViewModel = sharedViewModel)
         }
 
         composable(Screen.Security.route) {

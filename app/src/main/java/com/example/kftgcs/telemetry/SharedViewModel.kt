@@ -569,7 +569,7 @@ class SharedViewModel : ViewModel() {
     private val _connectionType = mutableStateOf(ConnectionType.TCP)
     val connectionType: State<ConnectionType> = _connectionType
 
-    private val _ipAddress = mutableStateOf("kftgcs.com")
+    private val _ipAddress = mutableStateOf("10.0.2.2")
     val ipAddress: State<String> = _ipAddress
 
     private val _port = mutableStateOf("5762")
@@ -885,6 +885,68 @@ class SharedViewModel : ViewModel() {
     }
 
     /**
+     * Read a parameter value from the autopilot by name.
+     * Subscribes to the paramValue flow FIRST, then sends PARAM_REQUEST_READ,
+     * so the response is never missed due to race conditions.
+     * Returns the float value or null if timed out / not connected.
+     */
+    suspend fun readParameter(paramId: String, timeoutMs: Long = 3000L): Float? {
+        repo?.let { repository ->
+            try {
+                // Deferred result holder
+                var result: Float? = null
+
+                // Step 1: Start collecting BEFORE sending the request
+                val collectJob = viewModelScope.launch {
+                    paramValue.collect { pv ->
+                        val name = pv.paramId.trim().replace("\u0000", "")
+                        if (name == paramId) {
+                            result = pv.paramValue
+                        }
+                    }
+                }
+
+                // Small delay to ensure collector is active
+                delay(50)
+
+                // Step 2: Send the request
+                val paramRequestRead = com.divpundir.mavlink.definitions.common.ParamRequestRead(
+                    targetSystem = repository.fcuSystemId,
+                    targetComponent = repository.fcuComponentId,
+                    paramId = paramId,
+                    paramIndex = -1
+                )
+                repository.connection.trySendUnsignedV2(
+                    repository.gcsSystemId,
+                    repository.gcsComponentId,
+                    paramRequestRead
+                )
+                LogUtils.d("OptionsVM", "📤 Sent PARAM_REQUEST_READ for: $paramId")
+
+                // Step 3: Wait for the response with timeout
+                val startTime = System.currentTimeMillis()
+                while (result == null && System.currentTimeMillis() - startTime < timeoutMs) {
+                    delay(50)
+                }
+
+                collectJob.cancel()
+
+                if (result != null) {
+                    LogUtils.d("OptionsVM", "📥 Received $paramId = $result")
+                    return result
+                } else {
+                    LogUtils.e("OptionsVM", "⏱ Timeout reading $paramId after ${timeoutMs}ms")
+                }
+            } catch (e: Exception) {
+                LogUtils.e("OptionsVM", "Failed to read parameter $paramId", e)
+            }
+        } ?: run {
+            LogUtils.e("OptionsVM", "Cannot read $paramId — not connected to drone")
+        }
+        return null
+    }
+
+    /**
      * Set a parameter value on the autopilot.
      * Returns the PARAM_VALUE response if successful within timeout.
      */
@@ -1004,7 +1066,7 @@ class SharedViewModel : ViewModel() {
                     // Preserve SharedViewModel-managed fields (pause state, mission active state) while updating from repository
                     _telemetryState.update { currentState ->
                         // DEBUG LOG: Track state synchronization
-                        LogUtils.i("DEBUG_STATE", "Before sync - repoLastAuto: ${repoState.lastAutoWaypoint}, currentLastAuto: ${currentState.lastAutoWaypoint}, repoCurrent: ${repoState.currentWaypoint}, currentCurrent: ${currentState.currentWaypoint}")
+//                        LogUtils.i("DEBUG_STATE", "Before sync - repoLastAuto: ${repoState.lastAutoWaypoint}, currentLastAuto: ${currentState.lastAutoWaypoint}, repoCurrent: ${repoState.currentWaypoint}, currentCurrent: ${currentState.currentWaypoint}")
 
                         // IMPORTANT: Preserve isMissionActive if it's currently true (managed by UnifiedFlightTracker)
                         // This ensures manual missions aren't overwritten by TelemetryRepository's AUTO-only logic
@@ -3310,6 +3372,9 @@ class SharedViewModel : ViewModel() {
      */
     fun disableSprayOnModeChange() {
         LogUtils.i("SprayControl", "🚿 Disabling spray due to mode change from Auto")
+
+        // Reset AUTO mode spray detection to prevent false "Tank Empty" alerts
+        repo?.resetAutoModeSprayDetection()
 
         // Always send DO_SPRAYER(0) to FC to ensure sprayer is OFF
         // This is critical because mission-embedded DO_SPRAYER commands work independently of app state

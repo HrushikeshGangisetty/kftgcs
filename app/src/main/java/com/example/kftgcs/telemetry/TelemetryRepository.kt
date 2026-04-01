@@ -158,6 +158,19 @@ class MavlinkTelemetryRepository(
     private var autoModeSprayDetected = false  // TRUE when flow > 0 detected during current AUTO mission
     private var lastPositiveFlowTime: Long? = null  // Timestamp when flow > 0 was last detected
 
+    /**
+     * Reset all AUTO mode spray detection state.
+     * Called when spray is explicitly disabled (e.g., mode change from Auto)
+     * to prevent false "Tank Empty" alerts.
+     */
+    fun resetAutoModeSprayDetection() {
+        autoModeSprayDetected = false
+        lastPositiveFlowTime = null
+        pumpTurnedOnTime = null
+        zeroFlowStartTime = null
+        tankEmptyNotificationShown = false
+    }
+
     // MAG_CAL_PROGRESS flow for compass calibration progress
     private val _magCalProgress = MutableSharedFlow<MagCalProgress>(replay = 0, extraBufferCapacity = 10)
     val magCalProgress: SharedFlow<MagCalProgress> = _magCalProgress.asSharedFlow()
@@ -556,6 +569,7 @@ class MavlinkTelemetryRepository(
                 .filterIsInstance<BatteryStatus>()
                 .collect { b ->
                     // Log ALL battery status messages first for debugging
+                    LogUtils.d("Flow", "BATT MSG: id=${b.id}, currentBattery=${b.currentBattery}, currentConsumed=${b.currentConsumed}")
 
                     // Main battery (id=0)
                     if (b.id.toInt() == 0) {
@@ -565,11 +579,15 @@ class MavlinkTelemetryRepository(
                     // Flow sensor (BATT2 - id=1)
                     else if (b.id.toInt() == 1) {
 
+                        // ── Flow debug logging: raw BATT2 MAVLink values ──
+                        LogUtils.d("Flow", "BATT2 RAW: id=${b.id}, currentBattery=${b.currentBattery}, currentConsumed=${b.currentConsumed}, batteryRemaining=${b.batteryRemaining}, voltages=${b.voltages.toList()}")
+
                         // Check for spray enabled but no flow detected
                         val currentSprayEnabled = state.value.sprayTelemetry.sprayEnabled
                         val currentRc7 = state.value.sprayTelemetry.rc7Value
 
                         if (currentSprayEnabled && b.currentBattery == 0.toShort()) {
+                            LogUtils.w("Flow", "WARN: Spray enabled (RC7=$currentRc7) but currentBattery=0 (no flow). Check BATT2_MONITOR=${state.value.sprayTelemetry.batt2MonitorType}, BATT2_CURR_PIN=${state.value.sprayTelemetry.batt2CurrPin}, BATT2_AMP_PERVLT=${state.value.sprayTelemetry.batt2AmpPerVolt}")
                         }
 
                         // â•â•â• IMPROVED: Input validation and conversion â•â•â•
@@ -599,6 +617,8 @@ class MavlinkTelemetryRepository(
                             val ratePerMin = it / 60f
                             ratePerMin
                         }
+
+                        LogUtils.d("Flow", "BATT2 CONV: flowRate(L/h)=$flowRateLiterPerHour, filtered=$filteredFlowRate, flowRate(L/min)=$flowRateLiterPerMin")
 
                         // Parse consumed volume (current_consumed in mAh = mL)
                         val consumedLiters = if (b.currentConsumed == -1) {
@@ -660,8 +680,11 @@ class MavlinkTelemetryRepository(
 
                         // sprayActive is TRUE when:
                         // - RC7 is enabled (manual), OR
-                        // - Flow is currently detected (DO_SET_SERVO/DO_SPRAYER/Sprayer active)
-                        val sprayIsActive = rc7SprayEnabled || hasFlowDetected
+                        // - Flow is currently detected, OR
+                        // - We're in AUTO mode and spray was detected (covers brief gaps in flow readings)
+                        val sprayIsActive = rc7SprayEnabled || hasFlowDetected || (isInAutoMode && autoModeSprayDetected)
+
+                        LogUtils.d("Flow", "SPRAY: rc7=$rc7SprayEnabled, flowDetected=$hasFlowDetected, autoSpray=$autoModeSprayDetected, active=$sprayIsActive, consumed=$consumedLiters, remaining=$flowRemainingPercent%, mode=$currentMode")
 
                         _state.update { state ->
                             state.copy(

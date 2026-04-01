@@ -424,16 +424,14 @@ fun GcsMap(
     }
 
     // Use sprayActive which is TRUE when either RC7 is enabled OR flow > 0 (AUTO mission spray)
-    LaunchedEffect(lat, lon, telemetryState.sprayTelemetry.sprayActive, telemetryState.sprayTelemetry.flowRateLiterPerMin) {
+    LaunchedEffect(lat, lon, telemetryState.sprayTelemetry.sprayActive) {
         if (lat != null && lon != null) {
             val pos = LatLng(lat, lon)
 
             // Determine if drone is actively spraying
-            // For AUTO missions: sprayActive is TRUE when flow > 0 even if RC7 is OFF
-            // This ensures green spray lines are drawn when spray is enabled via DO_SET_SERVO or Sprayer library
-            val sprayActive = telemetryState.sprayTelemetry.sprayActive
-            val flowRate = telemetryState.sprayTelemetry.flowRateLiterPerMin ?: 0f
-            val isSpraying = sprayActive && flowRate > 0f
+            // sprayActive is TRUE when RC7 is enabled, flow > 0, or AUTO mode spray detected
+            // This ensures green spray lines during AUTO missions even with brief flow sensor gaps
+            val isSpraying = telemetryState.sprayTelemetry.sprayActive
 
             val newPoint = DronePathPoint(pos, isSpraying)
 

@@ -455,6 +455,7 @@ class UnifiedFlightTracker(
                 // Use sprayActive which includes both RC7 and flow detection for AUTO missions
                 val isSprayActive = telemetry.sprayTelemetry.sprayActive
                 val flowRate = telemetry.sprayTelemetry.flowRateLiterPerMin ?: 0f
+                LogUtils.d("Flow", "TRACKER: sprayActive=$isSprayActive, flowRate=$flowRate L/min, consumed=${telemetry.sprayTelemetry.consumedLiters}, sprayedDist=$totalSprayedDistanceMeters m, totalDist=$totalDistanceMeters m")
                 if (isSprayActive || flowRate > 0f) {
                     totalSprayedDistanceMeters += distance
                 }
@@ -528,21 +529,27 @@ class UnifiedFlightTracker(
             return "Disarmed"
         }
 
-        // 4. Common: landed (altitude near ground + low speed)
+        // 4. AUTO-only: landed (altitude near ground + low speed)
         // IMPORTANT: Only check for landing if drone has actually taken off!
         // This prevents false landing detection immediately after arming on the ground.
+        // NOTE: In MANUAL mode, we skip the landed check to avoid showing the mission
+        // completion dialog twice (once on land and again on disarm). Manual flights
+        // should only end when the drone disarms.
         val altitude = telemetry.altitudeRelative ?: 0f
         val landingThreshold = groundLevelAltitude + LANDING_ALTITUDE_THRESHOLD
-        if (hasTakenOff && altitude <= landingThreshold && speed < MIN_SPEED_THRESHOLD) {
+        if (missionMode == MissionMode.AUTO && hasTakenOff && altitude <= landingThreshold && speed < MIN_SPEED_THRESHOLD) {
             return "Landed (altitude: ${altitude}m ≤ ${landingThreshold}m, speed: ${speed}m/s)"
         }
 
         // 5. Failsafe modes (RTL, Land)
-        // Only trigger stop after landing is confirmed
+        // Only trigger stop after landing is confirmed via disarm
+        // In MANUAL mode, wait for disarm only to avoid duplicate dialogs
         if (telemetry.mode?.equals("RTL", ignoreCase = true) == true ||
             telemetry.mode?.equals("Land", ignoreCase = true) == true) {
-            // Wait for actual landing confirmation (disarmed or very low altitude after takeoff)
-            if (!telemetry.armed || (hasTakenOff && altitude <= landingThreshold)) {
+            if (!telemetry.armed) {
+                return "Failsafe landing completed (${telemetry.mode})"
+            }
+            if (missionMode == MissionMode.AUTO && hasTakenOff && altitude <= landingThreshold) {
                 return "Failsafe landing completed (${telemetry.mode})"
             }
         }

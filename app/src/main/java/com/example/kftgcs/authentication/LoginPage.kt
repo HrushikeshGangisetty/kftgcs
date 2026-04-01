@@ -32,6 +32,7 @@ import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.graphics.Brush
 import androidx.navigation.NavController
 import com.example.kftgcs.navigation.Screen
 import com.example.kftgcs.utils.AppStrings
@@ -223,6 +224,38 @@ fun LoginPage(modifier: Modifier = Modifier, navController: NavController, authV
                         color = Color.Black,
                         fontSize = 14.sp
                     )
+                }
+
+                Spacer(modifier = Modifier.height(16.dp))
+
+                // Dev Login - bypass auth when backend is down
+                Button(
+                    onClick = {
+                        navController.navigate(Screen.Connection.route) {
+                            popUpTo(Screen.Login.route) { inclusive = true }
+                        }
+                    },
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(44.dp),
+                    colors = androidx.compose.material3.ButtonDefaults.buttonColors(
+                        containerColor = Color.Transparent
+                    ),
+                    contentPadding = PaddingValues()
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .background(
+                                Brush.horizontalGradient(
+                                    colors = listOf(Color(0xFFFF9800), Color(0xFFF57C00))
+                                ),
+                                RoundedCornerShape(12.dp)
+                            ),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Text("⚡ Dev Login (Skip Auth)", color = Color.White, fontSize = 14.sp)
+                    }
                 }
 
 

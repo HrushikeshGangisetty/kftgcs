@@ -58,6 +58,7 @@ import com.example.kftgcs.utils.KmlPolygon
 import java.util.Locale
 import com.example.kftgcs.utils.AppStrings
 import com.example.kftgcs.utils.LogUtils
+import com.example.kftgcs.viewmodel.OptionsViewModel
 
 @Suppress("UnusedMaterial3ScaffoldPaddingParameter", "UNUSED_PARAMETER")
 @Composable
@@ -1290,6 +1291,7 @@ fun PlanScreen(
                                     val currentHeading = telemetryState.heading ?: 0f
                                     val fcuSystemId = telemetryViewModel.getFcuSystemId()
                                     val fcuComponentId = telemetryViewModel.getFcuComponentId()
+                                    val completionAction = OptionsViewModel.getMissionCompletionAction(context)
                                     val builtMission = GridMissionConverter.convertToMissionItems(
                                         gridResult = processedGridResult,
                                         homePosition = homePosition,
@@ -1297,7 +1299,8 @@ fun PlanScreen(
                                         initialYaw = currentHeading,
                                         autoSpray = autoSpray,
                                         fcuSystemId = fcuSystemId,
-                                        fcuComponentId = fcuComponentId
+                                        fcuComponentId = fcuComponentId,
+                                        completionAction = completionAction
                                     )
 
                                     telemetryViewModel.uploadMission(builtMission) { success, error ->
@@ -1418,6 +1421,12 @@ fun PlanScreen(
                                     )
 
                                     // Sequence 2+: User-defined waypoints (with obstacle avoidance)
+                                    val wpCompletionAction = OptionsViewModel.getMissionCompletionAction(context)
+                                    val wpCompletionCommand = when (wpCompletionAction) {
+                                        "LAND" -> MavEnumValue.of(MavCmd.NAV_LAND)
+                                        "LOITER" -> MavEnumValue.of(MavCmd.NAV_LOITER_UNLIM)
+                                        else -> MavEnumValue.of(MavCmd.NAV_RETURN_TO_LAUNCH)
+                                    }
                                     waypointsToUpload.forEachIndexed { idx, latLng ->
                                         val seq = idx + 2  // Start from seq=2 (0=home, 1=takeoff)
                                         val isLast = idx == waypointsToUpload.lastIndex
@@ -1425,7 +1434,7 @@ fun PlanScreen(
                                             MissionItemInt(
                                                 targetSystem = fcuSystemId, targetComponent = fcuComponentId, seq = seq.toUShort(),
                                                 frame = MavEnumValue.of(MavFrame.GLOBAL_RELATIVE_ALT_INT),
-                                                command = if (isLast) MavEnumValue.of(MavCmd.NAV_LAND) else MavEnumValue.of(MavCmd.NAV_WAYPOINT),
+                                                command = if (isLast) wpCompletionCommand else MavEnumValue.of(MavCmd.NAV_WAYPOINT),
                                                 current = 0u, autocontinue = 1u,
                                                 param1 = 0f, // Loiter time (for waypoint)
                                                 param2 = 0f, param3 = 0f, param4 = 0f,

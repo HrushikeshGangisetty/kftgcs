@@ -20,6 +20,7 @@ import androidx.compose.material.icons.filled.Opacity
 import androidx.compose.material.icons.filled.Policy
 import androidx.compose.material.icons.filled.Thermostat
 import androidx.compose.material.icons.filled.Home
+import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.IconButton
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
@@ -157,6 +158,17 @@ fun SettingsScreen(navController: NavHostController) {
                     )
                     context.startActivity(intent)
                 },
+                height = buttonHeight
+            )
+
+            Spacer(modifier = Modifier.height(buttonSpacing))
+
+            // 7. Options (Failsafe Settings)
+            NumberedButton(
+                number = 7,
+                icon = Icons.Filled.Settings,
+                title = "Options",
+                onClick = { navController.navigate("options") },
                 height = buttonHeight
             )
 

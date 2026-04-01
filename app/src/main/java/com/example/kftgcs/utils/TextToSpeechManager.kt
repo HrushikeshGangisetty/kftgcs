@@ -1,7 +1,11 @@
 package com.example.kftgcs.utils
 
 import android.content.Context
+import android.os.DeadObjectException
+import android.os.Handler
+import android.os.Looper
 import android.speech.tts.TextToSpeech
+import timber.log.Timber
 import java.util.*
 
 /**
@@ -13,9 +17,12 @@ class TextToSpeechManager(private val context: Context) : TextToSpeech.OnInitLis
     private var textToSpeech: TextToSpeech? = null
     private var isReady = false
     private var currentLanguage: String = "te" // Default to Telugu
+    private var initRetryCount = 0
+    private val mainHandler = Handler(Looper.getMainLooper())
 
-    companion object {
-        private const val TAG = "TextToSpeechManager"
+    private companion object RetryConfig {
+        private const val MAX_INIT_RETRIES = 3
+        private const val RETRY_DELAY_MS = 1500L
 
         // --- Shared deduplication state so repeated TTS is suppressed across instances ---
         private val dedupeLock = Any()
@@ -39,8 +46,29 @@ class TextToSpeechManager(private val context: Context) : TextToSpeech.OnInitLis
         try {
             textToSpeech = TextToSpeech(context, this)
         } catch (e: Exception) {
-            // Failed to initialize TextToSpeech
+            Timber.e(e, "Failed to initialize TextToSpeech")
+            scheduleRetryInit()
         }
+    }
+
+    /**
+     * Safely shut down the current TTS instance (if any) and schedule a fresh
+     * initialization after a short delay.
+     */
+    private fun scheduleRetryInit() {
+        if (initRetryCount >= MAX_INIT_RETRIES) {
+            Timber.w("Exceeded max TTS init retries ($MAX_INIT_RETRIES), giving up")
+            return
+        }
+        initRetryCount++
+        Timber.i("Scheduling TTS re-init (attempt $initRetryCount/$MAX_INIT_RETRIES) in ${RETRY_DELAY_MS}ms")
+
+        // Make sure we tear down the dead instance first
+        try { textToSpeech?.shutdown() } catch (_: Exception) {}
+        textToSpeech = null
+        isReady = false
+
+        mainHandler.postDelayed({ initializeTTS() }, RETRY_DELAY_MS)
     }
 
     /**
@@ -56,10 +84,17 @@ class TextToSpeechManager(private val context: Context) : TextToSpeech.OnInitLis
                 Locale.forLanguageTag("te-IN")
             }
 
-            val result = tts.setLanguage(locale)
-            if (result == TextToSpeech.LANG_MISSING_DATA || result == TextToSpeech.LANG_NOT_SUPPORTED) {
-                tts.setLanguage(Locale.US)
-                currentLanguage = "en"
+            try {
+                val result = tts.setLanguage(locale)
+                if (result == TextToSpeech.LANG_MISSING_DATA || result == TextToSpeech.LANG_NOT_SUPPORTED) {
+                    tts.setLanguage(Locale.US)
+                    currentLanguage = "en"
+                }
+            } catch (e: Exception) {
+                Timber.e(e, "setLanguage failed")
+                if (e is DeadObjectException || e.cause is DeadObjectException) {
+                    scheduleRetryInit()
+                }
             }
         }
     }
@@ -67,26 +102,38 @@ class TextToSpeechManager(private val context: Context) : TextToSpeech.OnInitLis
     override fun onInit(status: Int) {
         if (status == TextToSpeech.SUCCESS) {
             textToSpeech?.let { tts ->
-                // Start with Telugu by default
-                val telugu = Locale.forLanguageTag("te-IN")
-                var result = tts.setLanguage(telugu)
-                if (result == TextToSpeech.LANG_MISSING_DATA || result == TextToSpeech.LANG_NOT_SUPPORTED) {
-                    result = tts.setLanguage(Locale.US)
-                    currentLanguage = "en"
+                try {
+                    // Start with Telugu by default
+                    val telugu = Locale.forLanguageTag("te-IN")
+                    var result = tts.setLanguage(telugu)
                     if (result == TextToSpeech.LANG_MISSING_DATA || result == TextToSpeech.LANG_NOT_SUPPORTED) {
-                        isReady = false
-                        return
+                        result = tts.setLanguage(Locale.US)
+                        currentLanguage = "en"
+                        if (result == TextToSpeech.LANG_MISSING_DATA || result == TextToSpeech.LANG_NOT_SUPPORTED) {
+                            isReady = false
+                            return
+                        }
+                    }
+
+                    isReady = true
+                    initRetryCount = 0 // reset on success
+
+                    // Configure TTS settings
+                    tts.setSpeechRate(1.0f)
+                    tts.setPitch(1.0f)
+                } catch (e: Exception) {
+                    Timber.e(e, "onInit: TTS engine died during setup")
+                    isReady = false
+                    if (e is DeadObjectException || e.cause is DeadObjectException) {
+                        scheduleRetryInit()
                     }
                 }
-
-                isReady = true
-
-                // Configure TTS settings
-                tts.setSpeechRate(1.0f)
-                tts.setPitch(1.0f)
             }
         } else {
+            Timber.w("TTS onInit failed with status=$status")
             isReady = false
+            // Engine might have crashed; try re-init
+            scheduleRetryInit()
         }
     }
 
@@ -110,7 +157,15 @@ class TextToSpeechManager(private val context: Context) : TextToSpeech.OnInitLis
             lastSpokenAt = now
         }
 
-        textToSpeech?.speak(text, TextToSpeech.QUEUE_FLUSH, null, System.currentTimeMillis().toString())
+        try {
+            textToSpeech?.speak(text, TextToSpeech.QUEUE_FLUSH, null, System.currentTimeMillis().toString())
+        } catch (e: Exception) {
+            Timber.e(e, "speak failed")
+            isReady = false
+            if (e is DeadObjectException || e.cause is DeadObjectException) {
+                scheduleRetryInit()
+            }
+        }
     }
 
     /**
@@ -341,15 +396,24 @@ class TextToSpeechManager(private val context: Context) : TextToSpeech.OnInitLis
      * Stops any ongoing speech
      */
     fun stop() {
-        textToSpeech?.stop()
+        try {
+            textToSpeech?.stop()
+        } catch (e: Exception) {
+            Timber.e(e, "stop failed")
+        }
     }
 
     /**
      * Releases TTS resources
      */
     fun shutdown() {
-        textToSpeech?.stop()
-        textToSpeech?.shutdown()
+        mainHandler.removeCallbacksAndMessages(null)
+        try {
+            textToSpeech?.stop()
+            textToSpeech?.shutdown()
+        } catch (e: Exception) {
+            Timber.e(e, "shutdown failed")
+        }
         textToSpeech = null
         isReady = false
     }
@@ -381,7 +445,15 @@ class TextToSpeechManager(private val context: Context) : TextToSpeech.OnInitLis
             }
         }
 
-        textToSpeech?.speak(text, TextToSpeech.QUEUE_FLUSH, null, System.currentTimeMillis().toString())
+        try {
+            textToSpeech?.speak(text, TextToSpeech.QUEUE_FLUSH, null, System.currentTimeMillis().toString())
+        } catch (e: Exception) {
+            Timber.e(e, "speakImmediate failed")
+            isReady = false
+            if (e is DeadObjectException || e.cause is DeadObjectException) {
+                scheduleRetryInit()
+            }
+        }
     }
 
     private fun getMessage(key: String): String {

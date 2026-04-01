@@ -198,14 +198,14 @@ object GeofenceUtils {
             val e2NormLat = e2Lat / e2Len
             val e2NormLon = e2Lon / e2Len
 
-            // Calculate outward normals (perpendicular to edges, pointing outward for CCW polygon)
-            // For edge 1: normal is (-e1NormLon, e1NormLat) or (e1NormLon, -e1NormLat) depending on orientation
-            // We want outward normals, so we use the right-hand perpendicular for CCW
-            val n1Lat = -e1NormLon / lonScale  // Adjust back for lon scaling
-            val n1Lon = e1NormLat * lonScale
+            // Calculate outward normals (perpendicular to edges, pointing outward)
+            // The convex hull is CCW in (lat,lon) math space = CW on geo map.
+            // RIGHT perpendicular (eLon, -eLat) in equalized space points outward on the geographic map.
+            val n1Lat = e1NormLon
+            val n1Lon = -e1NormLat
 
-            val n2Lat = -e2NormLon / lonScale
-            val n2Lon = e2NormLat * lonScale
+            val n2Lat = e2NormLon
+            val n2Lon = -e2NormLat
 
             // Bisector direction is the sum of the two normals (normalized)
             val bisectLat = n1Lat + n2Lat
@@ -215,7 +215,7 @@ object GeofenceUtils {
             if (bisectLen < 1e-10) {
                 // Normals are opposite (180° corner) - use edge normal
                 val offsetLat = n1Lat * (bufferDistanceMeters / earthRadius) * 180 / PI
-                val offsetLon = n1Lon * (bufferDistanceMeters / earthRadius) * 180 / PI
+                val offsetLon = n1Lon * (bufferDistanceMeters / (earthRadius * lonScale)) * 180 / PI
                 bufferedPoints.add(LatLng(current.latitude + offsetLat, current.longitude + offsetLon))
                 continue
             }
