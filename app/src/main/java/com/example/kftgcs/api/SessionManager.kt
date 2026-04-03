@@ -220,32 +220,40 @@ object SessionManager {
 
     /**
      * Generates a stable device identifier based on hardware properties.
-     * This ID should remain the same even after app reinstall on the same device.
+     * This ID remains the same even after app uninstall/reinstall on the same device.
+     *
+     * IMPORTANT: Only uses properties that NEVER change for a given physical device:
+     * - ANDROID_ID: Stable per (app signing key + user + device) on Android 8+.
+     *   Does NOT change on reinstall as long as the same signing key is used.
+     * - Build.BOARD, BRAND, MANUFACTURER, MODEL, HARDWARE: Immutable hardware properties.
+     *
+     * NOT included (these cause instability):
+     * - Build.FINGERPRINT: Changes with every OS update / security patch.
+     * - Build.SERIAL: Returns "unknown" on Android 8+ without READ_PHONE_STATE permission.
      */
     private fun generateStableDeviceId(context: Context): String {
-        // Collect hardware identifiers that don't change
+        // ANDROID_ID is the primary stable identifier
+        // On Android 8+, it's unique per (app signing key, user, device) and
+        // persists across reinstalls as long as the app is signed with the same key
         val androidId = Settings.Secure.getString(context.contentResolver, Settings.Secure.ANDROID_ID) ?: ""
-        val deviceSerial = getDeviceSerial()
-        val deviceFingerprint = Build.FINGERPRINT
+
+        // Immutable hardware properties that NEVER change for a physical device
         val deviceBoard = Build.BOARD
         val deviceBrand = Build.BRAND
         val deviceManufacturer = Build.MANUFACTURER
         val deviceModel = Build.MODEL
         val deviceHardware = Build.HARDWARE
 
-        // Create a stable hash from device properties
-        // Using device hardware properties that don't change across reinstalls
+        // Create a stable hash from ONLY immutable device properties
         val combinedString = buildString {
-            append(deviceSerial)
-            append(deviceFingerprint)
+            // ANDROID_ID is the primary unique identifier
+            append(androidId)
+            // Hardware properties provide additional uniqueness and stability
             append(deviceBoard)
             append(deviceBrand)
             append(deviceManufacturer)
             append(deviceModel)
             append(deviceHardware)
-            // Include ANDROID_ID but it's just one of many inputs, so even if it changes
-            // the other hardware properties should maintain device uniqueness
-            append(androidId)
         }
 
         // Generate a deterministic UUID from the combined string
@@ -254,24 +262,6 @@ object SessionManager {
         } catch (e: Exception) {
             // Fallback to ANDROID_ID if UUID generation fails
             androidId.ifBlank { "unknown-${System.currentTimeMillis()}" }
-        }
-    }
-
-    /**
-     * Get device serial number (may require permission on newer Android versions)
-     */
-    @Suppress("DEPRECATION")
-    private fun getDeviceSerial(): String {
-        return try {
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                // On Android 8+, Build.SERIAL is deprecated and returns "unknown"
-                // but we still use it as part of the composite identifier
-                Build.SERIAL
-            } else {
-                Build.SERIAL
-            }
-        } catch (e: Exception) {
-            "unknown"
         }
     }
 }

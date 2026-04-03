@@ -102,11 +102,13 @@ class Vehicle(models.Model):
 
     admin = models.ForeignKey(Admin, on_delete=models.CASCADE, null=True, blank=True)
     pilot = models.ForeignKey(Pilot, on_delete=models.CASCADE, null=True, blank=True)
-    vehicle_id = models.CharField(primary_key=True, editable=False, max_length=100)
+    vehicle_id = models.CharField(max_length=100, db_index=True)
     vehicle_name = models.CharField(max_length=100)
-    uin = models.CharField(max_length=100, unique=True, db_index=True, null=True, blank=True)
+    uin = models.CharField(max_length=100, db_index=True, null=True, blank=True)
     registered_date = models.DateField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
+
+
     def __str__(self):
         return self.vehicle_name
 

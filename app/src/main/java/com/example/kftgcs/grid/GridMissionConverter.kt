@@ -308,10 +308,11 @@ object GridMissionConverter {
             sequenceNumber++
         }
 
-        // Add completion action at the end (configurable: RTL, LAND, or LOITER)
-        val completionCommand = when (completionAction) {
+        // Add completion action at the end (configurable: RTL, LAND, HOVER/LOITER)
+        val completionCommand = when (completionAction.uppercase()) {
             "LAND" -> MavEnumValue.of(MavCmd.NAV_LAND)
-            "LOITER" -> MavEnumValue.of(MavCmd.NAV_LOITER_UNLIM)
+            "HOVER", "LOITER" -> MavEnumValue.of(MavCmd.NAV_LOITER_UNLIM)
+            "RTL" -> MavEnumValue.of(MavCmd.NAV_RETURN_TO_LAUNCH)
             else -> MavEnumValue.of(MavCmd.NAV_RETURN_TO_LAUNCH)
         }
         missionItems.add(

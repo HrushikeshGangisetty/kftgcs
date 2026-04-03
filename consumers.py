@@ -143,22 +143,17 @@ class TelemetryConsumer(AsyncWebsocketConsumer):
                     await self.close()
                     return
 
-                print(f"🔍 Getting/creating Vehicle(id={vehicle_id})...", flush=True)
+                print(f"🔍 Creating Vehicle entry(id={vehicle_id})...", flush=True)
 
                 try:
-                    vehicle, created = await sync_to_async(Vehicle.objects.get_or_create)(
+                    vehicle = await sync_to_async(Vehicle.objects.create)(
                         vehicle_id=vehicle_id,
-                        defaults={
-                            "vehicle_name": vehicle_name,
-                            "admin": admin,
-                            "pilot": pilot,
-                            "superadmin": superadmin,
-                        }
+                        vehicle_name=vehicle_name,
+                        admin=admin,
+                        pilot=pilot,
+                        superadmin=superadmin,
                     )
-                    if created:
-                        print(f"✅ Vehicle created: {vehicle_id}", flush=True)
-                    else:
-                        print(f"✅ Vehicle found: {vehicle_id}", flush=True)
+                    print(f"✅ Vehicle created for pilot {pilot_id}: {vehicle_id}", flush=True)
                 except Exception as e:
                     error_msg = f"Error with Vehicle: {type(e).__name__}: {e}"
                     print(f"❌ {error_msg}", flush=True)

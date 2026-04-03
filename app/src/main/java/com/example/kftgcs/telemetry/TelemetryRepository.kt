@@ -152,7 +152,7 @@ class MavlinkTelemetryRepository(
     // Zero flow detection for tank empty (when sprayer is ON but flow is 0)
     private var zeroFlowStartTime: Long? = null
     private var pumpTurnedOnTime: Long? = null  // Track when pump was turned ON for initial delay
-    private val ZERO_FLOW_THRESHOLD_MS = 3000L // 3 seconds of zero flow = tank empty (increased for reliability)
+    private val ZERO_FLOW_THRESHOLD_MS = 2000L // 2 seconds of zero flow = tank empty
     private val PUMP_STARTUP_DELAY_MS = 2000L  // 2 second delay after pump turns ON before checking flow
 
     // AUTO mode spray tracking
@@ -168,6 +168,7 @@ class MavlinkTelemetryRepository(
      * to prevent false "Tank Empty" alerts.
      */
     fun resetAutoModeSprayDetection() {
+        LogUtils.i("TankEmpty", "🔄 resetAutoModeSprayDetection() called - clearing all spray/tank state (was: autoSpray=$autoModeSprayDetected, zeroFlowTimer=${zeroFlowStartTime != null}, tankEmptyShown=$tankEmptyNotificationShown)")
         autoModeSprayDetected = false
         lastPositiveFlowTime = null
         pumpTurnedOnTime = null
@@ -713,46 +714,63 @@ class MavlinkTelemetryRepository(
                         // ║          FLOW-BASED TANK EMPTY DETECTION                         ║
                         // ╠══════════════════════════════════════════════════════════════════╣
                         // ║ Tank is considered empty when:                                   ║
+                        // ║   1. Sprayer is ON (RC7 enabled, sprayEnabled = true)             ║
+                        // ║   2. Flow rate is 0 for 3+ seconds                               ║
+                        // ║   3. BATT2 is properly configured                                ║
+                        // ║   4. NOT in a non-spray mode (BRAKE/RTL/LAND/Smart_RTL)          ║
                         // ║                                                                  ║
-                        // ║ MANUAL MODE (RC7):                                               ║
-                        // ║   - RC7 is enabled (sprayEnabled = true)                         ║
-                        // ║   - Flow rate is 0 for 3+ seconds                                ║
-                        // ║                                                                  ║
-                        // ║ AUTO MODE (DO_SET_SERVO / DO_SPRAYER / Sprayer library):         ║
-                        // ║   - Flow was detected > 0 at some point (autoModeSprayDetected)  ║
-                        // ║   - Flow rate drops to 0 for 3+ seconds                          ║
-                        // ║   - This works because we KNOW spray was commanded active        ║
-                        // ║     (evidenced by previous flow), so zero flow = tank empty      ║
-                        // ║                                                                  ║
-                        // ║ BATT2 must be properly configured for detection to work          ║
+                        // ║ Timings:                                                         ║
+                        // ║   PUMP_STARTUP_DELAY_MS = 2000ms (grace period after pump ON)    ║
+                        // ║   ZERO_FLOW_THRESHOLD_MS = 3000ms (zero flow to declare empty)   ║
+                        // ║   Total worst-case = ~5 seconds from pump ON with empty tank     ║
                         // ╚══════════════════════════════════════════════════════════════════╝
 
+                        val currentSprayEnabledForEmpty = state.value.sprayTelemetry.sprayEnabled
                         val configValid = state.value.sprayTelemetry.configurationValid
                         val flowIsZero = flowRateLiterPerMin == null || flowRateLiterPerMin == 0f
 
-                        // Sprayer is considered ON for tank empty detection when:
-                        // 1. RC7 is enabled (manual mode), OR
-                        // 2. We're in AUTO mode AND spray was detected (had flow > 0)
-                        //    This means DO_SET_SERVO/DO_SPRAYER/Sprayer library is active
-                        val sprayCommandActive = rc7SprayEnabled || (isInAutoMode && autoModeSprayDetected)
+                        // ═══ Skip tank empty detection in non-spray modes ═══
+                        // When failsafes (battery, geofence, RC) trigger a mode change to
+                        // BRAKE/RTL/LAND/Smart_RTL, the sprayer physically stops and flow drops to 0.
+                        // This is EXPECTED and should NOT trigger "Tank Empty".
+                        val isInNonSprayMode = currentMode?.let { mode ->
+                            mode.equals("Brake", ignoreCase = true) ||
+                            mode.equals("RTL", ignoreCase = true) ||
+                            mode.equals("Land", ignoreCase = true) ||
+                            mode.equals("Smart_RTL", ignoreCase = true) ||
+                            mode.equals("Auto_RTL", ignoreCase = true)
+                        } ?: false
 
-                        if (sprayCommandActive && configValid) {
+                        // In AUTO mode, spraying is done via mission commands (DO_SET_SERVO/DO_SPRAYER),
+                        // NOT via RC7. So we also check autoModeSprayDetected to know spray is active.
+                        val sprayerIsOn = (currentSprayEnabledForEmpty || (isInAutoMode && autoModeSprayDetected)) && !isInNonSprayMode
+
+                        // ═══ TANK EMPTY DEBUG LOGS ═══
+                        LogUtils.d("TankEmpty", "━━━ Tank Empty Check ━━━ mode=$currentMode | flowRate=$flowRateLiterPerMin L/min | flowIsZero=$flowIsZero | configValid=$configValid")
+                        LogUtils.d("TankEmpty", "  sprayEnabled=$currentSprayEnabledForEmpty | autoSprayDetected=$autoModeSprayDetected | isAutoMode=$isInAutoMode | isInNonSprayMode=$isInNonSprayMode | sprayerIsOn=$sprayerIsOn")
+                        LogUtils.d("TankEmpty", "  pumpTurnedOnTime=$pumpTurnedOnTime | zeroFlowStartTime=$zeroFlowStartTime | tankEmptyShown=$tankEmptyNotificationShown")
+
+                        if (sprayerIsOn && configValid) {
                             // Track when sprayer was turned ON
                             if (pumpTurnedOnTime == null) {
                                 pumpTurnedOnTime = System.currentTimeMillis()
+                                LogUtils.i("TankEmpty", "🟢 Pump turned ON - starting ${PUMP_STARTUP_DELAY_MS}ms startup delay")
                             }
 
                             val timeSincePumpOn = System.currentTimeMillis() - (pumpTurnedOnTime ?: 0L)
+                            LogUtils.d("TankEmpty", "  timeSincePumpOn=${timeSincePumpOn}ms | startupDelay=${PUMP_STARTUP_DELAY_MS}ms | zeroFlowThreshold=${ZERO_FLOW_THRESHOLD_MS}ms")
 
                             // Only check for zero flow after pump startup delay
                             if (timeSincePumpOn >= PUMP_STARTUP_DELAY_MS && flowIsZero) {
-                                // Sprayer has been ON long enough and still no flow - start/continue timing
                                 if (zeroFlowStartTime == null) {
                                     zeroFlowStartTime = System.currentTimeMillis()
+                                    LogUtils.w("TankEmpty", "⏱️ Zero flow detected after startup delay - starting ${ZERO_FLOW_THRESHOLD_MS}ms zero-flow timer")
                                 } else {
                                     val zeroFlowDuration = System.currentTimeMillis() - zeroFlowStartTime!!
+                                    LogUtils.w("TankEmpty", "⏱️ Zero flow duration: ${zeroFlowDuration}ms / ${ZERO_FLOW_THRESHOLD_MS}ms threshold")
 
                                     if (zeroFlowDuration >= ZERO_FLOW_THRESHOLD_MS && !tankEmptyNotificationShown) {
+                                        LogUtils.e("TankEmpty", "🚨 TANK EMPTY TRIGGERED! zeroFlowDuration=${zeroFlowDuration}ms >= ${ZERO_FLOW_THRESHOLD_MS}ms | mode=$currentMode | sprayEnabled=$currentSprayEnabledForEmpty")
                                         sharedViewModel.addNotification(
                                             Notification(
                                                 message = "Tank Empty! Sprayer is ON but no flow detected.",
@@ -763,24 +781,26 @@ class MavlinkTelemetryRepository(
                                         tankEmptyNotificationShown = true
 
                                         // Switch to configured action (LOITER/RTL/LAND) regardless of flight mode
-                                        // This works in both AUTO mode and Manual modes
                                         sharedViewModel.handleTankEmpty()
                                     }
                                 }
                             } else if (!flowIsZero) {
                                 // Flow detected - reset zero flow timer
                                 if (zeroFlowStartTime != null) {
+                                    LogUtils.i("TankEmpty", "✅ Flow resumed (${flowRateLiterPerMin} L/min) - resetting zero-flow timer")
                                     zeroFlowStartTime = null
                                 }
 
                                 // Reset tank empty notification if flow is detected again (tank refilled)
                                 if (tankEmptyNotificationShown) {
+                                    LogUtils.i("TankEmpty", "✅ Flow detected after tank empty - tank refilled, resetting notification")
                                     tankEmptyNotificationShown = false
                                 }
                             }
                         } else {
-                            // Sprayer is OFF or config invalid - reset all timers
+                            // Sprayer is OFF, config invalid, or in non-spray mode - reset all timers
                             if (pumpTurnedOnTime != null || zeroFlowStartTime != null) {
+                                LogUtils.d("TankEmpty", "⚪ Spray inactive (sprayerIsOn=$sprayerIsOn, configValid=$configValid) - resetting timers")
                                 pumpTurnedOnTime = null
                                 zeroFlowStartTime = null
                             }
@@ -1231,6 +1251,10 @@ class MavlinkTelemetryRepository(
 
                         // Mark failsafe as triggered to prevent multiple RTL commands
                         rcBatteryFailsafeTriggered = true
+
+                        // ═══ FIX: Reset spray detection IMMEDIATELY before failsafe mode change ═══
+                        // Prevents false "Tank Empty" when RC battery failsafe stops the sprayer
+                        resetAutoModeSprayDetection()
 
                         // Launch coroutine to trigger RTL
                         scope.launch {

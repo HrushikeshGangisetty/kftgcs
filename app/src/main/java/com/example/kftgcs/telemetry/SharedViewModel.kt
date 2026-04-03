@@ -177,6 +177,17 @@ class SharedViewModel : ViewModel() {
 
                 // Execute the action
                 viewModelScope.launch {
+                    // ═══ FIX: Reset spray detection IMMEDIATELY before mode change ═══
+                    // When battery failsafe triggers a mode change (e.g., to BRAKE),
+                    // the sprayer physically stops and flow drops to 0.
+                    // Without this reset, there's a race condition:
+                    //   - FC enters BRAKE → flow drops to 0
+                    //   - But heartbeat hasn't confirmed BRAKE yet → GCS thinks mode = Auto
+                    //   - Tank empty detection sees: spray active + zero flow → false "Tank Empty!"
+                    // By resetting spray detection NOW, we prevent this race condition.
+                    repo?.resetAutoModeSprayDetection()
+                    LogUtils.i("BatteryFailsafe", "🚿 Reset spray detection to prevent false Tank Empty")
+
                     // Note: "HOVER" or "LOITER" setting uses BRAKE mode to keep drone in place
                     val targetMode = when (level2Action.uppercase()) {
                         "RTL" -> MavMode.RTL
@@ -2963,6 +2974,15 @@ class SharedViewModel : ViewModel() {
                 }
 
                 delay(1000)
+
+                // Limit takeoff climb rate to 1 m/s (WPNAV_SPEED_UP is in cm/s)
+                LogUtils.i("SharedVM", "Setting WPNAV_SPEED_UP to 100 cm/s (1 m/s) for safe takeoff")
+                val speedUpResult = setParameter("WPNAV_SPEED_UP", 100f)
+                if (speedUpResult != null) {
+                    LogUtils.i("SharedVM", "✓ WPNAV_SPEED_UP set to 100 cm/s (1 m/s)")
+                } else {
+                    LogUtils.w("SharedVM", "⚠️ Failed to set WPNAV_SPEED_UP, takeoff may use default climb rate")
+                }
 
                 LogUtils.i("SharedVM", "Sending start mission command")
                 val result = repo?.startMission() ?: false
