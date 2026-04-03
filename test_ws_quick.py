@@ -20,10 +20,10 @@ def test():
     print("✅ Connected!")
 
     # Send session_start (exactly like Android does)
+    # Only pilot_id is needed — backend derives admin & superadmin from Pilot
     payload = json.dumps({
         "type": "session_start",
         "vehicle_name": "DRONE_01",
-        "admin_id": 1,
         "pilot_id": 7,
         "drone_uid": "TEST_DRONE_001",
         "plot_name": "Test Field"

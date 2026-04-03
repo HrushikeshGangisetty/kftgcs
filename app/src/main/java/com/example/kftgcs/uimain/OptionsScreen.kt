@@ -47,7 +47,7 @@ fun OptionsScreen(
     val isLoadingFromDrone by viewModel.isLoadingFromDrone.collectAsState()
     val loadStatus by viewModel.loadStatus.collectAsState()
 
-    // On first open, read voltage parameters from the flight controller
+   // On first open, read voltage parameters from the flight controller
     LaunchedEffect(Unit) {
         viewModel.loadFromDrone(sharedViewModel)
     }

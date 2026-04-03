@@ -344,12 +344,11 @@ class WebSocketManager {
                 "DRONE_${System.currentTimeMillis()}"
 
             try {
+                // Only pilot_id is needed — backend derives admin & superadmin from Pilot
                 val payload = JSONObject().apply {
                     put("type",              "session_start")
                     put("vehicle_name",      vehicleName)
-                    put("admin_id",          adminId)
                     put("pilot_id",          pilotId)
-                    put("super_admin_id",    superAdminId)
                     put("drone_uid",         droneUidToSend)
                     put("plot_name",         selectedPlotName)
                     put("flight_mode",       selectedFlightMode)
@@ -358,9 +357,7 @@ class WebSocketManager {
                 }.toString()
 
                 android.util.Log.i(TAG, "┌─── session_start PAYLOAD ───")
-                android.util.Log.i(TAG, "│ admin_id:      $adminId")
                 android.util.Log.i(TAG, "│ pilot_id:      $pilotId")
-                android.util.Log.i(TAG, "│ super_admin_id: $superAdminId")
                 android.util.Log.i(TAG, "│ drone_uid:     $droneUidToSend")
                 android.util.Log.i(TAG, "│ vehicle_name:  $vehicleName")
                 android.util.Log.i(TAG, "│ plot_name:     $selectedPlotName")

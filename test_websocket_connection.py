@@ -29,7 +29,6 @@ WS_URL = "wss://kftgcs.com/ws/telemetry/"
 
 # Test data (simulating Android app)
 PILOT_ID = 7  # Your test pilot ID
-ADMIN_ID = 1  # Your admin ID
 DRONE_UID = "TEST_DRONE_001"
 VEHICLE_NAME = "DRONE_01"
 PLOT_NAME = "Test Field"
@@ -43,10 +42,10 @@ def on_open(ws):
     print("="*60)
 
     # Step 2: Send session_start (same as Android app does)
+    # Only pilot_id is needed — backend derives admin & superadmin from Pilot
     session_start = {
         "type": "session_start",
         "vehicle_name": VEHICLE_NAME,
-        "admin_id": ADMIN_ID,
         "pilot_id": PILOT_ID,
         "drone_uid": DRONE_UID,
         "plot_name": PLOT_NAME
@@ -169,7 +168,6 @@ def main():
     print("📡 WEBSOCKET CONNECTION TEST")
     print(f"🌐 URL: {WS_URL}")
     print(f"👤 Pilot ID: {PILOT_ID}")
-    print(f"🏢 Admin ID: {ADMIN_ID}")
     print(f"🚁 Drone UID: {DRONE_UID}")
     print("="*60)
 

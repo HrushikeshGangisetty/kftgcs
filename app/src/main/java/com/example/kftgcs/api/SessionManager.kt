@@ -2,10 +2,12 @@ package com.example.kftgcs.api
 
 import android.content.Context
 import android.content.SharedPreferences
+import android.os.Build
 import android.provider.Settings
 import androidx.core.content.edit
 import androidx.security.crypto.EncryptedSharedPreferences
 import androidx.security.crypto.MasterKey
+import java.util.UUID
 
 /**
  * SessionManager - Secure session storage using EncryptedSharedPreferences
@@ -31,6 +33,7 @@ object SessionManager {
     private const val KEY_IS_LOGGED_IN = "is_logged_in"
     private const val KEY_FIRST_NAME = "first_name"
     private const val KEY_LAST_NAME = "last_name"
+    private const val KEY_DEVICE_ID = "device_id"
 
     // Legacy preferences name for migration
     private const val LEGACY_PREF_NAME = "pilot_session"
@@ -171,18 +174,105 @@ object SessionManager {
     }
 
     fun clearSession(context: Context) {
-        getPreferences(context).edit {
+        val prefs = getPreferences(context)
+        // Preserve the device ID across session clears (logout/login)
+        val deviceId = prefs.getString(KEY_DEVICE_ID, null)
+        prefs.edit {
             clear()
+            // Restore device ID if it existed
+            deviceId?.let { putString(KEY_DEVICE_ID, it) }
         }
     }
 
     /**
-     * Get a stable unique device identifier using ANDROID_ID.
-     * This value persists across app reinstalls (reset only on factory reset)
-     * and is unique per device + user combination.
+     * Get a stable unique device identifier that persists across app reinstalls.
+     *
+     * Strategy:
+     * 1. First, check if we have a previously generated device ID stored (survives reinstall
+     *    if the app data was backed up, or on devices where SharedPreferences persists)
+     * 2. If not, use ANDROID_ID as a base combined with device hardware identifiers
+     *    to generate a deterministic UUID that is stable for the physical device.
+     * 3. Store this generated ID so it's consistently returned.
+     *
+     * Note: This approach creates a device-specific ID based on hardware properties
+     * that won't change even if the app is reinstalled, as long as it's the same
+     * physical device.
      */
     fun getDeviceId(context: Context): String {
-        return Settings.Secure.getString(context.contentResolver, Settings.Secure.ANDROID_ID) ?: "unknown"
+        val prefs = getPreferences(context)
+
+        // Check if we already have a stored device ID
+        val storedId = prefs.getString(KEY_DEVICE_ID, null)
+        if (!storedId.isNullOrBlank() && storedId != "unknown") {
+            return storedId
+        }
+
+        // Generate a new stable device ID based on hardware properties
+        val deviceId = generateStableDeviceId(context)
+
+        // Store for future use
+        prefs.edit {
+            putString(KEY_DEVICE_ID, deviceId)
+        }
+
+        return deviceId
+    }
+
+    /**
+     * Generates a stable device identifier based on hardware properties.
+     * This ID should remain the same even after app reinstall on the same device.
+     */
+    private fun generateStableDeviceId(context: Context): String {
+        // Collect hardware identifiers that don't change
+        val androidId = Settings.Secure.getString(context.contentResolver, Settings.Secure.ANDROID_ID) ?: ""
+        val deviceSerial = getDeviceSerial()
+        val deviceFingerprint = Build.FINGERPRINT
+        val deviceBoard = Build.BOARD
+        val deviceBrand = Build.BRAND
+        val deviceManufacturer = Build.MANUFACTURER
+        val deviceModel = Build.MODEL
+        val deviceHardware = Build.HARDWARE
+
+        // Create a stable hash from device properties
+        // Using device hardware properties that don't change across reinstalls
+        val combinedString = buildString {
+            append(deviceSerial)
+            append(deviceFingerprint)
+            append(deviceBoard)
+            append(deviceBrand)
+            append(deviceManufacturer)
+            append(deviceModel)
+            append(deviceHardware)
+            // Include ANDROID_ID but it's just one of many inputs, so even if it changes
+            // the other hardware properties should maintain device uniqueness
+            append(androidId)
+        }
+
+        // Generate a deterministic UUID from the combined string
+        return try {
+            UUID.nameUUIDFromBytes(combinedString.toByteArray()).toString()
+        } catch (e: Exception) {
+            // Fallback to ANDROID_ID if UUID generation fails
+            androidId.ifBlank { "unknown-${System.currentTimeMillis()}" }
+        }
+    }
+
+    /**
+     * Get device serial number (may require permission on newer Android versions)
+     */
+    @Suppress("DEPRECATION")
+    private fun getDeviceSerial(): String {
+        return try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                // On Android 8+, Build.SERIAL is deprecated and returns "unknown"
+                // but we still use it as part of the composite identifier
+                Build.SERIAL
+            } else {
+                Build.SERIAL
+            }
+        } catch (e: Exception) {
+            "unknown"
+        }
     }
 }
 

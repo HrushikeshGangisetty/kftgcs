@@ -93,6 +93,10 @@ class MavlinkTelemetryRepository(
     var fcuSystemId: UByte = 0u
     var fcuComponentId: UByte = 0u
 
+    // Battery voltage smoothing (EMA filter to reduce fluctuations)
+    private var smoothedVoltage: Float? = null
+    private val VOLTAGE_ALPHA = 0.3f  // Lower = smoother, higher = more responsive
+
     // Track if disconnection was intentional (user-initiated)
     private var intentionalDisconnect = false
 
@@ -381,7 +385,7 @@ class MavlinkTelemetryRepository(
                                 }
                             }
 
-                            setMessageRate(1u, 0.5f)   // SYS_STATUS - reduced from 1Hz for Bluetooth
+                            setMessageRate(1u, 4f)     // SYS_STATUS - 4Hz for fast battery voltage monitoring
                             setMessageRate(24u, 0.5f)  // GPS_RAW_INT - reduced from 1Hz for Bluetooth
                             setMessageRate(33u, 5f)    // GLOBAL_POSITION_INT - increased to 5Hz for smoother position updates
                             setMessageRate(74u, 20f)   // VFR_HUD - 20Hz (50ms) for INSTANT speed updates (pilot critical)
@@ -1180,7 +1184,21 @@ class MavlinkTelemetryRepository(
                 .map { it.message }
                 .filterIsInstance<SysStatus>()
                 .collect { s ->
-                    val vBatt = if (s.voltageBattery.toUInt() == 0xFFFFu) null else s.voltageBattery.toFloat() / 1000f
+                    val vBattRaw = if (s.voltageBattery.toUInt() == 0xFFFFu) null else s.voltageBattery.toFloat() / 1000f
+
+                    // Apply EMA (Exponential Moving Average) filter to smooth voltage fluctuations
+                    val vBatt = if (vBattRaw != null) {
+                        val prev = smoothedVoltage
+                        if (prev != null) {
+                            (VOLTAGE_ALPHA * vBattRaw + (1 - VOLTAGE_ALPHA) * prev).also { smoothedVoltage = it }
+                        } else {
+                            vBattRaw.also { smoothedVoltage = it }
+                        }
+                    } else {
+                        smoothedVoltage = null
+                        null
+                    }
+
                     val pct = if (s.batteryRemaining.toInt() == -1) null else s.batteryRemaining.toInt()
                     val SENSOR_3D_GYRO = 1u
                     val present = (s.onboardControlSensorsPresent.value and SENSOR_3D_GYRO) != 0u
@@ -2686,6 +2704,8 @@ class MavlinkTelemetryRepository(
             stopFenceMonitoring()
             // Mark this as an intentional disconnect to prevent auto-reconnect
             intentionalDisconnect = true
+            // Reset voltage smoothing filter
+            smoothedVoltage = null
             // Attempt to close the TCP connection gracefully
             connection.close()
         } catch (e: Exception) {

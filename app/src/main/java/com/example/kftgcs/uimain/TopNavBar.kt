@@ -13,6 +13,7 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import java.util.Locale
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.text.font.FontWeight
@@ -225,8 +226,8 @@ fun TopNavBar(
                 InfoBlockGroup(
                     Icons.Default.Bolt,
                     listOf(
-                        "${telemetryState.voltage ?: "N/A"} V",
-                        "${telemetryState.currentA ?: "N/A"} A"
+                        "${telemetryState.voltage?.let { String.format(Locale.US, "%.1f", it) } ?: "N/A"} V",
+                        "${telemetryState.currentA?.let { String.format(Locale.US, "%.1f", it) } ?: "N/A"} A"
                     )
                 )
                 DividerBlock()

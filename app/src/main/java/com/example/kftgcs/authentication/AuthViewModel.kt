@@ -167,12 +167,6 @@ class AuthViewModel : ViewModel() {
         Timber.d("=== LOGIN INITIATED ===")
         Timber.d("Login attempt for email: $email")
 
-        if (email == "testing.android@gmail.com" && password == "Testing@1234") {
-            Timber.d("Test credentials used, bypassing authentication")
-            SessionManager.saveSession(context, email, 9999)
-            _authState.value = AuthState.TestAuthenticated
-            return
-        }
 
         val validationError = validateLoginInput(email, password)
         if (validationError != null) {
@@ -210,21 +204,6 @@ class AuthViewModel : ViewModel() {
         }
     }
 
-    /**
-     * DEV ONLY: Direct login without authentication
-     * This bypasses the backend authentication for development/testing purposes
-     * when the backend server is unavailable or has issues.
-     *
-     * WARNING: Remove or disable this in production builds!
-     */
-    fun devLogin(context: Context) {
-        // Use a dummy dev account
-        val devEmail = "dev@test.com"
-        val devPilotId = 9999
-
-        SessionManager.saveSession(context, devEmail, devPilotId)
-        _authState.value = AuthState.Authenticated
-    }
 
 
     fun signup(
@@ -347,7 +326,6 @@ class AuthViewModel : ViewModel() {
 
 sealed class AuthState {
     object Authenticated : AuthState()
-    object TestAuthenticated : AuthState()
     object Unauthenticated : AuthState()
     object Loading : AuthState()
     data class Error(val message: String) : AuthState()

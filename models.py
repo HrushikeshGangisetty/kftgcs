@@ -11,7 +11,7 @@ from django.utils import timezone
 import uuid
 
 
-class Admin(models.Model):
+class SuperAdmin(models.Model):
     name = models.CharField(max_length=50)
     email = models.EmailField(max_length=50, unique=True, db_index=True)
     mobile_no = models.CharField(max_length=15, unique=True, db_index=True)
@@ -24,8 +24,41 @@ class Admin(models.Model):
     def __str__(self):
         return self.name
 
+class Admin(models.Model):
+    superadmin = models.ForeignKey(SuperAdmin, on_delete=models.CASCADE, null= True,blank=True)
+    name = models.CharField(max_length=50,null= True,blank=True) #company name
+    contact_name=  models.CharField(max_length=50,null= True,blank=True)
+    email = models.EmailField(max_length=50, unique=True, db_index=True)
+    mobile_no = models.CharField(max_length=15, unique=True, db_index=True,null= True,blank=True)
+    otp = models.IntegerField(null=True, blank=True)
+    otp_send_type = models.CharField(max_length=50, null=True, blank=True)
+    changed_on = models.DateTimeField(null=True, blank=True)
+    password = models.CharField(max_length=255)
+    drones= models.IntegerField(default=0)
+    pilots=models.IntegerField(default=0)
+    logo_path=models.CharField(max_length=250,null= True,blank=True)
+
+    gst_file_path=models.CharField(max_length=250,null= True,blank=True)
+    address=models.TextField(max_length=250,null= True,blank=True)
+    approval=models.IntegerField(default=0)
+    invite_link= models.UUIDField(default=uuid.uuid4,null= True,blank=True)
+    created_on = models.DateTimeField(default=timezone.now)
+    is_superadmin_company = models.BooleanField(default=False)
+
+
+    status = models.IntegerField(default=1)
+    landmark = models.CharField(max_length=150, null=True, blank=True)
+    city = models.CharField(max_length=100, null=True, blank=True)
+    state = models.CharField(max_length=100, null=True, blank=True)
+    pincode = models.CharField(max_length=10, null=True, blank=True)
+
+    def __str__(self):
+        return self.name
 
 class Pilot(models.Model):
+    superadmin = models.ForeignKey(SuperAdmin, on_delete=models.CASCADE, null=True, blank=True)
+    admin = models.ForeignKey(Admin, on_delete=models.CASCADE)
+    company_name=models.CharField(max_length=50,null=True, blank=True)
     first_name = models.CharField(max_length=50)
     last_name = models.CharField(max_length=50)
     email = models.EmailField(max_length=50, unique=True, db_index=True)
@@ -41,25 +74,45 @@ class Pilot(models.Model):
     admin_approved = models.IntegerField(default=0)
     created_on = models.DateTimeField(default=timezone.now)
     status = models.IntegerField(default=1)
-    admin = models.ForeignKey(Admin, on_delete=models.CASCADE)
     otp = models.IntegerField(null=True, blank=True)
     changed_on = models.DateTimeField(null=True, blank=True)
 
     def __str__(self):
         return f"{self.first_name} {self.last_name}"
+class PilotDeviceAccess(models.Model):
+    superadmin = models.ForeignKey(SuperAdmin, on_delete=models.CASCADE, null= True,blank=True)
+
+    admin = models.ForeignKey(Admin, on_delete=models.CASCADE)
+    pilot = models.ForeignKey(Pilot, on_delete=models.CASCADE, related_name="device_requests")
+    ip_address = models.CharField(max_length=255)
+    admin_approved = models.IntegerField(default=0)
+    is_active = models.BooleanField(default=False)
+    is_read = models.BooleanField(default=False)
+    otp = models.IntegerField(null=True, blank=True)
+    changed_on = models.DateTimeField(null=True, blank=True)
+    device_status= models.CharField(max_length=20, default="NEW")
+    created_on = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        unique_together = ("pilot", "ip_address")
 
 
 class Vehicle(models.Model):
+    superadmin = models.ForeignKey(SuperAdmin, on_delete=models.CASCADE, null= True,blank=True)
+
     admin = models.ForeignKey(Admin, on_delete=models.CASCADE, null=True, blank=True)
     pilot = models.ForeignKey(Pilot, on_delete=models.CASCADE, null=True, blank=True)
     vehicle_id = models.CharField(primary_key=True, editable=False, max_length=100)
     vehicle_name = models.CharField(max_length=100)
-
+    uin = models.CharField(max_length=100, unique=True, db_index=True, null=True, blank=True)
+    registered_date = models.DateField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
     def __str__(self):
         return self.vehicle_name
 
-
 class Mission(models.Model):
+    superadmin = models.ForeignKey(SuperAdmin, on_delete=models.CASCADE, null= True,blank=True)
+
     mission_id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
 
     vehicle = models.ForeignKey(Vehicle, on_delete=models.CASCADE, null=True, blank=True)
@@ -155,7 +208,14 @@ class Mission(models.Model):
         blank=True,
         help_text="Grid setup source: KML_IMPORT, MAP_DRAW, DRONE_POSITION, RC_CONTROL, or NONE"
     )
-
+    class Meta:
+        indexes = [
+            models.Index(fields=["admin", "status", "start_time"]),
+            models.Index(fields=["superadmin", "status", "start_time"]),
+            models.Index(fields=["pilot", "status", "start_time"]),
+            models.Index(fields=["vehicle", "status", "start_time"]),
+            models.Index(fields=["start_time", "end_time"]),
+        ]
     # ============================================================
 
     def __str__(self):
@@ -163,6 +223,8 @@ class Mission(models.Model):
 
 
 class TelemetryPosition(models.Model):
+    superadmin = models.ForeignKey(SuperAdmin, on_delete=models.CASCADE, null= True,blank=True)
+
     vehicle = models.ForeignKey(Vehicle, on_delete=models.CASCADE, null=True, blank=True)
     admin = models.ForeignKey(Admin, on_delete=models.CASCADE, null=True, blank=True)
     pilot = models.ForeignKey(Pilot, on_delete=models.CASCADE)
@@ -180,6 +242,8 @@ class TelemetryPosition(models.Model):
 
 
 class TelemetryBattery(models.Model):
+    superadmin = models.ForeignKey(SuperAdmin, on_delete=models.CASCADE, null= True,blank=True)
+
     vehicle = models.ForeignKey(Vehicle, on_delete=models.CASCADE, null=True, blank=True)
     admin = models.ForeignKey(Admin, on_delete=models.CASCADE, null=True, blank=True)
     pilot = models.ForeignKey(Pilot, on_delete=models.CASCADE)
@@ -196,6 +260,8 @@ class TelemetryBattery(models.Model):
 
 
 class TelemetryAttitude(models.Model):
+    superadmin = models.ForeignKey(SuperAdmin, on_delete=models.CASCADE, null= True,blank=True)
+
     vehicle = models.ForeignKey(Vehicle, on_delete=models.CASCADE, null=True, blank=True)
     admin = models.ForeignKey(Admin, on_delete=models.CASCADE, null=True, blank=True)
     pilot = models.ForeignKey(Pilot, on_delete=models.CASCADE)
@@ -212,6 +278,8 @@ class TelemetryAttitude(models.Model):
 
 
 class TelemetryGPS(models.Model):
+    superadmin = models.ForeignKey(SuperAdmin, on_delete=models.CASCADE, null= True,blank=True)
+
     vehicle = models.ForeignKey(Vehicle, on_delete=models.CASCADE, null=True, blank=True)
     admin = models.ForeignKey(Admin, on_delete=models.CASCADE, null=True, blank=True)
     pilot = models.ForeignKey(Pilot, on_delete=models.CASCADE)
@@ -227,6 +295,8 @@ class TelemetryGPS(models.Model):
 
 
 class TelemetryStatus(models.Model):
+    superadmin = models.ForeignKey(SuperAdmin, on_delete=models.CASCADE, null= True,blank=True)
+
     vehicle = models.ForeignKey(Vehicle, on_delete=models.CASCADE, null=True, blank=True)
     admin = models.ForeignKey(Admin, on_delete=models.CASCADE, null=True, blank=True)
     pilot = models.ForeignKey(Pilot, on_delete=models.CASCADE)
@@ -249,6 +319,8 @@ class TelemetryStatus(models.Model):
 
 
 class TelemetrySpray(models.Model):
+    superadmin = models.ForeignKey(SuperAdmin, on_delete=models.CASCADE, null= True,blank=True)
+
     vehicle = models.ForeignKey(Vehicle, on_delete=models.CASCADE, null=True, blank=True)
     admin = models.ForeignKey(Admin, on_delete=models.CASCADE, null=True, blank=True)
     mission = models.ForeignKey(
@@ -299,6 +371,8 @@ class MissionEvent(models.Model):
     vehicle = models.ForeignKey(Vehicle, on_delete=models.CASCADE)
     pilot = models.ForeignKey(Pilot, on_delete=models.CASCADE)
     admin = models.ForeignKey(Admin, on_delete=models.CASCADE)
+    superadmin = models.ForeignKey(SuperAdmin, on_delete=models.CASCADE, null= True,blank=True)
+
 
     event_type = models.CharField(max_length=50, choices=EVENT_TYPES)
     event_status = models.CharField(max_length=20, choices=EVENT_STATUS_CHOICES)
@@ -330,17 +404,17 @@ class MissionSummary(models.Model):
     vehicle = models.ForeignKey(Vehicle, on_delete=models.CASCADE)
     pilot = models.ForeignKey(Pilot, on_delete=models.CASCADE)
     admin = models.ForeignKey(Admin, on_delete=models.CASCADE)
+    superadmin = models.ForeignKey(SuperAdmin, on_delete=models.CASCADE, null= True,blank=True)
 
-    # 🔥 CHANGED: total_distance_meters -> total_acres
+
+    # CHANGED: total_distance_meters -> total_acres
     total_acres = models.FloatField(null=True, blank=True, help_text="Total area covered in acres")
-    total_sprayed_acres = models.FloatField(null=True, blank=True, help_text="Total acres sprayed (distance with spray ON)")
+    total_sprayed_acres = models.FloatField(null=True, blank=True, help_text="Total area actually sprayed in acres", default=0.0)
     total_spray_used_liters = models.FloatField(null=True, blank=True)
     flying_time_sec = models.FloatField(null=True, blank=True)
 
     battery_start = models.IntegerField(null=True, blank=True)
     battery_end = models.IntegerField(null=True, blank=True)
-
-    # 🔥 NEW: Project, plot, and crop type from completion dialog
     project_name = models.CharField(max_length=255, null=True, blank=True, help_text="Project name entered by user")
     plot_name = models.CharField(max_length=255, null=True, blank=True, help_text="Plot name entered by user")
     crop_type = models.CharField(max_length=100, null=True, blank=True, help_text="Crop type (e.g., Wheat, Rice, Cotton)")
@@ -355,7 +429,13 @@ class MissionSummary(models.Model):
 
     class Meta:
         db_table = "pavaman_gcs_app_mission_summary"
+        indexes = [
+            models.Index(fields=["superadmin", "created_at"]),  # Added superadmin
+            models.Index(fields=["admin", "created_at"]),
+            models.Index(fields=["pilot", "created_at"]),
+            models.Index(fields=["vehicle", "created_at"]),
+            models.Index(fields=["created_at"]),
+        ]
 
     def __str__(self):
         return f"Summary of {self.mission_id}"
-

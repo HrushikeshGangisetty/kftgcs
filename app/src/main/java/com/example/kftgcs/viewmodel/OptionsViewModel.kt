@@ -12,11 +12,11 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 
 data class FailsafeOptions(
-    val missionCompletionAction: String = "RTL",
-    val tankEmptyAction: String = "RTL",
+    val missionCompletionAction: String = "HOVER",
+    val tankEmptyAction: String = "HOVER",
     val lowVoltLevel1: Float = 22.2f,
     val lowVoltLevel2: Float = 21.0f,
-    val lowVoltLevel2Action: String = "LAND"
+    val lowVoltLevel2Action: String = "HOVER"
 )
 
 class OptionsViewModel(application: Application) : AndroidViewModel(application) {
@@ -42,7 +42,7 @@ class OptionsViewModel(application: Application) : AndroidViewModel(application)
          */
         fun getMissionCompletionAction(context: Context): String {
             val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-            return prefs.getString(KEY_MISSION_COMPLETION_ACTION, "RTL") ?: "RTL"
+            return prefs.getString(KEY_MISSION_COMPLETION_ACTION, "HOVER") ?: "HOVER"
         }
 
         /**
@@ -117,11 +117,11 @@ class OptionsViewModel(application: Application) : AndroidViewModel(application)
     private fun loadSettings() {
         val prefs = getApplication<Application>().getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
         _options.value = FailsafeOptions(
-            missionCompletionAction = prefs.getString(KEY_MISSION_COMPLETION_ACTION, "RTL") ?: "RTL",
-            tankEmptyAction = prefs.getString(KEY_TANK_EMPTY_ACTION, "RTL") ?: "RTL",
+            missionCompletionAction = prefs.getString(KEY_MISSION_COMPLETION_ACTION, "HOVER") ?: "HOVER",
+            tankEmptyAction = prefs.getString(KEY_TANK_EMPTY_ACTION, "HOVER") ?: "HOVER",
             lowVoltLevel1 = prefs.getFloat(KEY_LOW_VOLT_LEVEL_1, 22.2f),
             lowVoltLevel2 = prefs.getFloat(KEY_LOW_VOLT_LEVEL_2, 21.0f),
-            lowVoltLevel2Action = prefs.getString(KEY_LOW_VOLT_LEVEL_2_ACTION, "LAND") ?: "LAND"
+            lowVoltLevel2Action = prefs.getString(KEY_LOW_VOLT_LEVEL_2_ACTION, "HOVER") ?: "HOVER"
         )
     }
 
@@ -203,11 +203,12 @@ class OptionsViewModel(application: Application) : AndroidViewModel(application)
                 LogUtils.e(TAG, "✗ Failed to set $PARAM_BATT_FS_LOW_ACT")
             }
 
-            // BATT_FS_CRT_ACT ← lowVoltLevel2Action
-            val crtActValue = actionToBattFsValue(current.lowVoltLevel2Action)
-            val r4 = sharedViewModel.setParameter(PARAM_BATT_FS_CRT_ACT, crtActValue)
+            // BATT_FS_CRT_ACT ← Always set to 0 (None) on FC
+            // GCS handles the critical voltage action (BRAKE/RTL/LAND) to avoid
+            // dual failsafe conflict where both FC and GCS race to change flight mode
+            val r4 = sharedViewModel.setParameter(PARAM_BATT_FS_CRT_ACT, 0.0f)
             if (r4 != null) {
-                LogUtils.i(TAG, "✓ $PARAM_BATT_FS_CRT_ACT = $crtActValue (${current.lowVoltLevel2Action})")
+                LogUtils.i(TAG, "✓ $PARAM_BATT_FS_CRT_ACT = 0 (GCS handles action: ${current.lowVoltLevel2Action})")
             } else {
                 results.add(PARAM_BATT_FS_CRT_ACT)
                 LogUtils.e(TAG, "✗ Failed to set $PARAM_BATT_FS_CRT_ACT")

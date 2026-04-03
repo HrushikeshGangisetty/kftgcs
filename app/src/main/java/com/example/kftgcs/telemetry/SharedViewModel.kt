@@ -685,7 +685,7 @@ class SharedViewModel : ViewModel() {
      */
     private fun getLowVoltLevel2Action(context: Context): String {
         val prefs = context.getSharedPreferences("failsafe_options", Context.MODE_PRIVATE)
-        return prefs.getString("low_volt_level_2_action", "LAND") ?: "LAND"
+        return prefs.getString("low_volt_level_2_action", "HOVER") ?: "HOVER"
     }
 
     fun speak(text: String) {
@@ -4170,6 +4170,8 @@ class SharedViewModel : ViewModel() {
                 if (connected && repo != null) {
                     // Start fence monitoring when connected (repo will be available)
                     startFenceStatusMonitoring()
+                    // Auto-sync failsafe options to drone on connect
+                    syncFailsafeOptionsOnConnect()
                 } else if (!connected) {
                     // Stop fence monitoring on disconnect to prevent stale state
                     stopFenceStatusMonitoring()
@@ -4187,6 +4189,80 @@ class SharedViewModel : ViewModel() {
 
     // Job reference for fence status monitoring - allows cancellation on reconnect/disable
     private var fenceMonitoringJob: Job? = null
+
+    /**
+     * Auto-sync saved failsafe options to the drone immediately after connection.
+     * Reads settings from SharedPreferences and pushes BATT voltage/action parameters via MAVLink.
+     */
+    private fun syncFailsafeOptionsOnConnect() {
+        viewModelScope.launch {
+            try {
+                val context = GCSApplication.getInstance() ?: return@launch
+                val prefs = context.getSharedPreferences("failsafe_options", Context.MODE_PRIVATE)
+
+                val lowVoltLevel1 = prefs.getFloat("low_volt_level_1", 22.2f)
+                val lowVoltLevel2 = prefs.getFloat("low_volt_level_2", 21.0f)
+                val lowVoltLevel2Action = prefs.getString("low_volt_level_2_action", "HOVER") ?: "HOVER"
+
+                LogUtils.i("OptionsSync", "Auto-syncing failsafe options to drone on connect...")
+
+                // Small delay to let the connection stabilize
+                delay(2000)
+
+                val failures = mutableListOf<String>()
+
+                // BATT_LOW_VOLT ← lowVoltLevel1
+                val r1 = setParameter("BATT_LOW_VOLT", lowVoltLevel1)
+                if (r1 != null) {
+                    LogUtils.i("OptionsSync", "✓ BATT_LOW_VOLT = $lowVoltLevel1")
+                } else {
+                    failures.add("BATT_LOW_VOLT")
+                    LogUtils.e("OptionsSync", "✗ Failed to set BATT_LOW_VOLT")
+                }
+
+                // BATT_CRT_VOLT ← lowVoltLevel2
+                val r2 = setParameter("BATT_CRT_VOLT", lowVoltLevel2)
+                if (r2 != null) {
+                    LogUtils.i("OptionsSync", "✓ BATT_CRT_VOLT = $lowVoltLevel2")
+                } else {
+                    failures.add("BATT_CRT_VOLT")
+                    LogUtils.e("OptionsSync", "✗ Failed to set BATT_CRT_VOLT")
+                }
+
+                // BATT_FS_LOW_ACT ← Level 1 action is alert only, set to 0 (None)
+                val r3 = setParameter("BATT_FS_LOW_ACT", 0.0f)
+                if (r3 != null) {
+                    LogUtils.i("OptionsSync", "✓ BATT_FS_LOW_ACT = 0 (alert only)")
+                } else {
+                    failures.add("BATT_FS_LOW_ACT")
+                    LogUtils.e("OptionsSync", "✗ Failed to set BATT_FS_LOW_ACT")
+                }
+
+                // BATT_FS_CRT_ACT ← lowVoltLevel2Action
+                val crtActValue = when (lowVoltLevel2Action) {
+                    "LAND" -> 1.0f
+                    "RTL" -> 2.0f
+                    "HOVER", "LOITER" -> 0.0f
+                    else -> 0.0f
+                }
+                val r4 = setParameter("BATT_FS_CRT_ACT", crtActValue)
+                if (r4 != null) {
+                    LogUtils.i("OptionsSync", "✓ BATT_FS_CRT_ACT = $crtActValue ($lowVoltLevel2Action)")
+                } else {
+                    failures.add("BATT_FS_CRT_ACT")
+                    LogUtils.e("OptionsSync", "✗ Failed to set BATT_FS_CRT_ACT")
+                }
+
+                if (failures.isEmpty()) {
+                    LogUtils.i("OptionsSync", "All failsafe options synced to drone ✓")
+                } else {
+                    LogUtils.w("OptionsSync", "Failed to sync: ${failures.joinToString()}")
+                }
+            } catch (e: Exception) {
+                LogUtils.e("OptionsSync", "Error syncing failsafe options on connect", e)
+            }
+        }
+    }
 
     /**
      * Monitor fence status from flight controller.
