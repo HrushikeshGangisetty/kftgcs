@@ -33,7 +33,7 @@ private val AccentBlue = Color(0xFF87CEEB)
 private val BorderGray = Color(0xFF4A5568)
 private val SectionBackground = Color(0xFF2C2F33)
 
-private val actionOptions = listOf("LOITER" to "Hover", "RTL" to "RTL", "LAND" to "Land")
+private val actionOptions = listOf("HOVER" to "Hover", "RTL" to "RTL", "LAND" to "Land")
 
 @Composable
 fun OptionsScreen(

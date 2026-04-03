@@ -679,10 +679,15 @@ class MavlinkTelemetryRepository(
                         }
 
                         // sprayActive is TRUE when:
-                        // - RC7 is enabled (manual), OR
-                        // - Flow is currently detected, OR
-                        // - We're in AUTO mode and spray was detected (covers brief gaps in flow readings)
-                        val sprayIsActive = rc7SprayEnabled || hasFlowDetected || (isInAutoMode && autoModeSprayDetected)
+                        // AUTO mode: flow detected OR spray was previously detected (covers brief flow sensor gaps)
+                        // MANUAL mode: RC7 is enabled AND actual flow > 0
+                        //   (RC7 on but flow=0 should NOT show green - pump may not be running)
+                        val sprayIsActive = if (isInAutoMode) {
+                            hasFlowDetected || autoModeSprayDetected
+                        } else {
+                            // Manual mode: require actual flow to confirm spraying
+                            rc7SprayEnabled && hasFlowDetected
+                        }
 
                         LogUtils.d("Flow", "SPRAY: rc7=$rc7SprayEnabled, flowDetected=$hasFlowDetected, autoSpray=$autoModeSprayDetected, active=$sprayIsActive, consumed=$consumedLiters, remaining=$flowRemainingPercent%, mode=$currentMode")
 
@@ -753,10 +758,9 @@ class MavlinkTelemetryRepository(
                                         sharedViewModel.announceTankEmpty()
                                         tankEmptyNotificationShown = true
 
-                                        // If in AUTO mode, switch to LOITER and trigger resume popup
-                                        if (isInAutoMode) {
-                                            sharedViewModel.handleTankEmptyInAutoMode()
-                                        }
+                                        // Switch to configured action (LOITER/RTL/LAND) regardless of flight mode
+                                        // This works in both AUTO mode and Manual modes
+                                        sharedViewModel.handleTankEmpty()
                                     }
                                 }
                             } else if (!flowIsZero) {
@@ -1313,6 +1317,18 @@ class MavlinkTelemetryRepository(
                     // Update SharedViewModel
                     sharedViewModel.updateCurrentWaypoint(currentSeq)
 
+                    // ═══ FIX: Reset spray detection when last waypoints reached ═══
+                    // When MISSION_CURRENT advances to the final mission items (DO_SPRAYER(0) + RTL/LAND),
+                    // the sprayer is already off. Reset autoModeSprayDetected to prevent false
+                    // "Tank Empty" alerts while still in AUTO mode during RTL/landing.
+                    val totalMissionItems = sharedViewModel.lastUploadedCount
+                    if (totalMissionItems > 0 && currentSeq >= totalMissionItems - 3) {
+                        if (autoModeSprayDetected) {
+                            LogUtils.i("SprayControl", "🛑 Resetting auto spray detection - mission near end (currentSeq=$currentSeq, total=$totalMissionItems)")
+                            resetAutoModeSprayDetection()
+                        }
+                    }
+
                     if (currentSeq != lastMissionSeq) {
                         lastMissionSeq = currentSeq
                         // NOTE: Removed waypoint execution notification from notification panel
@@ -1346,6 +1362,22 @@ class MavlinkTelemetryRepository(
 
                     // Update SharedViewModel
                     sharedViewModel.updateCurrentWaypoint(reachedSeq)
+
+                    // ═══ FIX: Reset spray detection when last waypoints reached ═══
+                    // When the drone reaches the final mission items (DO_SPRAYER(0) + RTL/LAND),
+                    // the sprayer is already off but autoModeSprayDetected is still true.
+                    // This causes a false "Tank Empty" alert because:
+                    //   sprayCommandActive = isInAutoMode && autoModeSprayDetected = true
+                    //   flow = 0 (sprayer was turned off by mission) → triggers tank empty after 3s
+                    // Fix: Reset spray detection when we reach the last 3 items of the mission
+                    // (accounts for final DO_SPRAYER(0) + completion action like RTL/LAND/LOITER)
+                    val totalMissionItems = sharedViewModel.lastUploadedCount
+                    if (totalMissionItems > 0 && reachedSeq >= totalMissionItems - 3) {
+                        if (autoModeSprayDetected) {
+                            LogUtils.i("SprayControl", "🛑 Resetting auto spray detection - last waypoint reached (seq=$reachedSeq, total=$totalMissionItems)")
+                            resetAutoModeSprayDetection()
+                        }
+                    }
 
                     // NOTE: Removed "Reached waypoint" notification from notification panel
                     // The UI already shows current waypoint progress in the telemetry display

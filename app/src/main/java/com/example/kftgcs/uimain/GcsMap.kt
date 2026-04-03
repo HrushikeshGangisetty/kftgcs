@@ -21,6 +21,9 @@ import kotlinx.coroutines.delay
 import timber.log.Timber
 import java.util.Locale
 
+// Helper constant for lemon yellow color (255, 244, 79)
+private val LEMON_YELLOW = Color(red = 255f / 255f, green = 244f / 255f, blue = 79f / 255f)
+
 // Helper function to create larger marker icons for waypoints - easier to interact with
 private fun createMediumMarker(hue: Float): BitmapDescriptor {
     // Create a larger bitmap for better touch targets (72px for mobile-friendly interaction)
@@ -37,13 +40,45 @@ private fun createMediumMarker(hue: Float): BitmapDescriptor {
         isAntiAlias = true
         color = when (hue) {
             BitmapDescriptorFactory.HUE_AZURE -> android.graphics.Color.CYAN
-            BitmapDescriptorFactory.HUE_VIOLET -> android.graphics.Color.MAGENTA
+            BitmapDescriptorFactory.HUE_ORANGE -> android.graphics.Color.YELLOW
             BitmapDescriptorFactory.HUE_GREEN -> android.graphics.Color.GREEN
             BitmapDescriptorFactory.HUE_RED -> android.graphics.Color.RED
             BitmapDescriptorFactory.HUE_ORANGE -> android.graphics.Color.rgb(255, 165, 0)
             BitmapDescriptorFactory.HUE_YELLOW -> android.graphics.Color.YELLOW
             else -> android.graphics.Color.BLUE
         }
+        style = android.graphics.Paint.Style.FILL
+    }
+
+    canvas.drawCircle(width / 2f, height / 2f, width / 2f - 4, paint)
+
+    // Add a thicker white border for better visibility
+    paint.style = android.graphics.Paint.Style.STROKE
+    paint.strokeWidth = 5f
+    paint.color = android.graphics.Color.WHITE
+    canvas.drawCircle(width / 2f, height / 2f, width / 2f - 4, paint)
+
+    // Add a thin dark outline for contrast on light backgrounds
+    paint.strokeWidth = 2f
+    paint.color = android.graphics.Color.DKGRAY
+    canvas.drawCircle(width / 2f, height / 2f, width / 2f - 1, paint)
+
+    return BitmapDescriptorFactory.fromBitmap(bitmap)
+}
+
+// Helper function to create a marker with lemon yellow color (255, 244, 79) for selected markers
+private fun createLemonYellowMarker(): BitmapDescriptor {
+    val size = 72
+    val width = size
+    val height = size
+
+    val bitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
+    val canvas = Canvas(bitmap)
+
+    // Draw a colored circle with lemon yellow color (255, 244, 79)
+    val paint = android.graphics.Paint().apply {
+        isAntiAlias = true
+        color = android.graphics.Color.rgb(255, 244, 79) // Lemon yellow
         style = android.graphics.Paint.Style.FILL
     }
 
@@ -408,7 +443,7 @@ fun GcsMap(
     val mediumBlueMarker = remember { createMediumMarker(BitmapDescriptorFactory.HUE_AZURE) }
     val mediumVioletMarker = remember { createMediumMarker(BitmapDescriptorFactory.HUE_VIOLET) }
     val mediumOrangeMarker = remember { createMediumMarker(BitmapDescriptorFactory.HUE_ORANGE) }
-    val mediumYellowMarker = remember { createMediumMarker(BitmapDescriptorFactory.HUE_YELLOW) } // For selected waypoint
+    val mediumYellowMarker = remember { createLemonYellowMarker() } // For selected waypoint - Lemon yellow (255, 244, 79)
     val mediumRedMarker = remember { createMediumMarker(BitmapDescriptorFactory.HUE_RED) } // For obstacles
 
     // Markers with text labels for grid waypoints
@@ -475,14 +510,14 @@ fun GcsMap(
                 Polyline(
                     points = closedPolygon,
                     width = 4f,
-                    color = Color.Yellow
+                    color = LEMON_YELLOW // Lemon yellow boundary
                 )
 
                 // Fill the polygon area with semi-transparent red
                 Polygon(
                     points = geofencePolygon,
                     fillColor = Color.Red.copy(alpha = 0.05f),
-                    strokeColor = Color.Yellow,
+                    strokeColor = LEMON_YELLOW, // Lemon yellow
                     strokeWidth = 4f
                 )
 
@@ -892,7 +927,7 @@ fun GcsMap(
             if (surveyPolygon.size > 2) {
                 // Close the polygon by connecting last point to first
                 val closedPolygon = surveyPolygon + surveyPolygon.first()
-                Polyline(points = closedPolygon, width = 6f, color = Color.Magenta) // Thicker for better visibility
+                Polyline(points = closedPolygon, width = 6f, color = LEMON_YELLOW) // Lemon yellow boundary
 
                 // Show area and dimensions when enabled
                 if (showGridInfo) {
@@ -1034,7 +1069,7 @@ fun GcsMap(
                     Polyline(
                         points = line,
                         width = 4f,  // Thicker line for selected portion
-                        color = Color.Yellow
+                        color = LEMON_YELLOW // Lemon yellow
                     )
                 }
             }
@@ -1055,7 +1090,7 @@ fun GcsMap(
                             Polyline(
                                 points = listOf(start, end),
                                 width = 3f,
-                                color = Color.Yellow.copy(alpha = 0.7f)
+                                color = LEMON_YELLOW.copy(alpha = 0.7f) // Lemon yellow
                             )
                         }
                     }

@@ -41,6 +41,7 @@ import com.example.kftgcs.videotracking.CameraTrackingState
 import com.example.kftgcs.videotracking.TrackingManager
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.withTimeoutOrNull
+import java.util.Locale
 
 enum class ConnectionType {
     TCP, BLUETOOTH
@@ -78,6 +79,14 @@ class SharedViewModel : ViewModel() {
     private val _telemetryState = MutableStateFlow(TelemetryState())
     val telemetryState: StateFlow<TelemetryState> = _telemetryState.asStateFlow()
 
+    // Battery failsafe tracking
+    private var lastVoltageAlertLevel1Time = 0L
+    private var lastVoltageAlertLevel2Time = 0L  // Track last Level 2 alert time for repeated warnings
+    private var voltageAlertLevel2Triggered = false
+    private var lastLevel2ModeAtTrigger: String? = null  // Track mode when Level 2 was triggered
+    private val VOLTAGE_ALERT_INTERVAL_MS = 3000L // Alert every 5 seconds for Level 1
+    private val VOLTAGE_CRITICAL_INTERVAL_MS = 5000L // Re-alert every 10 seconds for Level 2 if still critical
+
     init {
         // Setup emergency RTL callback for crash handler
         setupEmergencyRTLCallback()
@@ -100,6 +109,138 @@ class SharedViewModel : ViewModel() {
                     onMissionBecameActive()
                 }
                 wasActive = isActive
+            }
+        }
+
+        // 🔋 BATTERY VOLTAGE FAILSAFE MONITORING
+        // Monitors battery voltage against user-configured thresholds
+        viewModelScope.launch {
+            _telemetryState.collect { state ->
+                // Only monitor when connected and armed (in flight)
+                if (state.connected && state.armed && state.voltage != null) {
+                    handleBatteryVoltageFailsafe(state.voltage)
+                } else if (!state.armed) {
+                    // Reset tracking when disarmed
+                    voltageAlertLevel2Triggered = false
+                    lastVoltageAlertLevel1Time = 0L
+                    lastVoltageAlertLevel2Time = 0L
+                    lastLevel2ModeAtTrigger = null
+                }
+            }
+        }
+    }
+
+    /**
+     * Handle battery voltage failsafe monitoring.
+     * Level 1: Alert only (TTS + notification every 5 seconds)
+     * Level 2: Action (BRAKE/RTL/LAND) + TTS, repeated alerts every 10 seconds if still critical
+     */
+    private fun handleBatteryVoltageFailsafe(voltage: Float) {
+        val context = GCSApplication.getInstance() ?: return
+
+        val level1Threshold = getLowVoltLevel1(context)
+        val level2Threshold = getLowVoltLevel2(context)
+        val level2Action = getLowVoltLevel2Action(context)
+        val currentMode = _telemetryState.value.mode
+
+        val now = System.currentTimeMillis()
+
+        // Level 2 (critical) - takes priority
+        if (voltage <= level2Threshold) {
+            // Check if we should trigger/re-trigger the action:
+            // 1. Never triggered before (!voltageAlertLevel2Triggered)
+            // 2. Mode changed since last trigger (pilot overrode, so try again)
+            // 3. Enough time passed for a repeat alert
+            val shouldTriggerAction = !voltageAlertLevel2Triggered || 
+                (lastLevel2ModeAtTrigger != null && currentMode != lastLevel2ModeAtTrigger)
+            
+            val shouldAlert = !voltageAlertLevel2Triggered || 
+                (now - lastVoltageAlertLevel2Time >= VOLTAGE_CRITICAL_INTERVAL_MS)
+
+            if (shouldTriggerAction) {
+                voltageAlertLevel2Triggered = true
+                lastVoltageAlertLevel2Time = now
+                lastLevel2ModeAtTrigger = currentMode
+                
+                LogUtils.i("BatteryFailsafe", "⚠️ CRITICAL: Battery voltage ${voltage}V <= ${level2Threshold}V - Triggering $level2Action")
+
+                // TTS alert
+                ttsManager?.speak("Critical! Battery voltage ${String.format(Locale.US, "%.1f", voltage)} volts. Activating $level2Action mode.")
+
+                // Add notification
+                addNotification(
+                    Notification(
+                        message = "⚠️ CRITICAL BATTERY: ${String.format(Locale.US, "%.1f", voltage)}V - Activating $level2Action",
+                        type = NotificationType.ERROR
+                    )
+                )
+
+                // Execute the action
+                viewModelScope.launch {
+                    // Note: "HOVER" or "LOITER" setting uses BRAKE mode to keep drone in place
+                    val targetMode = when (level2Action.uppercase()) {
+                        "RTL" -> MavMode.RTL
+                        "LAND" -> MavMode.LAND
+                        else -> MavMode.BRAKE // Use BRAKE mode for hover - keeps drone in place
+                    }
+                    
+                    val targetModeName = when (targetMode) {
+                        MavMode.RTL -> "RTL"
+                        MavMode.LAND -> "LAND"
+                        MavMode.BRAKE -> "BRAKE"
+                        else -> level2Action
+                    }
+
+                    val result = repo?.changeMode(targetMode) ?: false
+                    if (result) {
+                        LogUtils.i("BatteryFailsafe", "✅ $targetModeName mode activated for battery failsafe")
+                    } else {
+                        LogUtils.e("BatteryFailsafe", "❌ Failed to activate $targetModeName mode for battery failsafe")
+                    }
+
+                    // Send event to WebSocket
+                    try {
+                        WebSocketManager.getInstance().sendMissionEvent(
+                            eventType = "BATTERY_CRITICAL",
+                            eventStatus = "CRITICAL",
+                            description = "Battery voltage critical (${String.format(Locale.US, "%.1f", voltage)}V) - $targetModeName activated"
+                        )
+                    } catch (e: Exception) {
+                        LogUtils.e("BatteryFailsafe", "Failed to send battery critical event", e)
+                    }
+                }
+            } else if (shouldAlert) {
+                // Just repeat the TTS warning without re-triggering mode change
+                lastVoltageAlertLevel2Time = now
+                LogUtils.i("BatteryFailsafe", "⚠️ CRITICAL (repeat): Battery voltage ${voltage}V still below ${level2Threshold}V")
+                ttsManager?.speak("Critical! Battery voltage ${String.format(Locale.US, "%.1f", voltage)} volts.")
+            }
+        }
+        // Level 1 (warning) - alert only, every 5 seconds
+        else if (voltage <= level1Threshold && voltage > level2Threshold) {
+            if (now - lastVoltageAlertLevel1Time >= VOLTAGE_ALERT_INTERVAL_MS) {
+                lastVoltageAlertLevel1Time = now
+                LogUtils.i("BatteryFailsafe", "⚠️ WARNING: Battery voltage ${voltage}V <= ${level1Threshold}V")
+
+                // TTS alert
+                ttsManager?.speak("Warning! Battery voltage ${String.format(Locale.US, "%.1f", voltage)} volts.")
+
+                // Add notification (less severe)
+                addNotification(
+                    Notification(
+                        message = "⚠️ Low Battery: ${String.format(Locale.US, "%.1f", voltage)}V",
+                        type = NotificationType.WARNING
+                    )
+                )
+            }
+        }
+        // Voltage recovered above level 2 - reset trigger
+        else if (voltage > level2Threshold + 0.5f) {
+            // Only reset if voltage is well above threshold to avoid oscillation
+            if (voltageAlertLevel2Triggered) {
+                LogUtils.i("BatteryFailsafe", "Battery voltage recovered: ${voltage}V")
+                voltageAlertLevel2Triggered = false
+                lastLevel2ModeAtTrigger = null
             }
         }
     }
@@ -417,61 +558,134 @@ class SharedViewModel : ViewModel() {
     }
 
     /**
-     * Handle tank empty detection during AUTO mission.
+     * Handle tank empty detection in ANY flight mode (AUTO or MANUAL).
      * This will:
-     * 1. Change mode to LOITER to hold position
-     * 2. The mode change detection (AUTO → LOITER) will automatically trigger the resume popup
+     * 1. Change mode to the user's selected tank empty action (LOITER/RTL/LAND)
+     * 2. The mode change detection will automatically trigger appropriate actions
      *
-     * Called from TelemetryRepository when tank empty is detected during AUTO mode.
+     * Called from TelemetryRepository when tank empty is detected.
      */
-    fun handleTankEmptyInAutoMode() {
+    fun handleTankEmpty() {
         viewModelScope.launch {
             try {
                 val currentMode = _telemetryState.value.mode
                 val currentWp = _telemetryState.value.currentWaypoint
                 val lastAutoWp = _telemetryState.value.lastAutoWaypoint
-
-                // Only proceed if we're in AUTO mode
-                if (currentMode?.equals("Auto", ignoreCase = true) != true) {
-                    LogUtils.d("SharedVM", "Tank empty detected but not in AUTO mode ($currentMode) - skipping LOITER transition")
+                
+                // Check if we're in AUTO mode (for mission status updates)
+                val isInAutoMode = currentMode?.equals("Auto", ignoreCase = true) == true
+                
+                // Skip if already in a safe mode (RTL or LAND)
+                if (currentMode?.equals("RTL", ignoreCase = true) == true ||
+                    currentMode?.equals("Land", ignoreCase = true) == true) {
+                    LogUtils.d("SharedVM", "Tank empty detected but already in safe mode ($currentMode) - skipping")
                     return@launch
                 }
 
-                LogUtils.i("SharedVM", "=== TANK EMPTY IN AUTO MODE ===")
-                LogUtils.i("SharedVM", "Switching to LOITER mode for tank refill")
+                // Get the user's selected tank empty action from settings
+                val context = GCSApplication.getInstance()
+                val tankEmptyAction = if (context != null) {
+                    getTankEmptyAction(context)
+                } else {
+                    "HOVER" // Default fallback
+                }
+
+                LogUtils.i("SharedVM", "=== TANK EMPTY DETECTED ===")
+                LogUtils.i("SharedVM", "Current flight mode: $currentMode")
+                LogUtils.i("SharedVM", "User configured action: $tankEmptyAction")
                 LogUtils.i("SharedVM", "Current waypoint: $currentWp, Last AUTO waypoint: $lastAutoWp")
 
-                // Change mode to LOITER - this will trigger the resume popup via mode change detection
-                // (AUTO → LOITER transition is detected in TelemetryRepository and triggers onModeChangedToLoiterFromAuto)
-                val result = repo?.changeMode(MavMode.LOITER) ?: false
+                // Determine the MAVLink mode based on user's setting
+                // Note: "HOVER" or "LOITER" setting uses BRAKE mode to keep drone in place
+                val targetMode = when (tankEmptyAction.uppercase()) {
+                    "RTL" -> MavMode.RTL
+                    "LAND" -> MavMode.LAND
+                    else -> MavMode.BRAKE // Use BRAKE mode for hover - keeps drone in place
+                }
+
+                val modeName = when (targetMode) {
+                    MavMode.RTL -> "RTL"
+                    MavMode.LAND -> "LAND"
+                    else -> "BRAKE"
+                }
+
+                LogUtils.i("SharedVM", "Switching to $modeName mode for tank empty")
+
+                // Change mode to user's selected action
+                val result = repo?.changeMode(targetMode) ?: false
 
                 if (result) {
-                    LogUtils.i("SharedVM", "LOITER mode command sent successfully - resume popup will be triggered by mode change detection")
+                    LogUtils.i("SharedVM", "$modeName mode command sent successfully")
+                    
+                    // TTS announcement for tank empty
+                    ttsManager?.speak("Tank empty! Switching to $modeName mode.")
 
-                    // Send mission status to backend
+                    // Send mission status to backend (only in AUTO mode)
                     try {
-                        WebSocketManager.getInstance().sendMissionStatus(WebSocketManager.MISSION_STATUS_PAUSED)
+                        if (isInAutoMode) {
+                            WebSocketManager.getInstance().sendMissionStatus(WebSocketManager.MISSION_STATUS_PAUSED)
+                        }
                         WebSocketManager.getInstance().sendMissionEvent(
                             eventType = "TANK_EMPTY_PAUSE",
                             eventStatus = "WARNING",
-                            description = "Mission paused due to tank empty"
+                            description = "Tank empty in ${currentMode ?: "Unknown"} mode - action: $modeName"
                         )
                     } catch (e: Exception) {
                         LogUtils.e("SharedVM", "Failed to send tank empty pause status", e)
                     }
                 } else {
-                    LogUtils.e("SharedVM", "Failed to send LOITER mode command for tank empty")
+                    LogUtils.e("SharedVM", "Failed to send $modeName mode command for tank empty")
                     addNotification(
                         Notification(
-                            message = "Failed to switch to LOITER mode for tank refill",
+                            message = "Failed to switch to $modeName mode for tank refill",
                             type = NotificationType.ERROR
                         )
                     )
                 }
             } catch (e: Exception) {
-                LogUtils.e("SharedVM", "Error handling tank empty in AUTO mode", e)
+                LogUtils.e("SharedVM", "Error handling tank empty", e)
             }
         }
+    }
+
+    /**
+     * Legacy function for backward compatibility - redirects to handleTankEmpty()
+     * @deprecated Use handleTankEmpty() instead
+     */
+    fun handleTankEmptyInAutoMode() {
+        handleTankEmpty()
+    }
+
+    /**
+     * Get the user's tank empty action setting from SharedPreferences
+     */
+    private fun getTankEmptyAction(context: Context): String {
+        val prefs = context.getSharedPreferences("failsafe_options", Context.MODE_PRIVATE)
+        return prefs.getString("tank_empty_action", "HOVER") ?: "HOVER"
+    }
+
+    /**
+     * Get the user's low voltage level 1 threshold from SharedPreferences
+     */
+    private fun getLowVoltLevel1(context: Context): Float {
+        val prefs = context.getSharedPreferences("failsafe_options", Context.MODE_PRIVATE)
+        return prefs.getFloat("low_volt_level_1", 22.2f)
+    }
+
+    /**
+     * Get the user's low voltage level 2 threshold from SharedPreferences
+     */
+    private fun getLowVoltLevel2(context: Context): Float {
+        val prefs = context.getSharedPreferences("failsafe_options", Context.MODE_PRIVATE)
+        return prefs.getFloat("low_volt_level_2", 21.0f)
+    }
+
+    /**
+     * Get the user's low voltage level 2 action from SharedPreferences
+     */
+    private fun getLowVoltLevel2Action(context: Context): String {
+        val prefs = context.getSharedPreferences("failsafe_options", Context.MODE_PRIVATE)
+        return prefs.getString("low_volt_level_2_action", "LAND") ?: "LAND"
     }
 
     fun speak(text: String) {

@@ -5,6 +5,8 @@ import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.view.WindowInsets
+import android.view.WindowInsetsController
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
@@ -16,13 +18,13 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.core.splashscreen.SplashScreen.Companion.installSplashScreen
+import androidx.core.view.WindowCompat
 import androidx.navigation.compose.rememberNavController
 import com.example.kftgcs.navigation.AppNavGraph
 import com.example.kftgcs.integration.TlogIntegration
 import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.viewbinding.BuildConfig
 //import com.example.kftgcs.BuildConfig
-import com.google.accompanist.systemuicontroller.rememberSystemUiController
 import com.example.kftgcs.telemetry.SharedViewModel
 import com.example.kftgcs.telemetry.WebSocketManager
 import com.example.kftgcs.api.SessionManager
@@ -109,9 +111,11 @@ class MainActivity : ComponentActivity() {
             }
         }, 1000)
 
+        // ✅ Enable immersive sticky mode - system bars auto-hide after swipe
+        enableImmersiveMode()
+
         setContent {
             val navController = rememberNavController()
-            val systemUiController = rememberSystemUiController()
 
             // Create SharedViewModel instance and initialize TTS
             val sharedViewModel: SharedViewModel = viewModel()
@@ -200,10 +204,6 @@ class MainActivity : ComponentActivity() {
                 }
             }
 
-            // Hide the system status bar for immersive experience
-            SideEffect {
-                systemUiController.isStatusBarVisible = false
-            }
             MaterialTheme(colorScheme = DarkColorScheme) {
                 Surface(
                     modifier = Modifier.fillMaxSize(),
@@ -218,6 +218,16 @@ class MainActivity : ComponentActivity() {
     override fun onResume() {
         super.onResume()
         askForPermissions()
+        // Re-apply immersive mode when resuming (e.g., after notification panel)
+        enableImmersiveMode()
+    }
+
+    override fun onWindowFocusChanged(hasFocus: Boolean) {
+        super.onWindowFocusChanged(hasFocus)
+        if (hasFocus) {
+            // Re-apply immersive mode when window regains focus
+            enableImmersiveMode()
+        }
     }
 
     override fun onDestroy() {
@@ -248,5 +258,34 @@ class MainActivity : ComponentActivity() {
         }
 
         requestPermissionsLauncher.launch(permissionsToRequest.toTypedArray())
+    }
+
+    /**
+     * Enable immersive sticky mode - hides status bar and navigation bar.
+     * When user swipes from the edge, system bars appear translucent briefly
+     * and then auto-hide again. This prevents the notification panel from
+     * permanently overlaying the app.
+     */
+    @Suppress("DEPRECATION")
+    private fun enableImmersiveMode() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            // API 30+ (Android 11+)
+            WindowCompat.setDecorFitsSystemWindows(window, false)
+            window.insetsController?.let { controller ->
+                controller.hide(WindowInsets.Type.statusBars() or WindowInsets.Type.navigationBars())
+                controller.systemBarsBehavior =
+                    WindowInsetsController.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+            }
+        } else {
+            // Legacy approach for API < 30
+            window.decorView.systemUiVisibility = (
+                android.view.View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY
+                    or android.view.View.SYSTEM_UI_FLAG_FULLSCREEN
+                    or android.view.View.SYSTEM_UI_FLAG_HIDE_NAVIGATION
+                    or android.view.View.SYSTEM_UI_FLAG_LAYOUT_STABLE
+                    or android.view.View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION
+                    or android.view.View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN
+            )
+        }
     }
 }

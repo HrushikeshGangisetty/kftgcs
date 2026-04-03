@@ -52,7 +52,7 @@ class OptionsViewModel(application: Application) : AndroidViewModel(application)
         private fun actionToBattFsValue(action: String): Float = when (action) {
             "LAND" -> 1.0f
             "RTL" -> 2.0f
-            "LOITER" -> 0.0f  // No failsafe action (stays in current mode / loiter)
+            "HOVER", "LOITER" -> 0.0f  // No failsafe action on FC (GCS handles BRAKE mode)
             else -> 2.0f
         }
     }
