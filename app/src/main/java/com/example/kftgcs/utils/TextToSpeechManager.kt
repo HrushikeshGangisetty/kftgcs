@@ -78,10 +78,19 @@ class TextToSpeechManager(private val context: Context) : TextToSpeech.OnInitLis
     fun setLanguage(languageCode: String) {
         currentLanguage = languageCode
         textToSpeech?.let { tts ->
-            val locale = if (languageCode == "en") {
-                Locale.US
-            } else {
-                Locale.forLanguageTag("te-IN")
+            val locale = when (languageCode) {
+                "en" -> Locale.US
+                "te" -> Locale.forLanguageTag("te-IN")
+                "hi" -> Locale.forLanguageTag("hi-IN")
+                "mr" -> Locale.forLanguageTag("mr-IN")
+                "ta" -> Locale.forLanguageTag("ta-IN")
+                "kn" -> Locale.forLanguageTag("kn-IN")
+                "ml" -> Locale.forLanguageTag("ml-IN")
+                "gu" -> Locale.forLanguageTag("gu-IN")
+                "as" -> Locale.forLanguageTag("as-IN")
+                "bn" -> Locale.forLanguageTag("bn-IN")
+                "pa" -> Locale.forLanguageTag("pa-IN")
+                else -> Locale.US
             }
 
             try {
@@ -315,9 +324,21 @@ class TextToSpeechManager(private val context: Context) : TextToSpeech.OnInitLis
      * Announces calibration type when entering calibration screens
      */
     fun announceCalibration(calibrationType: String) {
-        // Speak in Telugu: append the translated word for "calibration" (కేలిబ్రేషన్)
-        // Use grammatically correct Telugu: "<type> కేలిబ్రేషన్ ప్రారంభమైంది"
-        speak("$calibrationType కేలిబ్రేషన్ ప్రారంభమైంది")
+        val message = when (currentLanguage) {
+            "en" -> "$calibrationType calibration started"
+            "te" -> "$calibrationType కేలిబ్రేషన్ ప్రారంభమైంది"
+            "hi" -> "$calibrationType कैलिब्रेशन शुरू हो गया"
+            "mr" -> "$calibrationType कॅलिब्रेशन सुरू झाले"
+            "ta" -> "$calibrationType அளவுத்திருத்தம் தொடங்கியது"
+            "kn" -> "$calibrationType ಮಾಪನಾಂಕನ ಪ್ರಾರಂಭವಾಗಿದೆ"
+            "ml" -> "$calibrationType കാലിബ്രേഷൻ ആരംഭിച്ചു"
+            "gu" -> "$calibrationType કેલિબ્રેશન શરૂ થયું"
+            "as" -> "$calibrationType কেলিব্ৰেচন আৰম্ভ হৈছে"
+            "bn" -> "$calibrationType ক্যালিব্রেশন শুরু হয়েছে"
+            "pa" -> "$calibrationType ਕੈਲੀਬ੍ਰੇਸ਼ਨ ਸ਼ੁਰੂ ਹੋ ਗਈ"
+            else -> "$calibrationType calibration started"
+        }
+        speak(message)
     }
 
     /**
@@ -326,12 +347,12 @@ class TextToSpeechManager(private val context: Context) : TextToSpeech.OnInitLis
      */
     fun announceIMUPosition(position: String) {
         val spokenText = when (position.uppercase(Locale.US)) {
-            "LEVEL" -> "అన్ని వైపులా సమానంగా పెంటండి" // Level
-            "LEFT" -> "ఎడమ" // Left
-            "RIGHT" -> "కుడి" // Right
-            "NOSEDOWN", "NOSE_DOWN" -> "నోస్ కిందకి పెంటండి" // Nose down
-            "NOSEUP", "NOSE_UP" -> "నోస్ పైకి పెంటండి" // Nose up
-            "BACK" -> "వెనక్కి తిప్పండి" // Inverted down/back
+            "LEVEL" -> AppStrings.imuLevel
+            "LEFT" -> AppStrings.imuLeft
+            "RIGHT" -> AppStrings.imuRight
+            "NOSEDOWN", "NOSE_DOWN" -> AppStrings.imuNoseDown
+            "NOSEUP", "NOSE_UP" -> AppStrings.imuNoseUp
+            "BACK" -> AppStrings.imuBack
             else -> position.replace("_", " ")
                 .lowercase(Locale.US)
                 .replaceFirstChar { if (it.isLowerCase()) it.titlecase(Locale.getDefault()) else it.toString() }
@@ -364,10 +385,19 @@ class TextToSpeechManager(private val context: Context) : TextToSpeech.OnInitLis
      * Announces mission paused at waypoint
      */
     fun announceMissionPaused(waypoint: Int) {
-        val message = if (currentLanguage == "en") {
-            "Mission paused at waypoint $waypoint"
-        } else {
-            "మిషన్ వేపాయింట్ $waypoint వద్ద పాజ్ చేయబడింది"
+        val message = when (currentLanguage) {
+            "en" -> "Mission paused at waypoint $waypoint"
+            "te" -> "మిషన్ వేపాయింట్ $waypoint వద్ద పాజ్ చేయబడింది"
+            "hi" -> "मिशन वेपॉइंट $waypoint पर रुका हुआ है"
+            "mr" -> "मिशन वेपॉइंट $waypoint वर थांबले आहे"
+            "ta" -> "பணி வேபாயிண்ட் $waypoint இல் இடைநிறுத்தப்பட்டது"
+            "kn" -> "ಮಿಷನ್ ವೇಪಾಯಿಂಟ್ $waypoint ನಲ್ಲಿ ವಿರಾಮಗೊಂಡಿದೆ"
+            "ml" -> "മിഷൻ വേപോയിന്റ് $waypoint ൽ താൽക്കാലികമായി നിർത്തി"
+            "gu" -> "મિશન વેપોઈન્ટ $waypoint પર રોકાયેલ છે"
+            "as" -> "মিছন ৱেপইণ্ট $waypoint ত বিৰতি হৈছে"
+            "bn" -> "মিশন ওয়েপয়েন্ট $waypoint এ বিরতি দেওয়া হয়েছে"
+            "pa" -> "ਮਿਸ਼ਨ ਵੇਪੁਆਇੰਟ $waypoint ਤੇ ਰੁਕਿਆ ਹੋਇਆ ਹੈ"
+            else -> "Mission paused at waypoint $waypoint"
         }
         speak(message)
     }
@@ -381,13 +411,22 @@ class TextToSpeechManager(private val context: Context) : TextToSpeech.OnInitLis
 
     /**
      * Announces language selection
-     * @param languageCode "en" for English, "te" for Telugu
+     * @param languageCode language code like "en", "te", "hi", etc.
      */
     fun announceLanguageSelected(languageCode: String) {
-        val message = if (languageCode == "en") {
-            "English is selected"
-        } else {
-            "తెలుగు ని ఎంచుకున్నారు"
+        val message = when (languageCode) {
+            "en" -> "English is selected"
+            "te" -> "తెలుగు ఎంచుకున్నారు"
+            "hi" -> "हिन्दी चुनी गई है"
+            "mr" -> "मराठी निवडली आहे"
+            "ta" -> "தமிழ் தேர்ந்தெடுக்கப்பட்டது"
+            "kn" -> "ಕನ್ನಡ ಆಯ್ಕೆಯಾಗಿದೆ"
+            "ml" -> "മലയാളം തിരഞ്ഞെടുത്തു"
+            "gu" -> "ગુજરાતી પસંદ કરવામાં આવી છે"
+            "as" -> "অসমীয়া বাছনি কৰা হৈছে"
+            "bn" -> "বাংলা নির্বাচন করা হয়েছে"
+            "pa" -> "ਪੰਜਾਬੀ ਚੁਣੀ ਗਈ ਹੈ"
+            else -> "English is selected"
         }
         speakImmediate(message)
     }
@@ -457,25 +496,122 @@ class TextToSpeechManager(private val context: Context) : TextToSpeech.OnInitLis
     }
 
     private fun getMessage(key: String): String {
-        return when (key) {
-            "connected" -> if (currentLanguage == "en") "Connected" else "కనెక్ట్ అయింది"
-            "disconnected" -> if (currentLanguage == "en") "Disconnected" else "డిస్కనెక్ట్ అయింది"
-            "connection_failed" -> if (currentLanguage == "en") "Connection failed" else "కనెక్షన్ విఫలమైంది"
-            "calibration_started" -> if (currentLanguage == "en") "Calibration started" else "కేలిబ్రేషన్ ప్రారంభమైంది"
-            "calibration_finished" -> if (currentLanguage == "en") "Calibration finished" else "కేలిబ్రేషన్ ముగిసింది"
-            "calibration_success" -> if (currentLanguage == "en") "Calibration completed successfully" else "కేలిబ్రేషన్ విజయవంతంగా పూర్తయింది"
-            "calibration_failed" -> if (currentLanguage == "en") "Calibration failed" else "కేలిబ్రేష్ విఫలమైంది"
-            "selected_automatic" -> if (currentLanguage == "en") "Selected automatic" else "ఆటోమేటిక్ ఎంచుకున్నారు"
-            "selected_manual" -> if (currentLanguage == "en") "Selected manual" else "మాన్యువల్ ఎంచుకున్నారు"
-            "drone_armed" -> if (currentLanguage == "en") "Drone armed" else "డ్రోన్ ఆర్మ్ అయింది"
-            "drone_disarmed" -> if (currentLanguage == "en") "Drone disarmed" else "డ్రోన్ డిసార్మ్ అయింది"
-            "compass_calibration_started" -> if (currentLanguage == "en") "Compass calibration started" else "కంపాస్ కేలిబ్రేషన్ ప్రారంభమైంది"
-            "compass_calibration_completed" -> if (currentLanguage == "en") "Compass calibration completed successfully" else "కంపాస్ కేలిబ్రేషన్ విజయవంతంగా పూర్తయింది"
-            "compass_calibration_failed" -> if (currentLanguage == "en") "Compass calibration failed" else "కంపాస్ కేలిబ్రేషన్ విఫలమైంది"
-            "reboot_drone" -> if (currentLanguage == "en") "Please reboot your drone" else "దయచేసి మీ డ్రోన్ రీబూట్ చేయండి"
-            "mission_paused" -> if (currentLanguage == "en") "Mission paused" else "మిషన్ పాజ్ అయింది"
-            "mission_resumed" -> if (currentLanguage == "en") "Mission resumed" else "మిషన్ రిజ్యూమ్ అయింది"
-            else -> key
-        }
+        val translations: Map<String, Map<String, String>> = mapOf(
+            "connected" to mapOf(
+                "en" to "Connected", "te" to "కనెక్ట్ అయింది", "hi" to "कनेक्ट हो गया",
+                "mr" to "कनेक्ट झाले", "ta" to "இணைக்கப்பட்டது", "kn" to "ಸಂಪರ್ಕಗೊಂಡಿದೆ",
+                "ml" to "കണക്ട് ചെയ്തു", "gu" to "કનેક્ટ થયું", "as" to "সংযোগ হৈছে",
+                "bn" to "সংযুক্ত হয়েছে", "pa" to "ਕਨੈਕਟ ਹੋ ਗਿਆ"
+            ),
+            "disconnected" to mapOf(
+                "en" to "Disconnected", "te" to "డిస్కనెక్ట్ అయింది", "hi" to "डिस्कनेक्ट हो गया",
+                "mr" to "डिस्कनेक्ट झाले", "ta" to "துண்டிக்கப்பட்டது", "kn" to "ಸಂಪರ್ಕ ಕಡಿತಗೊಂಡಿದೆ",
+                "ml" to "വിച്ഛേദിച്ചു", "gu" to "ડિસ્કનેક્ટ થયું", "as" to "বিচ্ছিন্ন হৈছে",
+                "bn" to "সংযোগ বিচ্ছিন্ন হয়েছে", "pa" to "ਡਿਸਕਨੈਕਟ ਹੋ ਗਿਆ"
+            ),
+            "connection_failed" to mapOf(
+                "en" to "Connection failed", "te" to "కనెక్షన్ విఫలమైంది", "hi" to "कनेक्शन विफल हो गया",
+                "mr" to "कनेक्शन अयशस्वी", "ta" to "இணைப்பு தோல்வி", "kn" to "ಸಂಪರ್ಕ ವಿಫಲವಾಗಿದೆ",
+                "ml" to "കണക്ഷൻ പരാജയപ്പെട്ടു", "gu" to "કનેક્શન નિષ્ફળ", "as" to "সংযোগ বিফল হৈছে",
+                "bn" to "সংযোগ ব্যর্থ হয়েছে", "pa" to "ਕਨੈਕਸ਼ਨ ਅਸਫਲ ਹੋਇਆ"
+            ),
+            "calibration_started" to mapOf(
+                "en" to "Calibration started", "te" to "కేలిబ్రేషన్ ప్రారంభమైంది", "hi" to "कैलिब्रेशन शुरू हो गया",
+                "mr" to "कॅलिब्रेशन सुरू झाले", "ta" to "அளவுத்திருத்தம் தொடங்கியது", "kn" to "ಮಾಪನಾಂಕನ ಪ್ರಾರಂಭವಾಗಿದೆ",
+                "ml" to "കാലിബ്രേഷൻ ആരംഭിച്ചു", "gu" to "કેલિબ્રેશન શરૂ થયું", "as" to "কেলিব্ৰেচন আৰম্ভ হৈছে",
+                "bn" to "ক্যালিব্রেশন শুরু হয়েছে", "pa" to "ਕੈਲੀਬ੍ਰੇਸ਼ਨ ਸ਼ੁਰੂ ਹੋ ਗਈ"
+            ),
+            "calibration_finished" to mapOf(
+                "en" to "Calibration finished", "te" to "కేలిబ్రేషన్ ముగిసింది", "hi" to "कैलिब्रेशन समाप्त हो गया",
+                "mr" to "कॅलिब्रेशन पूर्ण झाले", "ta" to "அளவுத்திருத்தம் முடிந்தது", "kn" to "ಮಾಪನಾಂಕನ ಮುಗಿದಿದೆ",
+                "ml" to "കാലിബ്രേഷൻ പൂർത്തിയായി", "gu" to "કેલિબ્રેશન પૂર્ણ થયું", "as" to "কেলিব্ৰেচন সমাপ্ত হৈছে",
+                "bn" to "ক্যালিব্রেশন সম্পন্ন হয়েছে", "pa" to "ਕੈਲੀਬ੍ਰੇਸ਼ਨ ਪੂਰੀ ਹੋ ਗਈ"
+            ),
+            "calibration_success" to mapOf(
+                "en" to "Calibration completed successfully", "te" to "కేలిబ్రేషన్ విజయవంతంగా పూర్తయింది",
+                "hi" to "कैलिब्रेशन सफलतापूर्वक पूरा हुआ", "mr" to "कॅलिब्रेशन यशस्वीपणे पूर्ण झाले",
+                "ta" to "அளவுத்திருத்தம் வெற்றிகரமாக முடிந்தது", "kn" to "ಮಾಪನಾಂಕನ ಯಶಸ್ವಿಯಾಗಿ ಪೂರ್ಣಗೊಂಡಿದೆ",
+                "ml" to "കാലിബ്രേഷൻ വിജയകരമായി പൂർത്തിയായി", "gu" to "કેલિબ્રેશન સફળતાપૂર્વક પૂર્ણ થયું",
+                "as" to "কেলিব্ৰেচন সফলভাৱে সম্পন্ন হৈছে", "bn" to "ক্যালিব্রেশন সফলভাবে সম্পন্ন হয়েছে",
+                "pa" to "ਕੈਲੀਬ੍ਰੇਸ਼ਨ ਸਫਲਤਾਪੂਰਵਕ ਪੂਰੀ ਹੋ ਗਈ"
+            ),
+            "calibration_failed" to mapOf(
+                "en" to "Calibration failed", "te" to "కేలిబ్రేషన్ విఫలమైంది", "hi" to "कैलिब्रेशन विफल हो गया",
+                "mr" to "कॅलिब्रेशन अयशस्वी", "ta" to "அளவுத்திருத்தம் தோல்வி", "kn" to "ಮಾಪನಾಂಕನ ವಿಫಲವಾಗಿದೆ",
+                "ml" to "കാലിബ്രേഷൻ പരാജയപ്പെട്ടു", "gu" to "કેલિબ્રેશન નિષ્ફળ", "as" to "কেলিব্ৰেচন বিফল হৈছে",
+                "bn" to "ক্যালিব্রেশন ব্যর্থ হয়েছে", "pa" to "ਕੈਲੀਬ੍ਰੇਸ਼ਨ ਅਸਫਲ ਹੋ ਗਈ"
+            ),
+            "selected_automatic" to mapOf(
+                "en" to "Selected automatic", "te" to "ఆటోమేటిక్ ఎంచుకున్నారు", "hi" to "ऑटोमैटिक चुना गया",
+                "mr" to "ऑटोमॅटिक निवडले", "ta" to "தானியங்கி தேர்ந்தெடுக்கப்பட்டது", "kn" to "ಸ್ವಯಂಚಾಲಿತ ಆಯ್ಕೆಯಾಗಿದೆ",
+                "ml" to "ഓട്ടോമാറ്റിക് തിരഞ്ഞെടുത്തു", "gu" to "ઓટોમેટિક પસંદ કરાયું", "as" to "স্বয়ংক্ৰিয় বাছনি কৰা হৈছে",
+                "bn" to "স্বয়ংক্রিয় নির্বাচিত", "pa" to "ਆਟੋਮੈਟਿਕ ਚੁਣਿਆ ਗਿਆ"
+            ),
+            "selected_manual" to mapOf(
+                "en" to "Selected manual", "te" to "మాన్యువల్ ఎంచుకున్నారు", "hi" to "मैनुअल चुना गया",
+                "mr" to "मॅन्युअल निवडले", "ta" to "கைமுறை தேர்ந்தெடுக்கப்பட்டது", "kn" to "ಕೈಯಿಂದ ಆಯ್ಕೆಯಾಗಿದೆ",
+                "ml" to "മാനുവൽ തിരഞ്ഞെടുത്തു", "gu" to "મેન્યુઅલ પસંદ કરાયું", "as" to "মেনুৱেল বাছনি কৰা হৈছে",
+                "bn" to "ম্যানুয়াল নির্বাচিত", "pa" to "ਮੈਨੁਅਲ ਚੁਣਿਆ ਗਿਆ"
+            ),
+            "drone_armed" to mapOf(
+                "en" to "Drone armed", "te" to "డ్రోన్ ఆర్మ్ అయింది", "hi" to "ड्रोन आर्म हो गया",
+                "mr" to "ड्रोन आर्म झाले", "ta" to "ட்ரோன் ஆர்ம் ஆனது", "kn" to "ಡ್ರೋನ್ ಆರ್ಮ್ ಆಗಿದೆ",
+                "ml" to "ഡ്രോൺ ആർമ്ഡ് ആയി", "gu" to "ડ્રોન આર્મ થયું", "as" to "ড্ৰোন আৰ্ম হৈছে",
+                "bn" to "ড্রোন আর্মড হয়েছে", "pa" to "ਡ੍ਰੋਨ ਆਰਮ ਹੋ ਗਿਆ"
+            ),
+            "drone_disarmed" to mapOf(
+                "en" to "Drone disarmed", "te" to "డ్రోన్ డిసార్మ్ అయింది", "hi" to "ड्रोन डिसआर्म हो गया",
+                "mr" to "ड्रोन डिसआर्म झाले", "ta" to "ட்ரோன் டிசார்ம் ஆனது", "kn" to "ಡ್ರೋನ್ ಡಿಸಾರ್ಮ್ ಆಗಿದೆ",
+                "ml" to "ഡ്രോൺ ഡിസ്ആർമ്ഡ് ആയി", "gu" to "ડ્રોન ડિસઆર્મ થયું", "as" to "ড্ৰোন ডিচআৰ্ম হৈছে",
+                "bn" to "ড্রোন ডিসআর্মড হয়েছে", "pa" to "ਡ੍ਰੋਨ ਡਿਸਆਰਮ ਹੋ ਗਿਆ"
+            ),
+            "compass_calibration_started" to mapOf(
+                "en" to "Compass calibration started", "te" to "కంపాస్ కేలిబ్రేషన్ ప్రారంభమైంది",
+                "hi" to "कम्पास कैलिब्रेशन शुरू हो गया", "mr" to "कंपास कॅलिब्रेशन सुरू झाले",
+                "ta" to "திசைகாட்டி அளவுத்திருத்தம் தொடங்கியது", "kn" to "ಕಂಪಾಸ್ ಮಾಪನಾಂಕನ ಪ್ರಾರಂಭವಾಗಿದೆ",
+                "ml" to "കോമ്പസ് കാലിബ്രേഷൻ ആരംഭിച്ചു", "gu" to "કંપાસ કેલિબ્રેશન શરૂ થયું",
+                "as" to "কম্পাছ কেলিব্ৰেচন আৰম্ভ হৈছে", "bn" to "কম্পাস ক্যালিব্রেশন শুরু হয়েছে",
+                "pa" to "ਕੰਪਾਸ ਕੈਲੀਬ੍ਰੇਸ਼ਨ ਸ਼ੁਰੂ ਹੋ ਗਈ"
+            ),
+            "compass_calibration_completed" to mapOf(
+                "en" to "Compass calibration completed successfully", "te" to "కంపాస్ కేలిబ్రేషన్ విజయవంతంగా పూర్తయింది",
+                "hi" to "कम्पास कैलिब्रेशन सफलतापूर्वक पूरा हुआ", "mr" to "कंपास कॅलिब्रेशन यशस्वीपणे पूर्ण झाले",
+                "ta" to "திசைகாட்டி அளவுத்திருத்தம் வெற்றிகரமாக முடிந்தது", "kn" to "ಕಂಪಾಸ್ ಮಾಪನಾಂಕನ ಯಶಸ್ವಿಯಾಗಿ ಪೂರ್ಣಗೊಂಡಿದೆ",
+                "ml" to "കോമ്പസ് കാലിബ്രേഷൻ വിജയകരമായി പൂർത്തിയായി", "gu" to "કંપાસ કેલિબ્રેશન સફળતાપૂર્વક પૂર્ણ થયું",
+                "as" to "কম্পাছ কেলিব্ৰেচন সফলভাৱে সম্পন্ন হৈছে", "bn" to "কম্পাস ক্যালিব্রেশন সফলভাবে সম্পন্ন হয়েছে",
+                "pa" to "ਕੰਪਾਸ ਕੈਲੀਬ੍ਰੇਸ਼ਨ ਸਫਲਤਾਪੂਰਵਕ ਪੂਰੀ ਹੋ ਗਈ"
+            ),
+            "compass_calibration_failed" to mapOf(
+                "en" to "Compass calibration failed", "te" to "కంపాస్ కేలిబ్రేషన్ విఫలమైంది",
+                "hi" to "कम्पास कैलिब्रेशन विफल हो गया", "mr" to "कंपास कॅलिब्रेशन अयशस्वी",
+                "ta" to "திசைகாட்டி அளவுத்திருத்தம் தோல்வி", "kn" to "ಕಂಪಾಸ್ ಮಾಪನಾಂಕನ ವಿಫಲವಾಗಿದೆ",
+                "ml" to "കോമ്പസ് കാലിബ്രേഷൻ പരാജയപ്പെട്ടു", "gu" to "કંપાસ કેલિબ્રેશન નિષ્ફળ",
+                "as" to "কম্পাছ কেলিব্ৰেচন বিফল হৈছে", "bn" to "কম্পাস ক্যালিব্রেশন ব্যর্থ হয়েছে",
+                "pa" to "ਕੰਪਾਸ ਕੈਲੀਬ੍ਰੇਸ਼ਨ ਅਸਫਲ ਹੋ ਗਈ"
+            ),
+            "reboot_drone" to mapOf(
+                "en" to "Please reboot your drone", "te" to "దయచేసి మీ డ్రోన్ రీబూట్ చేయండి",
+                "hi" to "कृपया अपना ड्रोन रीबूट करें", "mr" to "कृपया आपले ड्रोन रीबूट करा",
+                "ta" to "உங்கள் ட்ரோனை மறுதொடக்கம் செய்யவும்", "kn" to "ದಯವಿಟ್ಟು ನಿಮ್ಮ ಡ್ರೋನ್ ಅನ್ನು ರೀಬೂಟ್ ಮಾಡಿ",
+                "ml" to "ദയവായി നിങ്ങളുടെ ഡ്രോൺ റീബൂട്ട് ചെയ്യുക", "gu" to "કૃપા કરીને તમારું ડ્રોન રીબૂટ કરો",
+                "as" to "অনুগ্ৰহ কৰি আপোনাৰ ড্ৰোন ৰিবুট কৰক", "bn" to "অনুগ্রহ করে আপনার ড্রোন রিবুট করুন",
+                "pa" to "ਕਿਰਪਾ ਕਰਕੇ ਆਪਣਾ ਡ੍ਰੋਨ ਰੀਬੂਟ ਕਰੋ"
+            ),
+            "mission_paused" to mapOf(
+                "en" to "Mission paused", "te" to "మిషన్ పాజ్ అయింది", "hi" to "मिशन रुका हुआ है",
+                "mr" to "मिशन थांबले आहे", "ta" to "பணி இடைநிறுத்தப்பட்டது", "kn" to "ಮಿಷನ್ ವಿರಾಮಗೊಂಡಿದೆ",
+                "ml" to "മിഷൻ താൽക്കാലികമായി നിർത്തി", "gu" to "મિશન રોકાયેલ છે", "as" to "মিছন বিৰতি হৈছে",
+                "bn" to "মিশন বিরতি দেওয়া হয়েছে", "pa" to "ਮਿਸ਼ਨ ਰੁਕਿਆ ਹੋਇਆ ਹੈ"
+            ),
+            "mission_resumed" to mapOf(
+                "en" to "Mission resumed", "te" to "మిషన్ రిజ్యూమ్ అయింది", "hi" to "मिशन फिर से शुरू हुआ",
+                "mr" to "मिशन पुन्हा सुरू झाले", "ta" to "பணி மீண்டும் தொடங்கியது", "kn" to "ಮಿಷನ್ ಪುನರಾರಂಭವಾಗಿದೆ",
+                "ml" to "മിഷൻ പുനരാരംഭിച്ചു", "gu" to "મિશન ફરી શરૂ થયું", "as" to "মিছন পুনৰাৰম্ভ হৈছে",
+                "bn" to "মিশন পুনরায় শুরু হয়েছে", "pa" to "ਮਿਸ਼ਨ ਦੁਬਾਰਾ ਸ਼ੁਰੂ ਹੋ ਗਿਆ"
+            )
+        )
+
+        val langMap = translations[key] ?: return key
+        return langMap[currentLanguage] ?: langMap["en"] ?: key
     }
 }

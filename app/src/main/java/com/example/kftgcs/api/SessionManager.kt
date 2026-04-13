@@ -2,8 +2,10 @@ package com.example.kftgcs.api
 
 import android.content.Context
 import android.content.SharedPreferences
+import android.media.MediaDrm
 import android.os.Build
 import android.provider.Settings
+import android.util.Base64
 import androidx.core.content.edit
 import androidx.security.crypto.EncryptedSharedPreferences
 import androidx.security.crypto.MasterKey
@@ -33,7 +35,6 @@ object SessionManager {
     private const val KEY_IS_LOGGED_IN = "is_logged_in"
     private const val KEY_FIRST_NAME = "first_name"
     private const val KEY_LAST_NAME = "last_name"
-    private const val KEY_DEVICE_ID = "device_id"
 
     // Legacy preferences name for migration
     private const val LEGACY_PREF_NAME = "pilot_session"
@@ -174,95 +175,76 @@ object SessionManager {
     }
 
     fun clearSession(context: Context) {
-        val prefs = getPreferences(context)
-        // Preserve the device ID across session clears (logout/login)
-        val deviceId = prefs.getString(KEY_DEVICE_ID, null)
-        prefs.edit {
-            clear()
-            // Restore device ID if it existed
-            deviceId?.let { putString(KEY_DEVICE_ID, it) }
-        }
+        getPreferences(context).edit { clear() }
     }
 
     /**
-     * Get a stable unique device identifier that persists across app reinstalls.
+     * Get a stable unique device identifier derived from hardware — survives app uninstall/reinstall.
      *
-     * Strategy:
-     * 1. First, check if we have a previously generated device ID stored (survives reinstall
-     *    if the app data was backed up, or on devices where SharedPreferences persists)
-     * 2. If not, use ANDROID_ID as a base combined with device hardware identifiers
-     *    to generate a deterministic UUID that is stable for the physical device.
-     * 3. Store this generated ID so it's consistently returned.
+     * Priority:
+     * 1. Widevine DRM device ID (hardware-backed, never changes)
+     * 2. ANDROID_ID (stable per app-signing-key + user + device on Android 8+)
+     * 3. SHA-256 hash of immutable Build properties (last resort)
      *
-     * Note: This approach creates a device-specific ID based on hardware properties
-     * that won't change even if the app is reinstalled, as long as it's the same
-     * physical device.
+     * Nothing is stored in SharedPreferences; the ID is recomputed on every call
+     * from the same hardware source, so it is always consistent.
      */
     fun getDeviceId(context: Context): String {
-        val prefs = getPreferences(context)
-
-        // Check if we already have a stored device ID
-        val storedId = prefs.getString(KEY_DEVICE_ID, null)
-        if (!storedId.isNullOrBlank() && storedId != "unknown") {
-            return storedId
+        // 1. Try hardware-backed Widevine ID first
+        val widevineId = getWidevineDeviceId()
+        if (!widevineId.isNullOrBlank()) {
+            return widevineId
         }
 
-        // Generate a new stable device ID based on hardware properties
-        val deviceId = generateStableDeviceId(context)
-
-        // Store for future use
-        prefs.edit {
-            putString(KEY_DEVICE_ID, deviceId)
+        // 2. Fallback to ANDROID_ID
+        val androidId = Settings.Secure.getString(
+            context.contentResolver,
+            Settings.Secure.ANDROID_ID
+        )
+        if (!androidId.isNullOrBlank() && androidId != "9774d56d682e549c") {
+            // "9774d56d682e549c" is a known bogus value present on some old/emulator devices
+            return androidId
         }
 
-        return deviceId
+        // 3. Last resort: deterministic hash of immutable Build properties
+        return generateBuildFingerprint()
     }
 
     /**
-     * Generates a stable device identifier based on hardware properties.
-     * This ID remains the same even after app uninstall/reinstall on the same device.
-     *
-     * IMPORTANT: Only uses properties that NEVER change for a given physical device:
-     * - ANDROID_ID: Stable per (app signing key + user + device) on Android 8+.
-     *   Does NOT change on reinstall as long as the same signing key is used.
-     * - Build.BOARD, BRAND, MANUFACTURER, MODEL, HARDWARE: Immutable hardware properties.
-     *
-     * NOT included (these cause instability):
-     * - Build.FINGERPRINT: Changes with every OS update / security patch.
-     * - Build.SERIAL: Returns "unknown" on Android 8+ without READ_PHONE_STATE permission.
+     * Retrieve the Widevine DRM device unique ID.
+     * This ID is hardware-backed and survives factory resets on some devices,
+     * and always survives app uninstall/reinstall.
+     * Returns null if Widevine is unavailable or the device does not support it.
      */
-    private fun generateStableDeviceId(context: Context): String {
-        // ANDROID_ID is the primary stable identifier
-        // On Android 8+, it's unique per (app signing key, user, device) and
-        // persists across reinstalls as long as the app is signed with the same key
-        val androidId = Settings.Secure.getString(context.contentResolver, Settings.Secure.ANDROID_ID) ?: ""
-
-        // Immutable hardware properties that NEVER change for a physical device
-        val deviceBoard = Build.BOARD
-        val deviceBrand = Build.BRAND
-        val deviceManufacturer = Build.MANUFACTURER
-        val deviceModel = Build.MODEL
-        val deviceHardware = Build.HARDWARE
-
-        // Create a stable hash from ONLY immutable device properties
-        val combinedString = buildString {
-            // ANDROID_ID is the primary unique identifier
-            append(androidId)
-            // Hardware properties provide additional uniqueness and stability
-            append(deviceBoard)
-            append(deviceBrand)
-            append(deviceManufacturer)
-            append(deviceModel)
-            append(deviceHardware)
-        }
-
-        // Generate a deterministic UUID from the combined string
+    private fun getWidevineDeviceId(): String? {
         return try {
-            UUID.nameUUIDFromBytes(combinedString.toByteArray()).toString()
+            val WIDEVINE_UUID = UUID(-0x121074568629b532L, -0x5c37d8232ae2de13L)
+            val mediaDrm = MediaDrm(WIDEVINE_UUID)
+            val widevineId = mediaDrm.getPropertyByteArray(MediaDrm.PROPERTY_DEVICE_UNIQUE_ID)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                mediaDrm.close()
+            } else {
+                @Suppress("DEPRECATION")
+                mediaDrm.release()
+            }
+            if (widevineId != null && widevineId.isNotEmpty()) {
+                Base64.encodeToString(widevineId, Base64.NO_WRAP)
+            } else null
         } catch (e: Exception) {
-            // Fallback to ANDROID_ID if UUID generation fails
-            androidId.ifBlank { "unknown-${System.currentTimeMillis()}" }
+            null
         }
+    }
+
+    /**
+     * Generate a deterministic identifier by SHA-256 hashing immutable Build properties.
+     * Used only as a last resort when both Widevine and ANDROID_ID are unavailable.
+     */
+    private fun generateBuildFingerprint(): String {
+        val fingerprint = "${Build.BOARD}${Build.BRAND}${Build.DEVICE}" +
+            "${Build.HARDWARE}${Build.MANUFACTURER}${Build.MODEL}${Build.PRODUCT}"
+        return fingerprint.toByteArray()
+            .let { java.security.MessageDigest.getInstance("SHA-256").digest(it) }
+            .let { Base64.encodeToString(it, Base64.NO_WRAP) }
     }
 }
 

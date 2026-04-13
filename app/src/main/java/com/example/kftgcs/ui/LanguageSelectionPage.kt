@@ -33,7 +33,12 @@ fun LanguageSelectionPage(
     var expanded by remember { mutableStateOf(false) }
     var selectedLanguage by remember { mutableStateOf("Select Language") }
 
-    val languages = listOf("English", "Telugu")
+    val languages = listOf(
+        "English", "తెలుగు (Telugu)", "हिन्दी (Hindi)", "मराठी (Marathi)",
+        "தமிழ் (Tamil)", "ಕನ್ನಡ (Kannada)", "മലയാളം (Malayalam)",
+        "ગુજરાતી (Gujarati)", "অসমীয়া (Assamese)", "বাংলা (Bangla)",
+        "ਪੰਜਾਬੀ (Punjabi)"
+    )
 
     // Check if we're coming from the app (user is already logged in)
     val isFromApp = navController.previousBackStackEntry != null &&
@@ -146,16 +151,22 @@ fun LanguageSelectionPage(
                                 expanded = false
 
                                 // Set language in SharedViewModel (this updates both TTS and UI strings)
-                                when (language) {
-                                    "English" -> {
-                                        sharedViewModel.setLanguage("en")
-                                        sharedViewModel.announceLanguageSelected("en")
-                                    }
-                                    "Telugu" -> {
-                                        sharedViewModel.setLanguage("te")
-                                        sharedViewModel.announceLanguageSelected("te")
-                                    }
+                                val langCode = when (language) {
+                                    "English" -> "en"
+                                    "తెలుగు (Telugu)" -> "te"
+                                    "हिन्दी (Hindi)" -> "hi"
+                                    "मराठी (Marathi)" -> "mr"
+                                    "தமிழ் (Tamil)" -> "ta"
+                                    "ಕನ್ನಡ (Kannada)" -> "kn"
+                                    "മലയാളം (Malayalam)" -> "ml"
+                                    "ગુજરાતી (Gujarati)" -> "gu"
+                                    "অসমীয়া (Assamese)" -> "as"
+                                    "বাংলা (Bangla)" -> "bn"
+                                    "ਪੰਜਾਬੀ (Punjabi)" -> "pa"
+                                    else -> "en"
                                 }
+                                sharedViewModel.setLanguage(langCode)
+                                sharedViewModel.announceLanguageSelected(langCode)
                             },
                             colors = MenuDefaults.itemColors(textColor = Color.White)
                         )
