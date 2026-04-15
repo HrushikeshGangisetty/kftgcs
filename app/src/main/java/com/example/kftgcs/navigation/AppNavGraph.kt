@@ -59,6 +59,10 @@ import com.example.kftgcs.parammanagement.AboutDroneViewModel
 import com.example.kftgcs.parammanagement.FullParamListScreen
 import com.example.kftgcs.parammanagement.FullParamListViewModel
 import com.example.kftgcs.parammanagement.BreakingSettingsScreen
+import com.example.kftgcs.parammanagement.FlightModeScreen
+import com.example.kftgcs.parammanagement.FlightModeViewModel
+import com.example.kftgcs.parammanagement.ServoOutputScreen
+import com.example.kftgcs.parammanagement.SpraySettingsScreen
 
 sealed class Screen(val route: String) {
     object Welcome : Screen("welcome")
@@ -98,6 +102,9 @@ sealed class Screen(val route: String) {
     object ParamAboutDrone : Screen("param_about_drone")
     object ParamFullParamList : Screen("param_full_param_list")
     object ParamBreakingSettings : Screen("param_breaking_settings")
+    object ParamFlightMode : Screen("param_flight_mode")
+    object ParamServoOutput : Screen("param_servo_output")
+    object ParamSpraySettings : Screen("param_spray_settings")
 }
 
 @Composable
@@ -428,6 +435,22 @@ fun AppNavGraph(navController: NavHostController) {
 
         composable(Screen.ParamBreakingSettings.route) {
             BreakingSettingsScreen(navController = navController)
+        }
+
+        composable(Screen.ParamFlightMode.route) {
+            val flightModeViewModel: FlightModeViewModel = viewModel { FlightModeViewModel(sharedViewModel) }
+            FlightModeScreen(
+                navController = navController,
+                viewModel = flightModeViewModel
+            )
+        }
+
+        composable(Screen.ParamServoOutput.route) {
+            ServoOutputScreen(navController = navController)
+        }
+
+        composable(Screen.ParamSpraySettings.route) {
+            SpraySettingsScreen(navController = navController)
         }
     }
 }

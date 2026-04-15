@@ -8,10 +8,13 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.List
 import androidx.compose.material.icons.automirrored.filled.Logout
+import androidx.compose.material.icons.filled.Cable
+import androidx.compose.material.icons.filled.FlightTakeoff
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Tune
+import androidx.compose.material.icons.filled.WaterDrop
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -42,9 +45,12 @@ fun ParamManagementHomeScreen(
     val coroutineScope = rememberCoroutineScope()
 
     val navItems = listOf(
-        ParamNavItem("About Drone", Icons.Filled.Info, Screen.ParamAboutDrone.route),
-        ParamNavItem("Full Param List", Icons.AutoMirrored.Filled.List, Screen.ParamFullParamList.route),
-        ParamNavItem("Breaking Settings", Icons.Filled.Settings, Screen.ParamBreakingSettings.route)
+        ParamNavItem("About Drone",      Icons.Filled.Info,                        Screen.ParamAboutDrone.route),
+        ParamNavItem("Full Param List",  Icons.AutoMirrored.Filled.List,           Screen.ParamFullParamList.route),
+        ParamNavItem("Flight Modes",     Icons.Filled.FlightTakeoff,               Screen.ParamFlightMode.route),
+        ParamNavItem("Servo Output",     Icons.Filled.Cable,                       Screen.ParamServoOutput.route),
+        ParamNavItem("Spray Settings",   Icons.Filled.WaterDrop,                   Screen.ParamSpraySettings.route),
+        ParamNavItem("Breaking Settings",Icons.Filled.Settings,                    Screen.ParamBreakingSettings.route)
     )
 
     ModalNavigationDrawer(
