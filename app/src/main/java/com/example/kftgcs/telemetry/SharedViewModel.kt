@@ -4280,8 +4280,8 @@ class SharedViewModel : ViewModel() {
                 val context = GCSApplication.getInstance() ?: return@launch
                 val prefs = context.getSharedPreferences("failsafe_options", Context.MODE_PRIVATE)
 
-                val lowVoltLevel1 = prefs.getFloat("low_volt_level_1", 22.2f)
-                val lowVoltLevel2 = prefs.getFloat("low_volt_level_2", 21.0f)
+                val lowVoltLevel1 = prefs.getFloat("low_volt_level_1", 43.0f) // defaults to 43
+                val lowVoltLevel2 = prefs.getFloat("low_volt_level_2", 42.0f) // defaults to 42
                 val lowVoltLevel2Action = prefs.getString("low_volt_level_2_action", "HOVER") ?: "HOVER"
 
                 LogUtils.i("OptionsSync", "Auto-syncing failsafe options to drone on connect...")

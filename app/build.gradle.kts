@@ -30,6 +30,13 @@ android {
 
         // Inject Maps API key from local.properties into AndroidManifest.xml
         manifestPlaceholders["MAPS_API_KEY"] = localProperties.getProperty("MAPS_API_KEY") ?: ""
+
+        // KFT authentication secret (hex-encoded 32-byte key, stored only in local.properties)
+        buildConfigField(
+            "String",
+            "KFT_APP_SECRET",
+            "\"${localProperties.getProperty("KFT_APP_SECRET") ?: ""}\""
+        )
     }
 
     buildTypes {

@@ -32,6 +32,8 @@ import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlin.coroutines.resume
 import com.divpundir.mavlink.api.MavFrame
 import com.divpundir.mavlink.api.MavMessage
+import com.example.kftgcs.auth.KFTAuth
+import com.example.kftgcs.auth.AuthResult
 import com.example.kftgcs.utils.LogUtils
 import kotlinx.coroutines.withTimeoutOrNull
 import timber.log.Timber
@@ -106,12 +108,18 @@ class MavlinkTelemetryRepository(
 
     // Connection
     val connection = provider.createConnection()
-    lateinit var mavFrame: Flow<MavFrame<out MavMessage<*>>>
+    lateinit var mavFrame: SharedFlow<MavFrame<out MavMessage<*>>>
         private set
 
     // Track last heartbeat time from FCU (thread-safe using AtomicLong)
     private val lastFcuHeartbeatTime = AtomicLong(0L)
     private val HEARTBEAT_TIMEOUT_MS = 8000L // Increased to 8 seconds for Bluetooth reliability
+
+    // KFT Auth state
+    private val _authStatus = MutableStateFlow(AuthResult.FAILED)
+    val authStatusFlow: StateFlow<AuthResult> = _authStatus.asStateFlow()
+    private val lastAuthAttemptTime = AtomicLong(0L)
+    @Volatile private var activeAuthJob: kotlinx.coroutines.Job? = null
 
     // Rate limiting for state updates to reduce Bluetooth buffer pressure
     private var lastStateUpdateTime = 0L
@@ -207,6 +215,186 @@ class MavlinkTelemetryRepository(
     // ════════════════════════════════════════════════════════════════
     private val _fenceStatus = MutableStateFlow(FenceStatus())
     val fenceStatus: StateFlow<FenceStatus> = _fenceStatus.asStateFlow()
+
+    /**
+     * Shared auth launcher with debouncing — triggers KFT auth handshake.
+     * Safe to call from any coroutine; won't interfere with BT/TCP connections.
+     */
+    private fun launchAuthentication(reason: String) {
+        val now = System.currentTimeMillis()
+        val lastAttempt = lastAuthAttemptTime.get()
+
+        android.util.Log.w("KFTAuth", "launchAuthentication called: reason=$reason")
+
+        // Debounce: don't attempt auth more than once every 2 seconds
+        if (now - lastAttempt < 2000L) {
+            android.util.Log.w("KFTAuth", "Auth debounced (last attempt ${now - lastAttempt}ms ago)")
+            return
+        }
+        lastAuthAttemptTime.set(now)
+
+        // Cancel any in-flight auth to prevent race conditions
+        activeAuthJob?.let {
+            android.util.Log.w("KFTAuth", "Cancelling previous auth job")
+            it.cancel()
+        }
+
+        activeAuthJob = AppScope.launch {
+            android.util.Log.w("KFTAuth", "Starting auth coroutine: $reason (fcuSys=$fcuSystemId fcuComp=$fcuComponentId)")
+            try {
+                val result = KFTAuth.authenticate(
+                    connection = connection,
+                    mavFrame = mavFrame,
+                    gcsSystemId = gcsSystemId,
+                    gcsComponentId = gcsComponentId,
+                    fcuSystemId = fcuSystemId,
+                    fcuComponentId = fcuComponentId
+                )
+                _authStatus.value = result
+
+                when (result) {
+                    AuthResult.AUTHENTICATED -> {
+                        android.util.Log.w("KFTAuth", "✓ Authenticated with secure firmware")
+                        // Now it's safe to request streams, params, etc.
+                        delay(500) // Small delay to let firmware process the auth
+                        requestPostAuthSetup()
+                    }
+                    AuthResult.LEGACY_FIRMWARE -> {
+                        android.util.Log.w("KFTAuth", "→ Legacy firmware detected, no auth required")
+                        // Streams were already accepted, but re-request to be safe
+                        requestPostAuthSetup()
+                    }
+                    AuthResult.DENIED -> {
+                        android.util.Log.e("KFTAuth", "✗ Authentication DENIED — wrong key or unauthorized app")
+                    }
+                    AuthResult.FAILED -> {
+                        android.util.Log.e("KFTAuth", "✗ Authentication failed (connection issue)")
+                        delay(2000)
+                        launchAuthentication("retry after failure")
+                    }
+                }
+            } catch (e: Exception) {
+                android.util.Log.e("KFTAuth", "Auth coroutine exception: ${e.message}", e)
+            }
+        }
+    }
+
+    /**
+     * Sends all setup messages (stream requests, param requests, etc.) AFTER auth completes.
+     * This ensures the firmware accepts our messages post-authentication.
+     */
+    private fun requestPostAuthSetup() {
+        AppScope.launch {
+            android.util.Log.i("KFTAuth", "Sending post-auth setup messages (streams, params, etc.)")
+
+
+                // Testing for checking if command changes work post auth
+//            // ===== TEMPORARY TEST: Verify commands work after auth =====
+//            val setModeCmd = CommandLong(
+//                targetSystem = fcuSystemId,
+//                targetComponent = fcuComponentId,
+//                command = MavCmd.DO_SET_MODE.wrap(),
+//                confirmation = 0u,
+//                param1 = 1f,  // MAV_MODE_FLAG_CUSTOM_MODE_ENABLED
+//                param2 = 3f,  // Auto mode
+//                param3 = 0f, param4 = 0f, param5 = 0f, param6 = 0f, param7 = 0f
+//            )
+//            try {
+//                connection.trySendUnsignedV2(gcsSystemId, gcsComponentId, setModeCmd)
+//                android.util.Log.w("KFTAuth", "TEST: Sent DO_SET_MODE STABILIZE")
+//            } catch (e: Exception) {
+//                android.util.Log.e("KFTAuth", "TEST: Failed to send mode: ${e.message}")
+//            }
+//
+//            // Also request full parameter list
+//            val paramRequest = ParamRequestList(
+//                targetSystem = fcuSystemId,
+//                targetComponent = fcuComponentId
+//            )
+//            try {
+//                connection.trySendUnsignedV2(gcsSystemId, gcsComponentId, paramRequest)
+//                android.util.Log.w("KFTAuth", "TEST: Sent PARAM_REQUEST_LIST")
+//            } catch (e: Exception) {
+//                android.util.Log.e("KFTAuth", "TEST: Failed to request params: ${e.message}")
+//            }
+//
+//            delay(1000)
+            // ===== END TEMPORARY TEST =====
+
+            suspend fun setMessageRate(messageId: UInt, hz: Float) {
+                val intervalUsec = if (hz <= 0f) 0f else (1_000_000f / hz)
+                val cmd = CommandLong(
+                    targetSystem = fcuSystemId,
+                    targetComponent = fcuComponentId,
+                    command = MavCmd.SET_MESSAGE_INTERVAL.wrap(),
+                    confirmation = 0u,
+                    param1 = messageId.toFloat(),
+                    param2 = intervalUsec,
+                    param3 = 0f,
+                    param4 = 0f,
+                    param5 = 0f,
+                    param6 = 0f,
+                    param7 = 0f
+                )
+                try {
+                    connection.trySendUnsignedV2(gcsSystemId, gcsComponentId, cmd)
+                } catch (e: Exception) {
+                    _lastFailure.value = e
+                }
+            }
+
+            setMessageRate(1u, 4f)     // SYS_STATUS - 4Hz for fast battery voltage monitoring
+            setMessageRate(24u, 0.5f)  // GPS_RAW_INT - reduced from 1Hz for Bluetooth
+            setMessageRate(33u, 5f)    // GLOBAL_POSITION_INT - increased to 5Hz for smoother position updates
+            setMessageRate(74u, 20f)   // VFR_HUD - 20Hz (50ms) for INSTANT speed updates (pilot critical)
+            setMessageRate(30u, 20f)   // ATTITUDE - 20Hz (50ms) for smooth yaw updates (critical for nose position)
+            setMessageRate(147u, 4f)   // BATTERY_STATUS - 4Hz for fast flow rate updates (spray telemetry)
+            setMessageRate(65u, 1f)    // RC_CHANNELS - reduced from 2Hz for Bluetooth
+
+            // Request RADIO_STATUS for RC battery monitoring
+            setMessageRate(109u, 1f) // RADIO_STATUS (1Hz for RC battery monitoring)
+
+            // Request AUTOPILOT_VERSION for drone identification
+            val autopilotVersionCmd = CommandLong(
+                targetSystem = fcuSystemId,
+                targetComponent = fcuComponentId,
+                command = MavCmd.REQUEST_MESSAGE.wrap(),
+                confirmation = 0u,
+                param1 = 148f, // AUTOPILOT_VERSION message ID
+                param2 = 0f,
+                param3 = 0f,
+                param4 = 0f,
+                param5 = 0f,
+                param6 = 0f,
+                param7 = 0f
+            )
+            try {
+                connection.trySendUnsignedV2(gcsSystemId, gcsComponentId, autopilotVersionCmd)
+            } catch (e: Exception) {
+            }
+
+            // Request spray telemetry capacity parameters
+            delay(500) // Small delay to let message rates stabilize
+            requestSprayCapacityParameters()
+
+            // Start monitoring fence status from FC
+            startFenceMonitoring()
+
+            // ═══ LAYER 3: Query MISSION_COUNT from FC on connect ═══
+            if (sharedViewModel.lastUploadedCount == 0) {
+                try {
+                    delay(1000) // Let connection stabilize
+                    val fcMissionCount = getMissionCount()
+                    if (fcMissionCount != null && fcMissionCount > 0) {
+                        sharedViewModel.lastUploadedCount = fcMissionCount
+                        LogUtils.i("SprayControl", "📋 FC mission count queried on connect: $fcMissionCount items (lastUploadedCount was 0)")
+                    }
+                } catch (e: Exception) {
+                    LogUtils.w("SprayControl", "⚠️ Failed to query FC mission count on connect: ${e.message}")
+                }
+            }
+        }
+    }
 
     /**
      * Throttled state update for high-frequency messages (GPS, VFR_HUD, etc.)
@@ -372,90 +560,39 @@ class MavlinkTelemetryRepository(
                             )
                         }
 
-                        // Set message intervals
-                        launch {
-                            suspend fun setMessageRate(messageId: UInt, hz: Float) {
-                                val intervalUsec = if (hz <= 0f) 0f else (1_000_000f / hz)
-                                val cmd = CommandLong(
-                                    targetSystem = fcuSystemId,
-                                    targetComponent = fcuComponentId,
-                                    command = MavCmd.SET_MESSAGE_INTERVAL.wrap(),
-                                    confirmation = 0u,
-                                    param1 = messageId.toFloat(),
-                                    param2 = intervalUsec,
-                                    param3 = 0f,
-                                    param4 = 0f,
-                                    param5 = 0f,
-                                    param6 = 0f,
-                                    param7 = 0f
-                                )
-                                try {
-                                    connection.trySendUnsignedV2(gcsSystemId, gcsComponentId, cmd)
-                                } catch (e: Exception) {
-                                    _lastFailure.value = e
-                                }
-                            }
-
-                            setMessageRate(1u, 4f)     // SYS_STATUS - 4Hz for fast battery voltage monitoring
-                            setMessageRate(24u, 0.5f)  // GPS_RAW_INT - reduced from 1Hz for Bluetooth
-                            setMessageRate(33u, 5f)    // GLOBAL_POSITION_INT - increased to 5Hz for smoother position updates
-                            setMessageRate(74u, 20f)   // VFR_HUD - 20Hz (50ms) for INSTANT speed updates (pilot critical)
-                            setMessageRate(30u, 20f)   // ATTITUDE - 20Hz (50ms) for smooth yaw updates (critical for nose position)
-                            setMessageRate(147u, 4f)   // BATTERY_STATUS - 4Hz for fast flow rate updates (spray telemetry)
-                            setMessageRate(65u, 1f)    // RC_CHANNELS - reduced from 2Hz for Bluetooth
-
-                            // Request RADIO_STATUS for RC battery monitoring
-                            setMessageRate(109u, 1f) // RADIO_STATUS (1Hz for RC battery monitoring)
-
-                            // Request AUTOPILOT_VERSION for drone identification
-                            val autopilotVersionCmd = CommandLong(
-                                targetSystem = fcuSystemId,
-                                targetComponent = fcuComponentId,
-                                command = MavCmd.REQUEST_MESSAGE.wrap(),
-                                confirmation = 0u,
-                                param1 = 148f, // AUTOPILOT_VERSION message ID
-                                param2 = 0f,
-                                param3 = 0f,
-                                param4 = 0f,
-                                param5 = 0f,
-                                param6 = 0f,
-                                param7 = 0f
-                            )
-                            try {
-                                connection.trySendUnsignedV2(gcsSystemId, gcsComponentId, autopilotVersionCmd)
-                            } catch (e: Exception) {
-                            }
-
-                            // Request spray telemetry capacity parameters
-                            delay(500) // Small delay to let message rates stabilize
-                            requestSprayCapacityParameters()
-
-                            // Start monitoring fence status from FC
-                            startFenceMonitoring()
-
-                            // ═══ LAYER 3: Query MISSION_COUNT from FC on connect ═══
-                            // If lastUploadedCount is 0 (e.g., reconnect mid-session, or mission
-                            // was pre-stored on the FC), query the FC for the total mission count.
-                            // This ensures the count-based mission-end check works after reconnect.
-                            if (sharedViewModel.lastUploadedCount == 0) {
-                                scope.launch {
-                                    try {
-                                        delay(1000) // Let connection stabilize
-                                        val fcMissionCount = getMissionCount()
-                                        if (fcMissionCount != null && fcMissionCount > 0) {
-                                            sharedViewModel.lastUploadedCount = fcMissionCount
-                                            LogUtils.i("SprayControl", "📋 FC mission count queried on connect: $fcMissionCount items (lastUploadedCount was 0)")
-                                        }
-                                    } catch (e: Exception) {
-                                        LogUtils.w("SprayControl", "⚠️ Failed to query FC mission count on connect: ${e.message}")
-                                    }
-                                }
-                            }
-                        }
+                        // ===== KFT AUTH - INITIAL AUTHENTICATION =====
+                        // All setup messages (stream requests, params, etc.) are sent ONLY after auth completes
+                        android.util.Log.w("KFTAuth", "FCU detected! sysId=$fcuSystemId compId=$fcuComponentId — launching auth")
+                        launchAuthentication("initial connection")
                     } else if (!state.value.connected) {
                         // FCU was detected before but connection was lost, now it's back
                         _state.update { state -> state.copy(connected = true) }
                     }
+                }
+        }
+
+        // ─── Re-auth watcher: monitor heartbeat gaps, re-auth on link recovery ───
+        scope.launch {
+            var previousHeartbeatTime = 0L
+            mavFrame
+                .filter { frame ->
+                    val msg = frame.message
+                    msg is Heartbeat
+                            && msg.type != MavType.GCS.wrap()
+                            && msg.autopilot != MavAutopilot.INVALID.wrap()
+                }
+                .collect {
+                    val now = System.currentTimeMillis()
+                    val gap = if (previousHeartbeatTime == 0L) 0L else (now - previousHeartbeatTime)
+
+                    // Firmware auth times out at 5 seconds of no heartbeat.
+                    // We use 6 seconds as our trigger threshold with a small safety margin.
+                    if (gap > 6000L && state.value.fcuDetected) {
+                        android.util.Log.i("KFTAuth", "Heartbeat gap detected: ${gap}ms — triggering re-auth")
+                        launchAuthentication("link recovery")
+                    }
+
+                    previousHeartbeatTime = now
                 }
         }
 

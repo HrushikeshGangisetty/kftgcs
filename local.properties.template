@@ -35,3 +35,11 @@ DEBUG_API_URL=http://YOUR_LOCAL_IP_ADDRESS:8000
 # Your deployed Django server URL (e.g., on Railway, Heroku, AWS, etc.)
 PRODUCTION_API_URL=https://api.your-production-domain.com
 
+# ===========================================
+# KFT AUTHENTICATION SECRET
+# ===========================================
+# 32-byte HMAC-SHA256 key, hex-encoded (64 hex chars, no spaces)
+# MUST match the app_id=1 entry in the firmware's KFT_GCSAuth.h
+# Generate with: python -c "import secrets; print(secrets.token_hex(32))"
+KFT_APP_SECRET=YOUR_64_HEX_CHAR_SECRET_HERE
+
