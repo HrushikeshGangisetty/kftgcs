@@ -345,6 +345,26 @@ class SharedViewModel : ViewModel() {
     }
 
     /**
+     * Clear all mission lines and waypoints from the map WITHOUT clearing geofence.
+     * Called from the "Clear Map" button in Manual mode on the MainPage.
+     */
+    fun clearMapLinesOnly() {
+        LogUtils.i("SharedVM", "Clearing map lines/waypoints only (geofence preserved)")
+        _uploadedWaypoints.value = emptyList()
+        _gridWaypoints.value = emptyList()
+        _surveyPolygon.value = emptyList()
+        _gridLines.value = emptyList()
+        _planningWaypoints.value = emptyList()
+        _obstacles.value = emptyList()
+        _missionAreaSqMeters.value = 0.0
+        _missionAreaFormatted.value = "0 acres"
+        _missionUploaded.value = false
+        lastUploadedCount = 0
+        lastUploadedMissionItems = emptyList()
+        // Geofence is intentionally NOT cleared here
+    }
+
+    /**
      * Clear mission completely - from both FC and map.
      * Also resets all pause/resume state.
      * Called when user navigates to home tab or goes back while mission is paused.

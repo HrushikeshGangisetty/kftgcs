@@ -7,6 +7,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
+import androidx.compose.material.icons.filled.LayersClear
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -224,6 +225,11 @@ fun MainPage(
                 isAddResumePointActive = isAddResumePointMode,
                 onAddResumePoint = {
                     isAddResumePointMode = !isAddResumePointMode
+                },
+                showClearMapButton = userSelectedFlightMode == SharedViewModel.UserFlightMode.MANUAL,
+                onClearMap = {
+                    telemetryViewModel.clearMapLinesOnly()
+                    Toast.makeText(context, "Map cleared", Toast.LENGTH_SHORT).show()
                 }
             )
 
@@ -832,7 +838,9 @@ fun FloatingButtons(
     currentMode: String?,
     showAddResumePointButton: Boolean = false,
     isAddResumePointActive: Boolean = false,
-    onAddResumePoint: () -> Unit = {}
+    onAddResumePoint: () -> Unit = {},
+    showClearMapButton: Boolean = false,
+    onClearMap: () -> Unit = {}
 ) {
     Column(
         modifier = modifier,
@@ -941,6 +949,36 @@ fun FloatingButtons(
                     Spacer(modifier = Modifier.height(2.dp))
                     Text(
                         text = "Resume\nPoint",
+                        color = Color.White,
+                        fontSize = 8.sp,
+                        fontWeight = FontWeight.Medium,
+                        textAlign = TextAlign.Center,
+                        lineHeight = 10.sp
+                    )
+                }
+            }
+        }
+
+        // Clear Map Button - only visible in Manual mode
+        if (showClearMapButton) {
+            FloatingActionButton(
+                onClick = { onClearMap() },
+                containerColor = Color.Black.copy(alpha = 0.7f),
+                modifier = Modifier.size(width = 70.dp, height = 56.dp)
+            ) {
+                Column(
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.Center
+                ) {
+                    Icon(
+                        Icons.Default.LayersClear,
+                        contentDescription = "Clear Map",
+                        tint = Color.White,
+                        modifier = Modifier.size(20.dp)
+                    )
+                    Spacer(modifier = Modifier.height(2.dp))
+                    Text(
+                        text = "Clear\nMap",
                         color = Color.White,
                         fontSize = 8.sp,
                         fontWeight = FontWeight.Medium,
