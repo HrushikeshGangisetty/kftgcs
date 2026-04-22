@@ -161,6 +161,7 @@ class WebSocketManager {
     var pilotId: Int = -1
     var superAdminId: Int = -1
 
+
     var droneUid: String = ""
         set(value) {
             val old = field

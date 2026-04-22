@@ -42,6 +42,7 @@ import com.example.kftgcs.videotracking.TrackingManager
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.withTimeoutOrNull
 import java.util.Locale
+import com.example.kftgcs.api.ApiService
 
 enum class ConnectionType {
     TCP, BLUETOOTH
@@ -2081,6 +2082,46 @@ class SharedViewModel : ViewModel() {
     // Spray status popup (temporary message that disappears after 2 seconds)
     private val _sprayStatusPopup = MutableStateFlow<String?>(null)
     val sprayStatusPopup: StateFlow<String?> = _sprayStatusPopup.asStateFlow()
+
+    // ── Vehicle service alert ─────────────────────────────────────────────────
+    // Set to true when backend reports is_limit_reached for the connected drone
+    private val _showServiceAlert = MutableStateFlow(false)
+    val showServiceAlert: StateFlow<Boolean> = _showServiceAlert.asStateFlow()
+
+    fun dismissServiceAlert() {
+        _showServiceAlert.value = false
+    }
+
+    /**
+     * Observes telemetryState.droneUid — the moment the drone is identified via
+     * AUTOPILOT_VERSION / OpenDroneID (i.e. real drone connection), call the REST API
+     * to check whether the vehicle has reached its max flight limit.
+     * Uses distinctUntilChanged so the check fires once per unique drone UID.
+     */
+    fun setupServiceLimitCheck() {
+        viewModelScope.launch {
+            _telemetryState
+                .map { it.droneUid }
+                .distinctUntilChanged()
+                .collect { droneUid ->
+                    if (!droneUid.isNullOrBlank()) {
+                        try {
+                            LogUtils.i("ServiceLimit", "🔍 Drone identified ($droneUid) — checking service limit")
+                            val result = ApiService.checkVehicleServiceLimit(droneUid)
+                            if (result is com.example.kftgcs.api.ApiResponse.Success) {
+                                val limitReached = result.data.vehicles.any { it.is_limit_reached }
+                                if (limitReached) {
+                                    _showServiceAlert.value = true
+                                    LogUtils.w("ServiceLimit", "🔧 Vehicle $droneUid has reached max flight limit")
+                                }
+                            }
+                        } catch (e: Exception) {
+                            LogUtils.e("ServiceLimit", "Failed to check vehicle service limit", e)
+                        }
+                    }
+                }
+        }
+    }
 
     fun addNotification(notification: Notification) {
         _notifications.value = listOf(notification) + _notifications.value

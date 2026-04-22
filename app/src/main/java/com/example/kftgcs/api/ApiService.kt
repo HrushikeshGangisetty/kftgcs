@@ -435,6 +435,52 @@ object ApiService {
         }
     }
 
+    suspend fun checkVehicleServiceLimit(vehicleId: String): ApiResponse<VehicleListResponse> {
+        return withContext(Dispatchers.IO) {
+            try {
+                Timber.d("Checking service limit for vehicle: $vehicleId")
+                val json = """{"action":"view_android","vehicle_id":"$vehicleId"}"""
+                val requestBody = json.toRequestBody(jsonMediaType)
+
+                val httpRequest = Request.Builder()
+                    .url("$BASE_URL/api/view-vehicles")
+                    .addHeader("Content-Type", "application/json")
+                    .addHeader("Accept", "application/json")
+                    .post(requestBody)
+                    .build()
+
+                val response = client.newCall(httpRequest).execute()
+                val responseBody = response.body?.string() ?: ""
+                Timber.d("Vehicle check response code: ${response.code}")
+
+                if (responseBody.trimStart().startsWith("<") || responseBody.contains("<!DOCTYPE")) {
+                    return@withContext ApiResponse.Error("Server configuration error", response.code)
+                }
+
+                if (response.isSuccessful) {
+                    try {
+                        val successResponse = gson.fromJson(responseBody, VehicleListResponse::class.java)
+                        Timber.d("Vehicle check successful: ${successResponse.vehicles.size} vehicles")
+                        ApiResponse.Success(successResponse)
+                    } catch (e: Exception) {
+                        Timber.e(e, "Failed to parse vehicle list response")
+                        ApiResponse.Error("Invalid response format: ${e.message}", response.code)
+                    }
+                } else {
+                    try {
+                        val errorResponse = gson.fromJson(responseBody, ErrorResponse::class.java)
+                        ApiResponse.Error(errorResponse.error, errorResponse.status_code)
+                    } catch (e: Exception) {
+                        ApiResponse.Error(responseBody.take(200).ifEmpty { "Unknown error" }, response.code)
+                    }
+                }
+            } catch (e: Exception) {
+                Timber.e(e, "Network error during vehicle check")
+                ApiResponse.Error("Network error: ${e.message}", 0)
+            }
+        }
+    }
+
     suspend fun pilotLogout(request: PilotLogoutRequest): ApiResponse<MessageResponse> {
         return withContext(Dispatchers.IO) {
             try {
@@ -566,5 +612,19 @@ data class AdminInfo(
 data class AdminListResponse(
     @SerializedName("count") val count: Int,
     @SerializedName("data") val data: List<AdminInfo>
+)
+
+// Vehicle service limit models
+data class VehicleInfo(
+    @SerializedName("vehicle_id") val vehicle_id: String,
+    @SerializedName("vehicle_name") val vehicle_name: String? = null,
+    @SerializedName("mission_count") val mission_count: Int = 0,
+    @SerializedName("max_missions_allowed") val max_missions_allowed: Int? = null,
+    @SerializedName("is_limit_reached") val is_limit_reached: Boolean = false
+)
+
+data class VehicleListResponse(
+    @SerializedName("vehicles") val vehicles: List<VehicleInfo>,
+    @SerializedName("view_mode") val view_mode: String? = null
 )
 

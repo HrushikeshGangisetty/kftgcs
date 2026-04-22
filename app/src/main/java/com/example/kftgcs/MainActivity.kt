@@ -119,6 +119,9 @@ class MainActivity : ComponentActivity() {
             // Create SharedViewModel instance and initialize TTS
             val sharedViewModel: SharedViewModel = viewModel()
 
+            // Register WebSocket session_ack callback to check vehicle service limit on every connection
+            sharedViewModel.setupServiceLimitCheck()
+
             // Initialize TextToSpeech when the app starts
             LaunchedEffect(Unit) {
                 sharedViewModel.initializeTextToSpeech(this@MainActivity)

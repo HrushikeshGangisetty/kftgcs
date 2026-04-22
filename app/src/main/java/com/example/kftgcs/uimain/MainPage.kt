@@ -90,6 +90,9 @@ fun MainPage(
     // Collect spray status popup
     val sprayStatusPopup by telemetryViewModel.sprayStatusPopup.collectAsState()
 
+    // Collect vehicle service alert state
+    val showServiceAlert by telemetryViewModel.showServiceAlert.collectAsState()
+
     // Collect resume point location for displaying "R" marker on map
     val resumePointLocation by telemetryViewModel.resumePointLocation.collectAsState()
 
@@ -284,6 +287,30 @@ fun MainPage(
             )
         }
 
+
+        // Vehicle service limit alert
+        if (showServiceAlert) {
+            AlertDialog(
+                onDismissRequest = { telemetryViewModel.dismissServiceAlert() },
+                title = {
+                    Text(
+                        text = "⚠️ Service Required",
+                        fontWeight = FontWeight.Bold
+                    )
+                },
+                text = {
+                    Text("Max flights reached. Take drone for servicing.")
+                },
+                confirmButton = {
+                    Button(
+                        onClick = { telemetryViewModel.dismissServiceAlert() },
+                        colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFFF5722))
+                    ) {
+                        Text("OK", color = Color.White)
+                    }
+                }
+            )
+        }
 
         // Resume Mission Warning Dialog (Step 1)
         if (showResumeWarningDialog) {
