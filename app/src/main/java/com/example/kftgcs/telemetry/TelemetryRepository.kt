@@ -97,7 +97,9 @@ class MavlinkTelemetryRepository(
 
     // Battery voltage smoothing (EMA filter for SYS_STATUS fallback)
     private var smoothedVoltage: Float? = null
-    private val VOLTAGE_ALPHA = 0.3f  // Lower = smoother, higher = more responsive
+    // Low alpha = more smoothing. 0.1 gives ~9-second EMA time-constant at 1 Hz.
+    // Kept low because this path is only a fallback; BATTERY_STATUS cell-sum takes priority.
+    private val VOLTAGE_ALPHA = 0.1f
 
     // Voltage from BATTERY_STATUS (sum of cell voltages — no 65.535V UShort limit).
     // When populated, this overrides the SYS_STATUS voltage which caps at 65.535V.
@@ -715,8 +717,11 @@ class MavlinkTelemetryRepository(
 
                     // Announce armed/disarmed state transitions via TTS
                     if (currentArmed && !previousArmedState) {
-                        // Drone just armed - announce it
+                        // Drone just armed - announce it and reset EMA so a pre-arm or
+                        // motor-spinup dip can't anchor the smoothed voltage for the whole flight.
                         sharedViewModel.announceDroneArmed()
+                        smoothedVoltage = null
+                        LogUtils.d("VoltageDbg", "ARM detected — smoothedVoltage reset to null")
                     } else if (!currentArmed && previousArmedState) {
                         // Drone just disarmed - announce it
                         sharedViewModel.announceDroneDisarmed()
@@ -753,14 +758,35 @@ class MavlinkTelemetryRepository(
                     if (b.id.toInt() == 0) {
                         val currentA = if (b.currentBattery.toInt() == -1) null else b.currentBattery / 100f
 
-                        // Sum all valid cell voltages from BATTERY_STATUS.voltages[].
-                        // Each entry is UShort millivolts; 0xFFFF = "cell not present".
-                        // Summing cells supports pack voltages >65.535V — the SYS_STATUS
-                        // voltage_battery field is a single UShort (cap = 65.535V) and overflows
-                        // to 0 for higher voltages. When cells are available this value wins.
-                        val validCells = b.voltages.filter { it.toInt() != 0xFFFF && it.toInt() > 0 }
-                        if (validCells.isNotEmpty()) {
-                            battStatusVoltage = validCells.sumOf { it.toLong() }.toFloat() / 1000f
+                        // ── Cell-voltage summation ──────────────────────────────────────────
+                        // BATTERY_STATUS.voltages[]  → cells 1-10, UShort, 0xFFFF = not present
+                        // BATTERY_STATUS.voltagesExt → cells 11-14, UShort, 0 = not supported
+                        //   (note different sentinel — per MAVLink spec, 0 means unsupported in ext)
+                        //
+                        // For packs with >10 cells (11S, 12S, 13S, 14S …) ArduPilot puts the
+                        // extra cells in voltagesExt. Omitting it caused the 12S pack to read
+                        // ~42V (10 cells) instead of ~50V (12 cells) during flight.
+                        //
+                        // MAVLink also allows the FC to pack the TOTAL voltage into voltages[0]
+                        // with the other slots set to 0xFFFF when individual cells aren't
+                        // monitored — in that case summing voltages[0] alone gives the correct
+                        // pack total, so the logic still works.
+                        val validMain = b.voltages.filter { it.toInt() != 0xFFFF && it.toInt() > 0 }
+                        // voltagesExt uses 0 (not 0xFFFF) as the "not supported" sentinel
+                        val validExt  = b.voltagesExt.filter { it.toInt() != 0 }
+
+                        val allValid = validMain + validExt
+
+                        // Diagnostic log — shows raw cell data in logcat under tag "VoltageDbg"
+                        LogUtils.d("VoltageDbg",
+                            "BATT_STATUS id=0 | voltages=${b.voltages.toList()} | " +
+                            "voltagesExt=${b.voltagesExt.toList()} | " +
+                            "validMain=${validMain.size} validExt=${validExt.size} | " +
+                            "sum=${allValid.sumOf { it.toLong() } / 1000f}V"
+                        )
+
+                        if (allValid.isNotEmpty()) {
+                            battStatusVoltage = allValid.sumOf { it.toLong() }.toFloat() / 1000f
                         }
 
                         _state.update { s ->
@@ -1451,7 +1477,9 @@ class MavlinkTelemetryRepository(
                     val vBattRaw = if (s.voltageBattery.toUInt() == 0xFFFFu) null
                                    else s.voltageBattery.toFloat() / 1000f
 
-                    // Apply EMA smoothing to the SYS_STATUS value
+                    // Apply EMA smoothing to the SYS_STATUS value (VOLTAGE_ALPHA = 0.1 → slow,
+                    // gives ~9 s time-constant — keeps the fallback stable without anchoring on
+                    // brief motor-spinup dips the way a higher alpha (0.3) would).
                     val vBattSmoothed = if (vBattRaw != null) {
                         val prev = smoothedVoltage
                         if (prev != null) {
@@ -1464,6 +1492,34 @@ class MavlinkTelemetryRepository(
                         null
                     }
 
+                    // ── Sanity guard ─────────────────────────────────────────────────────────
+                    // If battStatusVoltage is more than 20% below the SYS_STATUS value it is
+                    // likely a partial cell-sum (e.g. FC not sending voltagesExt yet, or an
+                    // edge-case mid-message). In that situation fall back to the SYS_STATUS
+                    // value and log a warning so we can diagnose it from logcat.
+                    // Exception: SYS_STATUS caps at 65.535V — for packs above that limit the
+                    // cell-sum is the ONLY correct source, so the guard is skipped when
+                    // vBattSmoothed is at/near that cap (>= 65.0V).
+                    val resolvedVoltage = when {
+                        battStatusVoltage == null -> vBattSmoothed
+                        vBattSmoothed == null     -> battStatusVoltage
+                        vBattSmoothed >= 65.0f    -> battStatusVoltage  // avoid cap fallback for 65V+ packs
+                        battStatusVoltage!! < vBattSmoothed * 0.80f -> {
+                            LogUtils.w("VoltageDbg",
+                                "⚠️ battStatusVoltage (${battStatusVoltage}V) is >20% below " +
+                                "SYS_STATUS (${vBattSmoothed}V) — possible partial cell-sum. " +
+                                "Using SYS_STATUS. Check voltagesExt in logcat."
+                            )
+                            vBattSmoothed
+                        }
+                        else -> battStatusVoltage
+                    }
+
+                    LogUtils.d("VoltageDbg",
+                        "SYS_STATUS vRaw=${vBattRaw}V smooth=${vBattSmoothed}V " +
+                        "battStat=${battStatusVoltage}V → display=${resolvedVoltage}V"
+                    )
+
                     val pct = if (s.batteryRemaining.toInt() == -1) null else s.batteryRemaining.toInt()
                     val SENSOR_3D_GYRO = 1u
                     val present = (s.onboardControlSensorsPresent.value and SENSOR_3D_GYRO) != 0u
@@ -1471,8 +1527,7 @@ class MavlinkTelemetryRepository(
                     val healthy = (s.onboardControlSensorsHealth.value and SENSOR_3D_GYRO) != 0u
                     val armable = present && enabled && healthy
                     _state.update { it.copy(
-                        // BATTERY_STATUS cell-sum takes priority; SYS_STATUS is fallback
-                        voltage = battStatusVoltage ?: vBattSmoothed,
+                        voltage = resolvedVoltage,
                         batteryPercent = pct,
                         armable = armable
                     ) }
