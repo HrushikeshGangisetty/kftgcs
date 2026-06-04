@@ -29,6 +29,8 @@ import com.google.android.gms.maps.model.LatLng
 import androidx.compose.ui.text.font.FontWeight
 import com.example.kftgcs.telemetry.SharedViewModel
 import androidx.compose.runtime.getValue
+import androidx.lifecycle.viewmodel.compose.viewModel
+import com.example.kftgcs.usersettings.UserSettingsViewModel
 import androidx.compose.ui.text.style.TextOverflow
 import com.example.kftgcs.utils.AppStrings
 import com.example.kftgcs.ui.components.MissionCompletionDialog
@@ -191,7 +193,11 @@ fun MainPage(
                 manualResumePointPending = manualResumePointPending,
                 manualResumePointUploaded = manualResumePointUploaded,
                 // Clear drone path trail trigger
-                clearDronePathTrigger = clearDronePathTrigger
+                clearDronePathTrigger = clearDronePathTrigger,
+                dronePathColor = run {
+                    val userSettingsViewModel: UserSettingsViewModel = viewModel()
+                    userSettingsViewModel.settings.collectAsState().value.dronePathColor
+                }
             )
 
             StatusPanel(

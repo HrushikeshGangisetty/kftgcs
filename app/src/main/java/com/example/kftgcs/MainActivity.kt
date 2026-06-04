@@ -23,19 +23,28 @@ import androidx.navigation.compose.rememberNavController
 import com.example.kftgcs.navigation.AppNavGraph
 import com.example.kftgcs.integration.TlogIntegration
 import androidx.lifecycle.viewmodel.compose.viewModel
-import com.example.kftgcs.BuildConfig
 import com.example.kftgcs.telemetry.SharedViewModel
 import com.example.kftgcs.telemetry.WebSocketManager
 import com.example.kftgcs.api.SessionManager
+import androidx.compose.material3.Typography
+import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.unit.Density
+import androidx.compose.ui.unit.sp
+import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.ui.platform.LocalDensity
+import com.example.kftgcs.usersettings.UserSettingsViewModel
+import timber.log.Timber
 
 // ✅ Dark theme setup
 private val DarkColorScheme = darkColorScheme(
-    primary = Color(0xFF1E88E5),
+    primary = Color(0xFF2196F3),
     onPrimary = Color.White,
-    background = Color.Black,
-    surface = Color.Black,
-    onBackground = Color.White,
-    onSurface = Color.White
+    background = Color(0xFF0D1117),
+    surface = Color(0xFF161B22),
+    onBackground = Color(0xFFE6EDF3),
+    onSurface = Color(0xFFE6EDF3),
+    secondary = Color(0xFF3FB950),
+    tertiary = Color(0xFFF78166)
 )
 
 class MainActivity : ComponentActivity() {
@@ -94,10 +103,8 @@ class MainActivity : ComponentActivity() {
         wsManager.superAdminId = superAdminId
         wsManager.droneUid = ""  // Will be updated when FC sends AUTOPILOT_VERSION (leave blank to force real UID)
 
-        if (BuildConfig.DEBUG) {
-            android.util.Log.d("MAIN_ACTIVITY", "🔧 WebSocketManager initialized with pilotId=$pilotId, adminId=$adminId, superAdminId=$superAdminId")
-            android.util.Log.d("MAIN_ACTIVITY", "⏳ Waiting for AUTOPILOT_VERSION to set real drone UID...")
-        }
+        Timber.d("🔧 WebSocketManager initialized with pilotId=$pilotId, adminId=$adminId, superAdminId=$superAdminId")
+        Timber.d("⏳ Waiting for AUTOPILOT_VERSION to set real drone UID...")
 
         // ✅ Throttled telemetry sender - sends every 1 second (only when connected)
         Handler(Looper.getMainLooper()).postDelayed(object : Runnable {
@@ -207,11 +214,50 @@ class MainActivity : ComponentActivity() {
             }
 
             MaterialTheme(colorScheme = DarkColorScheme) {
-                Surface(
-                    modifier = Modifier.fillMaxSize(),
-                    color = MaterialTheme.colorScheme.background
-                ) {
-                    AppNavGraph(navController = navController)
+                // ── Apply User Settings (font size + text colour) ──────────────────
+                val userSettingsViewModel: UserSettingsViewModel = viewModel()
+                val userSettings by userSettingsViewModel.settings.collectAsState()
+
+                val scaleFactor = userSettings.fontSize.scaleFactor
+                val textColor = userSettings.textColor
+
+                val customTypography = Typography(
+                    bodyLarge   = TextStyle(fontSize = (18 * scaleFactor).sp, color = textColor),
+                    bodyMedium  = TextStyle(fontSize = (16 * scaleFactor).sp, color = textColor),
+                    bodySmall   = TextStyle(fontSize = (14 * scaleFactor).sp, color = textColor),
+                    titleLarge  = TextStyle(fontSize = (24 * scaleFactor).sp, color = textColor),
+                    titleMedium = TextStyle(fontSize = (18 * scaleFactor).sp, color = textColor),
+                    titleSmall  = TextStyle(fontSize = (16 * scaleFactor).sp, color = textColor),
+                    labelLarge  = TextStyle(fontSize = (15 * scaleFactor).sp, color = textColor),
+                    labelMedium = TextStyle(fontSize = (13 * scaleFactor).sp, color = textColor),
+                    labelSmall  = TextStyle(fontSize = (12 * scaleFactor).sp, color = textColor),
+                    headlineLarge  = TextStyle(fontSize = (34 * scaleFactor).sp, color = textColor),
+                    headlineMedium = TextStyle(fontSize = (30 * scaleFactor).sp, color = textColor),
+                    headlineSmall  = TextStyle(fontSize = (26 * scaleFactor).sp, color = textColor),
+                    displayLarge   = TextStyle(fontSize = (60 * scaleFactor).sp, color = textColor),
+                    displayMedium  = TextStyle(fontSize = (48 * scaleFactor).sp, color = textColor),
+                    displaySmall   = TextStyle(fontSize = (38 * scaleFactor).sp, color = textColor)
+                )
+
+                // ── Scale ALL sp values app-wide (including hardcoded ones) ────────
+                val baseDensity = LocalDensity.current
+                val scaledDensity = Density(
+                    density = baseDensity.density,
+                    fontScale = baseDensity.fontScale * scaleFactor
+                )
+
+                CompositionLocalProvider(LocalDensity provides scaledDensity) {
+                    MaterialTheme(
+                        colorScheme = DarkColorScheme.copy(onBackground = textColor, onSurface = textColor),
+                        typography = customTypography
+                    ) {
+                        Surface(
+                            modifier = Modifier.fillMaxSize(),
+                            color = MaterialTheme.colorScheme.background
+                        ) {
+                            AppNavGraph(navController = navController)
+                        }
+                    }
                 }
             }
         }

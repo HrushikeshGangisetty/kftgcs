@@ -22,6 +22,7 @@ import androidx.compose.material.icons.filled.Thermostat
 import androidx.compose.material.icons.filled.BatteryChargingFull
 import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material.icons.filled.Person
 import androidx.compose.material3.IconButton
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
@@ -181,6 +182,17 @@ fun SettingsScreen(navController: NavHostController) {
                 icon = Icons.Filled.BatteryChargingFull,
                 title = "Battery",
                 onClick = { navController.navigate("battery_monitor_settings") },
+                height = buttonHeight
+            )
+
+            Spacer(modifier = Modifier.height(buttonSpacing))
+
+            // 9. User Settings
+            NumberedButton(
+                number = 9,
+                icon = Icons.Filled.Person,
+                title = "User Settings",
+                onClick = { navController.navigate("user_settings") },
                 height = buttonHeight
             )
 

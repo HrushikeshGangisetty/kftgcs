@@ -443,7 +443,9 @@ fun GcsMap(
     manualResumePointPending: LatLng? = null,
     manualResumePointUploaded: LatLng? = null,
     // Trigger to clear the local drone path trail (increment to clear)
-    clearDronePathTrigger: Int = 0
+    clearDronePathTrigger: Int = 0,
+    // User-customizable drone path line color (non-spraying segments)
+    dronePathColor: Color = Color.Red
 ) {
     val context = LocalContext.current
     val cameraState = cameraPositionState ?: rememberCameraPositionState()
@@ -1251,15 +1253,15 @@ fun GcsMap(
             }
 
             // Draw polylines for each segment
-            segments.forEach { (points, isSpraying) ->
-                if (points.size > 1) {
-                    Polyline(
-                        points = points,
-                        width = 15f,
-                        color = if (isSpraying) Color.Green else Color.Red
-                    )
-                }
-            }
+    segments.forEach { (points, isSpraying) ->
+        if (points.size > 1) {
+            Polyline(
+                points = points,
+                width = 7.5f,
+                color = if (isSpraying) Color.Green else dronePathColor
+            )
+        }
+    }
         }
 
         // ===== RESUME POINT MARKER =====
