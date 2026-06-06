@@ -37,6 +37,8 @@ object ArduPilotParamMetadataRepository {
         "https://autotest.ardupilot.org/Parameters/Rover/apm.pdef.xml"
 
     private const val CACHE_FILE_NAME = "ardupilot_param_metadata.json"
+    /** Full metadata snapshot bundled in app assets (works offline, in the field). */
+    private const val ASSET_FILE_NAME = "ardupilot_param_metadata.json"
     private const val CACHE_MAX_AGE_MS = 7L * 24 * 60 * 60 * 1000  // 7 days
 
     private val gson = Gson()
@@ -64,7 +66,7 @@ object ArduPilotParamMetadataRepository {
             return it
         }
 
-        // 2. Disk cache
+        // 2. Disk cache (written by a previous network refresh)
         val diskCache = loadFromDiskCache(context)
         if (diskCache != null) {
             LogUtils.d(TAG, "📋 Loaded metadata from disk cache (${diskCache.size} params)")
@@ -72,7 +74,15 @@ object ArduPilotParamMetadataRepository {
             return diskCache
         }
 
-        // 3. Download from network
+        // 3. Bundled asset — full snapshot, always available offline
+        val bundled = loadFromAssets(context)
+        if (bundled != null) {
+            LogUtils.d(TAG, "📋 Loaded metadata from bundled asset (${bundled.size} params)")
+            memoryCache = bundled
+            return bundled
+        }
+
+        // 4. Download from network (only if the asset is somehow unavailable)
         val downloaded = downloadAndParse(context)
         if (downloaded != null) {
             LogUtils.d(TAG, "📋 Downloaded metadata from ArduPilot (${downloaded.size} params)")
@@ -80,7 +90,7 @@ object ArduPilotParamMetadataRepository {
             return downloaded
         }
 
-        // 4. Fallback to hardcoded
+        // 5. Fallback to hardcoded
         LogUtils.d(TAG, "📋 Using fallback hardcoded metadata (${FALLBACK_PARAM_METADATA.size} params)")
         return FALLBACK_PARAM_METADATA
     }
@@ -307,6 +317,31 @@ object ArduPilotParamMetadataRepository {
     // ─────────────────────────────────────────────────────────────────
     // Disk cache (JSON file in app's internal storage)
     // ─────────────────────────────────────────────────────────────────
+
+    /**
+     * Load the full metadata snapshot bundled in app assets.
+     * Same JSON shape as the disk cache, so it deserializes with the same TypeToken.
+     */
+    private suspend fun loadFromAssets(context: Context): Map<String, ParamMeta>? =
+        withContext(Dispatchers.IO) {
+            try {
+                val json = context.assets.open(ASSET_FILE_NAME)
+                    .bufferedReader().use { it.readText() }
+                val type = object : TypeToken<Map<String, ParamMeta>>() {}.type
+                val parsed: Map<String, ParamMeta> = gson.fromJson(json, type)
+                if (parsed.isNotEmpty()) {
+                    // Merge over hardcoded fallback so nothing is ever lost
+                    val merged = FALLBACK_PARAM_METADATA.toMutableMap()
+                    merged.putAll(parsed)
+                    merged
+                } else {
+                    null
+                }
+            } catch (e: Exception) {
+                LogUtils.e(TAG, "❌ Failed to load bundled metadata asset", e)
+                null
+            }
+        }
 
     private fun getCacheFile(context: Context): File =
         File(context.filesDir, CACHE_FILE_NAME)

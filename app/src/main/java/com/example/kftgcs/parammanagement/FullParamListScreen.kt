@@ -125,6 +125,13 @@ fun FullParamListScreen(
         }
     }
 
+    // Auto-fetch all params once the drone is connected (no manual tap needed)
+    LaunchedEffect(state.isDroneConnected) {
+        if (state.isDroneConnected && state.params.isEmpty() && !state.isLoading) {
+            viewModel.fetchAllParams()
+        }
+    }
+
     LaunchedEffect(state.writeSuccess) {
         state.writeSuccess?.let {
             Toast.makeText(ctx, "✅ $it written", Toast.LENGTH_SHORT).show()

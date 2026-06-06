@@ -1,18 +1,25 @@
 package com.example.kftgcs.parammanagement
 
+import android.widget.Toast
+import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.filled.ArrowDropDown
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -35,11 +42,25 @@ fun AboutDroneScreen(
 ) {
     val droneInfo by aboutDroneViewModel.droneInfo.collectAsState()
     val coroutineScope = rememberCoroutineScope()
+    val ctx = LocalContext.current
 
     // Auto-fetch frame params once when drone connects
     LaunchedEffect(droneInfo.isDroneConnected) {
         if (droneInfo.isDroneConnected) {
             aboutDroneViewModel.fetchFrameParams()
+        }
+    }
+
+    LaunchedEffect(droneInfo.writeSuccess) {
+        droneInfo.writeSuccess?.let {
+            Toast.makeText(ctx, "✅ $it", Toast.LENGTH_SHORT).show()
+            aboutDroneViewModel.clearMessages()
+        }
+    }
+    LaunchedEffect(droneInfo.paramsError) {
+        droneInfo.paramsError?.let {
+            Toast.makeText(ctx, "⚠ $it", Toast.LENGTH_SHORT).show()
+            aboutDroneViewModel.clearMessages()
         }
     }
 
@@ -131,25 +152,38 @@ fun AboutDroneScreen(
                         }
                     }
                 } else {
-                    InfoRow(label = "Frame Class", value = droneInfo.frameClass)
+                    FrameSelectRow(
+                        label = "Frame Class",
+                        currentValue = droneInfo.frameClassValue,
+                        fallbackLabel = droneInfo.frameClass,
+                        options = FRAME_CLASS_NAMES,
+                        enabled = droneInfo.isDroneConnected && !droneInfo.isWritingFrame,
+                        onSelect = { aboutDroneViewModel.setFrameClass(it) }
+                    )
                     InfoDivider()
-                    InfoRow(label = "Frame Type",  value = droneInfo.frameType)
+                    FrameSelectRow(
+                        label = "Frame Type",
+                        currentValue = droneInfo.frameTypeValue,
+                        fallbackLabel = droneInfo.frameType,
+                        options = FRAME_TYPE_NAMES,
+                        enabled = droneInfo.isDroneConnected && !droneInfo.isWritingFrame,
+                        onSelect = { aboutDroneViewModel.setFrameType(it) }
+                    )
                 }
             }
 
-            // ── Error banner ──────────────────────────────────────────────
-            droneInfo.paramsError?.let { error ->
-                Card(
-                    modifier = Modifier.fillMaxWidth(),
-                    shape = RoundedCornerShape(10.dp),
-                    colors = CardDefaults.cardColors(containerColor = Color(0xFF4A2800))
+            // ── Writing indicator ─────────────────────────────────────────
+            if (droneInfo.isWritingFrame) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(10.dp)
                 ) {
-                    Text(
-                        text = "⚠ $error",
-                        color = Color(0xFFFFCC80),
-                        fontSize = 12.sp,
-                        modifier = Modifier.padding(12.dp)
+                    CircularProgressIndicator(
+                        modifier = Modifier.size(16.dp),
+                        color = AccentBlue,
+                        strokeWidth = 2.dp
                     )
+                    Text("Writing to drone…", color = LabelGray, fontSize = 12.sp)
                 }
             }
 
@@ -208,4 +242,103 @@ private fun InfoRow(label: String, value: String) {
 @Composable
 private fun InfoDivider() {
     HorizontalDivider(color = Color.White.copy(alpha = 0.08f), thickness = 0.5.dp)
+}
+
+/**
+ * A label + tappable value that opens a dropdown to pick a new frame option
+ * and writes it to the drone on selection.
+ */
+@Composable
+private fun FrameSelectRow(
+    label: String,
+    currentValue: Int?,
+    fallbackLabel: String,
+    options: Map<Int, String>,
+    enabled: Boolean,
+    onSelect: (Int) -> Unit
+) {
+    var expanded by remember { mutableStateOf(false) }
+    val valueLabel = currentValue?.let { options[it] ?: "Unknown ($it)" } ?: fallbackLabel
+
+    Row(
+        modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp),
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Text(
+            text = label,
+            color = LabelGray,
+            fontSize = 14.sp,
+            fontWeight = FontWeight.Medium,
+            modifier = Modifier.weight(1f)
+        )
+        Spacer(Modifier.width(16.dp))
+
+        Box {
+            Row(
+                modifier = Modifier
+                    .clip(RoundedCornerShape(8.dp))
+                    .background(Color.White.copy(alpha = if (enabled) 0.08f else 0.03f))
+                    .border(
+                        1.dp,
+                        AccentBlue.copy(alpha = if (enabled) 0.5f else 0.2f),
+                        RoundedCornerShape(8.dp)
+                    )
+                    .clickable(enabled = enabled) { expanded = true }
+                    .padding(horizontal = 12.dp, vertical = 8.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    text = valueLabel,
+                    color = if (enabled) ValueWhite else ValueWhite.copy(alpha = 0.5f),
+                    fontSize = 14.sp,
+                    fontWeight = FontWeight.SemiBold
+                )
+                if (enabled) {
+                    Spacer(Modifier.width(4.dp))
+                    Icon(
+                        Icons.Filled.ArrowDropDown, contentDescription = "Change $label",
+                        tint = AccentBlue, modifier = Modifier.size(20.dp)
+                    )
+                }
+            }
+
+            DropdownMenu(
+                expanded = expanded,
+                onDismissRequest = { expanded = false },
+                modifier = Modifier
+                    .background(NavyBlue, RoundedCornerShape(10.dp))
+                    .border(0.5.dp, AccentBlue.copy(alpha = 0.4f), RoundedCornerShape(10.dp))
+            ) {
+                options.forEach { (key, text) ->
+                    val isSel = key == currentValue
+                    DropdownMenuItem(
+                        text = {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Text(
+                                    "$key", fontSize = 11.sp,
+                                    color = if (isSel) Color.White else AccentBlue,
+                                    fontWeight = FontWeight.Bold,
+                                    modifier = Modifier
+                                        .clip(RoundedCornerShape(4.dp))
+                                        .background(if (isSel) AccentBlue else AccentBlue.copy(alpha = 0.18f))
+                                        .padding(horizontal = 6.dp, vertical = 2.dp)
+                                )
+                                Spacer(Modifier.width(10.dp))
+                                Text(
+                                    text, fontSize = 14.sp,
+                                    color = if (isSel) AccentBlue else ValueWhite,
+                                    fontWeight = if (isSel) FontWeight.SemiBold else FontWeight.Normal
+                                )
+                            }
+                        },
+                        onClick = {
+                            expanded = false
+                            if (key != currentValue) onSelect(key)
+                        }
+                    )
+                }
+            }
+        }
+    }
 }

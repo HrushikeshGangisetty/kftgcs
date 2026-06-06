@@ -55,6 +55,13 @@ fun FlightModeScreen(
     val state by viewModel.state.collectAsState()
     val ctx = LocalContext.current
 
+    // Auto-read flight modes once the drone is connected (no manual tap needed)
+    LaunchedEffect(state.isDroneConnected) {
+        if (state.isDroneConnected && state.modes.all { it == null } && !state.isLoading) {
+            viewModel.loadFromDrone()
+        }
+    }
+
     LaunchedEffect(state.successMessage) {
         state.successMessage?.let {
             Toast.makeText(ctx, "✅ $it", Toast.LENGTH_SHORT).show()
