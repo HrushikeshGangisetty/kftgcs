@@ -214,6 +214,11 @@ class MavlinkTelemetryRepository(
     private val _rcChannels = MutableSharedFlow<RcChannels>(replay = 0, extraBufferCapacity = 10)
     val rcChannels: SharedFlow<RcChannels> = _rcChannels.asSharedFlow()
 
+    // SERVO_OUTPUT_RAW flow for the Servo Output screen's live position bars.
+    // replay = 1 so a screen opened mid-stream immediately sees the latest values.
+    private val _servoOutputRaw = MutableSharedFlow<ServoOutputRaw>(replay = 1, extraBufferCapacity = 10)
+    val servoOutputRaw: SharedFlow<ServoOutputRaw> = _servoOutputRaw.asSharedFlow()
+
     // PARAM_VALUE flow for parameter reading
     // Buffer capacity set high to handle PARAM_REQUEST_LIST bulk responses (hundreds of params)
     private val _paramValue = MutableSharedFlow<ParamValue>(replay = 0, extraBufferCapacity = 1024)
@@ -1829,6 +1834,18 @@ class MavlinkTelemetryRepository(
                     }
 
                     _rcChannels.emit(rcChannelsData)
+                }
+        }
+
+        // SERVO_OUTPUT_RAW — live PWM driving the Servo Output screen position bars.
+        // High-frequency telemetry stream (NOT the parameter protocol).
+        scope.launch {
+            mavFrame
+                .filter { state.value.fcuDetected && it.systemId == fcuSystemId }
+                .map { it.message }
+                .filterIsInstance<ServoOutputRaw>()
+                .collect { servo ->
+                    _servoOutputRaw.emit(servo)
                 }
         }
 

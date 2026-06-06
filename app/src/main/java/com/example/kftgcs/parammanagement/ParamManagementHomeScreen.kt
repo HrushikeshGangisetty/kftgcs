@@ -11,6 +11,7 @@ import androidx.compose.material.icons.automirrored.filled.Logout
 import androidx.compose.material.icons.filled.Cable
 import androidx.compose.material.icons.filled.FlightTakeoff
 import androidx.compose.material.icons.filled.Info
+import androidx.compose.material.icons.filled.Build
 import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Tune
@@ -50,7 +51,8 @@ fun ParamManagementHomeScreen(
         ParamNavItem("Flight Modes",     Icons.Filled.FlightTakeoff,               Screen.ParamFlightMode.route),
         ParamNavItem("Servo Output",     Icons.Filled.Cable,                       Screen.ParamServoOutput.route),
         ParamNavItem("Spray Settings",   Icons.Filled.WaterDrop,                   Screen.ParamSpraySettings.route),
-        ParamNavItem("Breaking Settings",Icons.Filled.Settings,                    Screen.ParamBreakingSettings.route)
+        ParamNavItem("Breaking Settings",Icons.Filled.Settings,                    Screen.ParamBreakingSettings.route),
+        ParamNavItem("Motor Test",        Icons.Filled.Build,                        Screen.ParamMotorTest.route)
     )
 
     ModalNavigationDrawer(

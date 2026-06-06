@@ -909,6 +909,10 @@ class SharedViewModel : ViewModel() {
     val rcChannels: SharedFlow<com.divpundir.mavlink.definitions.common.RcChannels>
         get() = repo?.rcChannels ?: MutableSharedFlow()
 
+    // Expose SERVO_OUTPUT_RAW flow for the Servo Output screen's live position bars
+    val servoOutputRaw: SharedFlow<com.divpundir.mavlink.definitions.common.ServoOutputRaw>
+        get() = repo?.servoOutputRaw ?: MutableSharedFlow()
+
     // Expose PARAM_VALUE flow for parameter reading
     val paramValue: SharedFlow<com.divpundir.mavlink.definitions.common.ParamValue>
         get() = repo?.paramValue ?: MutableSharedFlow()

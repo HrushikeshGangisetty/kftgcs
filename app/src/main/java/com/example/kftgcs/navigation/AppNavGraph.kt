@@ -66,6 +66,9 @@ import com.example.kftgcs.parammanagement.ServoOutputScreen
 import com.example.kftgcs.parammanagement.SpraySettingsScreen
 import com.example.kftgcs.parammanagement.BatteryMonitorScreen
 import com.example.kftgcs.parammanagement.BatteryMonitorViewModel
+import com.example.kftgcs.parammanagement.MotorTestScreen
+import com.example.kftgcs.parammanagement.MotorTestViewModel
+import com.example.kftgcs.parammanagement.ServoOutputViewModel
 import com.example.kftgcs.usersettings.UserSettingsScreen
 import com.example.kftgcs.usersettings.UserSettingsViewModel
 
@@ -112,6 +115,7 @@ sealed class Screen(val route: String) {
     object ParamFlightMode : Screen("param_flight_mode")
     object ParamServoOutput : Screen("param_servo_output")
     object ParamSpraySettings : Screen("param_spray_settings")
+    object ParamMotorTest : Screen("param_motor_test")
     object UserSettings : Screen("user_settings")
 }
 
@@ -478,11 +482,25 @@ fun AppNavGraph(navController: NavHostController) {
         }
 
         composable(Screen.ParamServoOutput.route) {
-            ServoOutputScreen(navController = navController)
+            val servoOutputViewModel: ServoOutputViewModel =
+                viewModel { ServoOutputViewModel(sharedViewModel) }
+            ServoOutputScreen(
+                navController = navController,
+                viewModel     = servoOutputViewModel
+            )
         }
 
         composable(Screen.ParamSpraySettings.route) {
             SpraySettingsScreen(navController = navController)
+        }
+
+        composable(Screen.ParamMotorTest.route) {
+            val motorTestViewModel: MotorTestViewModel =
+                viewModel { MotorTestViewModel(sharedViewModel) }
+            MotorTestScreen(
+                navController = navController,
+                viewModel     = motorTestViewModel
+            )
         }
     }
 }

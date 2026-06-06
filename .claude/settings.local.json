@@ -7,7 +7,10 @@
       "Read(//c/Program Files/Android/Android Studio/jbr/**)",
       "Read(//c/Program Files/Android/Android Studio/**)",
       "Read(//c/Users/Hrushikesh/AppData/Local/Programs//**)",
-      "Bash(JAVA_HOME=\"C:/Program Files/Android/Android Studio/jbr\" PATH=\"$JAVA_HOME/bin:$PATH\" ./gradlew assembleDebug)"
+      "Bash(JAVA_HOME=\"C:/Program Files/Android/Android Studio/jbr\" PATH=\"$JAVA_HOME/bin:$PATH\" ./gradlew assembleDebug)",
+      "Bash(find ~/.gradle/caches -name \"*.jar\" 2>/dev/null | grep -i \"definitions-common\" | head -5)",
+      "Read(//c/Users/Hrushikesh/.gradle/caches/**)",
+      "PowerShell(Remove-Item -Path \\(Join-Path $env:TEMP \"sor_inspect\"\\) -Recurse -Force -ErrorAction SilentlyContinue; Write-Output \"cleaned\")"
     ]
   }
 }
