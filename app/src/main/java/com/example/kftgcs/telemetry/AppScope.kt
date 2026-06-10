@@ -1,4 +1,4 @@
-package com.example.kftgcs.Telemetry
+package com.example.kftgcs.telemetry
 
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers

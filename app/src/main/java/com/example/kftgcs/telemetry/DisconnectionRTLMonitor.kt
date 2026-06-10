@@ -27,7 +27,7 @@ class DisconnectionRTLMonitor(
     /**
      * Start monitoring connection and flight status
      */
-    fun startMonitoring(telemetryState: StateFlow<com.example.kftgcs.Telemetry.TelemetryState>) {
+    fun startMonitoring(telemetryState: StateFlow<com.example.kftgcs.telemetry.TelemetryState>) {
         scope.launch {
             telemetryState.collect { state ->
                 val isConnected = state.connected

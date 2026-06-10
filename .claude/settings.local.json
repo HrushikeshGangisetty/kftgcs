@@ -11,7 +11,13 @@
       "Bash(find ~/.gradle/caches -name \"*.jar\" 2>/dev/null | grep -i \"definitions-common\" | head -5)",
       "Read(//c/Users/Hrushikesh/.gradle/caches/**)",
       "PowerShell(Remove-Item -Path \\(Join-Path $env:TEMP \"sor_inspect\"\\) -Recurse -Force -ErrorAction SilentlyContinue; Write-Output \"cleaned\")",
-      "Bash(python -c ' *)"
+      "Bash(python -c ' *)",
+      "Bash(cd \"c:/Users/Hrushikesh\" && ls -lat Downloads/*.png Downloads/*.jpg Downloads/*.jpeg Downloads/*.webp 2>/dev/null | head -20; echo \"---project root---\"; ls -lat \"AndroidStudioProjects/kftgcs\"/*.png \"AndroidStudioProjects/kftgcs\"/*.jpg 2>/dev/null | head)",
+      "Read(//c/Users/Hrushikesh/**)",
+      "Bash(magick -version)",
+      "Bash(cwebp -version)",
+      "Bash(python -c \"import PIL; print\\('PIL', PIL.__version__\\)\")",
+      "Bash(py -c \"import PIL,sys;print\\('PIL ok'\\)\")"
     ]
   }
 }

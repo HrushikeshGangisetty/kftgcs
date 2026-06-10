@@ -17,7 +17,7 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.navigation.NavHostController
-import com.example.kftgcs.Telemetry.TelemetryState
+import com.example.kftgcs.telemetry.TelemetryState
 import com.example.kftgcs.authentication.AuthViewModel
 import com.google.maps.android.compose.MapType
 import androidx.compose.ui.platform.LocalContext
@@ -29,7 +29,6 @@ import com.google.android.gms.maps.model.LatLng
 import androidx.compose.ui.text.font.FontWeight
 import com.example.kftgcs.telemetry.SharedViewModel
 import androidx.compose.runtime.getValue
-import androidx.lifecycle.viewmodel.compose.viewModel
 import com.example.kftgcs.usersettings.UserSettingsViewModel
 import androidx.compose.ui.text.style.TextOverflow
 import com.example.kftgcs.utils.AppStrings
@@ -40,10 +39,15 @@ import com.example.kftgcs.ui.components.DroneCameraFeedOverlay
 fun MainPage(
     telemetryViewModel: SharedViewModel,
     authViewModel: AuthViewModel,
-    navController: NavHostController
+    navController: NavHostController,
+    userSettingsViewModel: UserSettingsViewModel
 ) {
     val telemetryState by telemetryViewModel.telemetryState.collectAsState()
     val context = LocalContext.current
+
+    // Drone path colour from the shared user settings (updates live when changed)
+    val userSettings by userSettingsViewModel.settings.collectAsState()
+    val dronePathColor = userSettings.dronePathColor
 
     // Collect area values from ViewModel
     val missionAreaFormatted by telemetryViewModel.missionAreaFormatted.collectAsState()
@@ -194,10 +198,7 @@ fun MainPage(
                 manualResumePointUploaded = manualResumePointUploaded,
                 // Clear drone path trail trigger
                 clearDronePathTrigger = clearDronePathTrigger,
-                dronePathColor = run {
-                    val userSettingsViewModel: UserSettingsViewModel = viewModel()
-                    userSettingsViewModel.settings.collectAsState().value.dronePathColor
-                }
+                dronePathColor = dronePathColor
             )
 
             StatusPanel(

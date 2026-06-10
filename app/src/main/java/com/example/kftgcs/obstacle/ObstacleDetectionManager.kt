@@ -2,7 +2,7 @@ package com.example.kftgcs.obstacle
 
 import android.content.Context
 import com.divpundir.mavlink.definitions.common.MissionItemInt
-import com.example.kftgcs.Telemetry.TelemetryState
+import com.example.kftgcs.telemetry.TelemetryState
 import com.example.kftgcs.telemetry.SharedViewModel
 import com.example.kftgcs.telemetry.MavMode
 import com.google.android.gms.maps.model.LatLng

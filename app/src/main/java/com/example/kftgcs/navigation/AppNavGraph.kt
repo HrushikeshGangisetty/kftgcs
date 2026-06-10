@@ -32,8 +32,13 @@ import com.example.kftgcs.calibration.BarometerCalibrationScreen
 import com.example.kftgcs.calibration.BarometerCalibrationViewModel
 import com.example.kftgcs.calibration.LevelCalibrationScreen
 import com.example.kftgcs.calibration.LevelCalibrationViewModel
+import androidx.compose.runtime.saveable.rememberSaveable
 import com.example.kftgcs.integration.TlogIntegration
 import com.example.kftgcs.telemetry.SharedViewModel
+import com.example.kftgcs.update.UpdateAvailableDialog
+import com.example.kftgcs.update.UpdateDownloadedDialog
+import com.example.kftgcs.update.UpdateUiState
+import com.example.kftgcs.update.rememberInAppUpdateState
 import com.example.kftgcs.uiconnection.ConnectionPage
 import com.example.kftgcs.uimain.MainPage
 import com.example.kftgcs.uimain.PlanScreen
@@ -120,7 +125,10 @@ sealed class Screen(val route: String) {
 }
 
 @Composable
-fun AppNavGraph(navController: NavHostController) {
+fun AppNavGraph(
+    navController: NavHostController,
+    userSettingsViewModel: UserSettingsViewModel
+) {
     val context = LocalContext.current
     val application = context.applicationContext as Application
 
@@ -221,8 +229,30 @@ fun AppNavGraph(navController: NavHostController) {
                 MainPage(
                     navController = navController,
                     authViewModel = authViewModel,
-                    telemetryViewModel = sharedViewModel
+                    telemetryViewModel = sharedViewModel,
+                    userSettingsViewModel = userSettingsViewModel
                 )
+            }
+
+            // Google Play in-app update prompt. Mounted on the main screen so it only
+            // appears once the user is logged in and connected — never during auth.
+            val updateState = rememberInAppUpdateState()
+            // Suppress re-prompting after "Later" for this session; re-offers on next launch.
+            var dismissedThisSession by rememberSaveable { mutableStateOf(false) }
+            when (updateState.uiState) {
+                is UpdateUiState.Available ->
+                    if (!dismissedThisSession) {
+                        UpdateAvailableDialog(
+                            onUpdate = { updateState.startUpdate() },
+                            onLater = { dismissedThisSession = true }
+                        )
+                    }
+                is UpdateUiState.Downloaded ->
+                    UpdateDownloadedDialog(
+                        onRestart = { updateState.completeInstall() },
+                        onLater = { updateState.dismiss() }
+                    )
+                is UpdateUiState.None -> Unit
             }
         }
 
@@ -343,7 +373,7 @@ fun AppNavGraph(navController: NavHostController) {
         }
 
         composable(Screen.UserSettings.route) {
-            val userSettingsViewModel: UserSettingsViewModel = viewModel()
+            // Reuse the shared activity-scoped instance so edits update the live theme.
             UserSettingsScreen(
                 navController = navController,
                 viewModel = userSettingsViewModel

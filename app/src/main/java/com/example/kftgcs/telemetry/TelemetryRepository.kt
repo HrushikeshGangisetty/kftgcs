@@ -9,9 +9,9 @@ import com.divpundir.mavlink.definitions.common.*
 import com.divpundir.mavlink.definitions.minimal.*
 import com.divpundir.mavlink.definitions.ardupilotmega.MagCalProgress
 import com.divpundir.mavlink.definitions.common.MagCalReport
-import com.example.kftgcs.Telemetry.AppScope
-import com.example.kftgcs.Telemetry.TelemetryState
-import com.example.kftgcs.Telemetry.extractDroneUniqueId
+import com.example.kftgcs.telemetry.AppScope
+import com.example.kftgcs.telemetry.TelemetryState
+import com.example.kftgcs.telemetry.extractDroneUniqueId
 
 import com.example.kftgcs.utils.AppStrings
 import com.example.kftgcs.telemetry.connections.MavConnectionProvider

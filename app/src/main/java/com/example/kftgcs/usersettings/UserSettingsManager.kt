@@ -52,8 +52,8 @@ object UserSettingsManager {
 }
 
 enum class FontSizeOption(val label: String, val scaleFactor: Float) {
-    SMALL("Small", 0.95f),
-    MEDIUM("Medium", 1.15f),
-    LARGE("Large", 1.35f)
+    SMALL("Small", 0.85f),
+    MEDIUM("Medium", 1.0f),   // neutral default — leaves the app at its native size
+    LARGE("Large", 1.2f)
 }
 

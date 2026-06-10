@@ -1,6 +1,6 @@
 package com.example.kftgcs.videotracking
 
-import com.example.kftgcs.Telemetry.TelemetryState
+import com.example.kftgcs.telemetry.TelemetryState
 import com.google.android.gms.maps.model.LatLng
 import kotlin.math.*
 

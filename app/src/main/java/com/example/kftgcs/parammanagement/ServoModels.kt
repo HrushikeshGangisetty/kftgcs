@@ -194,7 +194,7 @@ data class ServoChannel(
 /**
  * Minimal vehicle state needed by the servo configurator.
  *
- * Both values mirror [com.example.kftgcs.Telemetry.TelemetryState]; they are
+ * Both values mirror [com.example.kftgcs.telemetry.TelemetryState]; they are
  * kept in a separate class so the servo feature has zero coupling to the
  * broader telemetry hierarchy.
  */

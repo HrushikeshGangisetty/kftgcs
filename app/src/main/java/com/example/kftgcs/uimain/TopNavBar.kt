@@ -24,7 +24,7 @@ import androidx.compose.ui.window.PopupProperties
 import androidx.navigation.NavHostController
 import androidx.compose.runtime.rememberCoroutineScope
 import kotlinx.coroutines.launch
-import com.example.kftgcs.Telemetry.TelemetryState
+import com.example.kftgcs.telemetry.TelemetryState
 import com.example.kftgcs.authentication.AuthViewModel
 import com.example.kftgcs.navigation.Screen
 import com.example.kftgcs.telemetry.SharedViewModel

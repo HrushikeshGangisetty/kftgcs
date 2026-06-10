@@ -233,8 +233,12 @@ private fun ColorPickerPanel(
     textColor: Color
 ) {
     val presets = listOf(
+        // Standard / default colours
         Color.White,
+        Color.Black,
         Color(0xFFE6EDF3),   // off-white
+        Color(0xFF8B949E),   // neutral grey
+        // Vivid colours
         Color(0xFFFF6B6B),   // vivid red
         Color(0xFFFF8C00),   // vivid orange
         Color(0xFFFFD700),   // vivid gold
@@ -243,7 +247,6 @@ private fun ColorPickerPanel(
         Color(0xFF58A6FF),   // vivid blue
         Color(0xFF9C5AFF),   // vivid purple
         Color(0xFFFF4081),   // vivid pink
-        Color(0xFFFF3D00),   // deep orange
         Color(0xFF00C853),   // deep green
         Color(0xFF0091EA),   // deep blue
         Color(0xFFAA00FF),   // deep purple
@@ -251,7 +254,6 @@ private fun ColorPickerPanel(
         Color(0xFF80DEEA),   // light teal
         Color(0xFFFFCC02),   // amber
         Color(0xFF69F0AE),   // mint
-        Color(0xFFFF6E40),   // coral
         Color(0xFFB2FF59),   // lime
     )
 
@@ -288,7 +290,7 @@ private fun ColorPickerPanel(
                         .background(color)
                         .border(
                             width = if (isSelected) 3.dp else 1.dp,
-                            color = if (isSelected) Color(0xFF58A6FF) else Color(0xFF30363D),
+                            color = if (isSelected) Color(0xFF58A6FF) else Color(0xFF6E7681),
                             shape = CircleShape
                         )
                         .clickable { onColorSelected(color) },

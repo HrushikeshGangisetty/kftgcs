@@ -12,13 +12,16 @@
 #   public *;
 #}
 
-# Uncomment this to preserve the line number information for
-# debugging stack traces.
-#-keepattributes SourceFile,LineNumberTable
+# Preserve line numbers so RELEASE crash stack traces (Play Console → Android
+# vitals, and our local crash logs) point at real line numbers instead of
+# being unreadable after R8 obfuscation. The matching mapping.txt that R8
+# generates is auto-bundled into the AAB and uploaded to Play Console, which
+# deobfuscates the traces for you.
+-keepattributes SourceFile,LineNumberTable
 
-# If you keep the line number information, uncomment this to
-# hide the original source file name.
-#-renamesourcefileattribute SourceFile
+# Hide the original source file name (replace with "SourceFile") while still
+# keeping the line numbers above.
+-renamesourcefileattribute SourceFile
 
 # ============================================
 # GSON Serialization: Keep data class field names
@@ -30,6 +33,16 @@
 # Keep ALL API request/response model classes (preserves field names for Gson)
 # Using a wildcard so that any new models added to this package are automatically covered.
 -keep class com.example.kftgcs.api.** { *; }
+
+# Param Management uses a SEPARATE auth API (ParamAuthApiService) whose request/
+# response models (ParamLoginRequest/Response, ParamUser, etc.) live in this
+# package and are (de)serialized with Gson via reflection. These are only ever
+# instantiated through Gson's Unsafe allocator, so in R8 full mode (release/AAB)
+# R8 sees "no real instances", prunes/optimizes the fields, and deserialization
+# returns nulls or throws — even though the @SerializedName member rule is present.
+# Debug works only because isMinifyEnabled=false. Keep the package fully so the
+# Param login (and other Gson models here) behave identically in release builds.
+-keep class com.example.kftgcs.parammanagement.** { *; }
 
 # Keep Gson TypeToken and related classes
 -keep class com.google.gson.** { *; }

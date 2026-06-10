@@ -33,7 +33,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.compose.ui.zIndex
-import com.example.kftgcs.Telemetry.TelemetryState
+import com.example.kftgcs.telemetry.TelemetryState
 import com.example.kftgcs.videotracking.*
 import com.example.kftgcs.videotracking.ui.GimbalControlOverlay
 import com.example.kftgcs.videotracking.ui.VideoStreamPlayer

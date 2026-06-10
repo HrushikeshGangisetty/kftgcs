@@ -1,6 +1,6 @@
 package com.example.kftgcs.service
 
-import com.example.kftgcs.Telemetry.TelemetryState
+import com.example.kftgcs.telemetry.TelemetryState
 import com.example.kftgcs.viewmodel.TlogViewModel
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.StateFlow

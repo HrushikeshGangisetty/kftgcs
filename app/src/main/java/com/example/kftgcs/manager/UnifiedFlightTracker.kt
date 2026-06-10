@@ -2,7 +2,7 @@ package com.example.kftgcs.manager
 
 import android.content.Context
 import com.example.kftgcs.GCSApplication
-import com.example.kftgcs.Telemetry.TelemetryState
+import com.example.kftgcs.telemetry.TelemetryState
 import com.example.kftgcs.api.SessionManager
 import com.example.kftgcs.database.tlog.EventType
 import com.example.kftgcs.database.tlog.EventSeverity

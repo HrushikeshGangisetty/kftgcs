@@ -7,6 +7,7 @@ import androidx.work.NetworkType
 import androidx.work.PeriodicWorkRequestBuilder
 import androidx.work.WorkManager
 import com.example.kftgcs.api.SessionManager
+import com.example.kftgcs.logging.CrashLogger
 import com.example.kftgcs.security.SecurePinManager
 import com.example.kftgcs.sync.SyncWorker
 import com.example.kftgcs.telemetry.WebSocketManager
@@ -63,6 +64,10 @@ class GCSApplication : Application() {
         // Initialize Timber for logging - ONLY in debug builds
         // In release builds, no logs will be output (security feature)
         initializeTimber()
+
+        // Initialize on-device crash logging. Unlike Timber this persists in
+        // RELEASE builds too, so production crashes leave a recoverable record.
+        CrashLogger.init(this)
 
         // Initialize Maps SDK as early as possible to avoid race conditions
         // where the map renders before its internal HTTP client is ready
@@ -152,6 +157,17 @@ class GCSApplication : Application() {
 
         // Set custom exception handler
         Thread.setDefaultUncaughtExceptionHandler { thread, throwable ->
+            // Persist the crash FIRST (fast, never throws) so it is captured
+            // even in release builds where the Timber calls below are no-ops.
+            CrashLogger.logCrash(
+                thread = thread,
+                throwable = throwable,
+                extra = mapOf(
+                    "Drone in flight" to isDroneInFlight,
+                    "Connected to drone" to isConnectedToDrone
+                )
+            )
+
             Timber.e("========== APP CRASH DETECTED ==========")
             Timber.e("Thread: ${thread.name}")
             Timber.e(throwable, "Error: ${throwable.message}")

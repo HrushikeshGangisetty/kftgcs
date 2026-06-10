@@ -1,7 +1,7 @@
 package com.example.kftgcs.telemetry
 
 import com.example.kftgcs.GCSApplication
-import com.example.kftgcs.Telemetry.TelemetryState
+import com.example.kftgcs.telemetry.TelemetryState
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch

@@ -5,7 +5,7 @@ plugins {
     alias(libs.plugins.kotlin.android)
     alias(libs.plugins.kotlin.compose)
 //    alias(libs.plugins.google.gms.google.services)
-    id("kotlin-kapt")
+    alias(libs.plugins.ksp)
 }
 
 // Load local.properties for API keys
@@ -37,6 +37,23 @@ android {
             "KFT_APP_SECRET",
             "\"${localProperties.getProperty("KFT_APP_SECRET") ?: ""}\""
         )
+    }
+
+    // White-label brand dimension. All code/UI/DB/API stay shared in main;
+    // only applicationId, app_name and launcher icons differ per flavor.
+    flavorDimensions += "brand"
+    productFlavors {
+        create("original") {
+            dimension = "brand"
+            // Current state — no overrides. Uses defaultConfig applicationId
+            // and the app_name from src/main/res/values/strings.xml.
+        }
+        create("svd") {
+            dimension = "brand"
+            applicationId = "com.svd.gcs"
+            // Override app name without touching main strings.xml.
+            resValue("string", "app_name", "SVD")
+        }
     }
 
     buildTypes {
@@ -150,7 +167,7 @@ dependencies {
     // Room database
     implementation("androidx.room:room-runtime:2.6.1")
     implementation("androidx.room:room-ktx:2.6.1")
-    kapt("androidx.room:room-compiler:2.6.1")
+    ksp("androidx.room:room-compiler:2.6.1")
 
     // Gson for JSON serialization
     implementation("com.google.code.gson:gson:2.10.1")
@@ -187,4 +204,7 @@ dependencies {
 
     // WorkManager — background offline-sync worker
     implementation("androidx.work:work-runtime-ktx:2.9.0")
+
+    // Google Play In-App Updates — "new version available" prompt (FLEXIBLE flow)
+    implementation(libs.play.app.update)
 }

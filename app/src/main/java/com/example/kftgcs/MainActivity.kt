@@ -255,7 +255,13 @@ class MainActivity : ComponentActivity() {
                             modifier = Modifier.fillMaxSize(),
                             color = MaterialTheme.colorScheme.background
                         ) {
-                            AppNavGraph(navController = navController)
+                            // Pass the same activity-scoped settings ViewModel that drives
+                            // the theme so the settings screen edits this exact instance and
+                            // changes apply live across the whole app.
+                            AppNavGraph(
+                                navController = navController,
+                                userSettingsViewModel = userSettingsViewModel
+                            )
                         }
                     }
                 }

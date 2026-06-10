@@ -17,7 +17,7 @@ import com.divpundir.mavlink.definitions.common.MavResult
 import com.divpundir.mavlink.definitions.common.MissionItemInt
 import com.divpundir.mavlink.definitions.common.Statustext
 import com.example.kftgcs.GCSApplication
-import com.example.kftgcs.Telemetry.TelemetryState
+import com.example.kftgcs.telemetry.TelemetryState
 //import com.example.aerogcsclone.Telemetry.connections.BluetoothConnectionProvider
 //import com.example.aerogcsclone.Telemetry.connections.MavConnectionProvider
 import com.example.kftgcs.telemetry.connections.BluetoothConnectionProvider

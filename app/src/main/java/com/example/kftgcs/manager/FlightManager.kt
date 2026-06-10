@@ -2,7 +2,7 @@ package com.example.kftgcs.manager
 
 import android.content.Context
 //import com.example.aerogcsclone.Telemetry.SharedViewModel
-import com.example.kftgcs.Telemetry.TelemetryState
+import com.example.kftgcs.telemetry.TelemetryState
 import com.example.kftgcs.database.tlog.EventType
 import com.example.kftgcs.database.tlog.EventSeverity
 import com.example.kftgcs.service.FlightLoggingService

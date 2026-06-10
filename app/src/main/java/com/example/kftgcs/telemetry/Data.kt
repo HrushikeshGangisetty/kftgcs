@@ -1,4 +1,4 @@
-package com.example.kftgcs.Telemetry
+package com.example.kftgcs.telemetry
 
 import com.divpundir.mavlink.definitions.common.OpenDroneIdBasicId
 import com.divpundir.mavlink.definitions.common.MavOdidIdType
@@ -209,7 +209,7 @@ data class TelemetryState(
     val sprayTelemetry: SprayTelemetry = SprayTelemetry()
 )
 
-data class CalibrationPoint(
-    val voltageMv: Int,          // Voltage at this calibration point
-    val levelPercent: Int        // Corresponding tank level % at this voltage
-)
+// CalibrationPoint is defined in SprayTelemetryUtils.kt (same package). A second,
+// identical copy used to live here under the old capital-"Telemetry" package; it was
+// removed when the package was unified to lowercase "telemetry" to avoid a duplicate
+// class declaration.
