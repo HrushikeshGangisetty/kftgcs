@@ -65,10 +65,12 @@ import com.example.kftgcs.parammanagement.AboutDroneViewModel
 import com.example.kftgcs.parammanagement.FullParamListScreen
 import com.example.kftgcs.parammanagement.FullParamListViewModel
 import com.example.kftgcs.parammanagement.BreakingSettingsScreen
+import com.example.kftgcs.parammanagement.BrakingSettingsViewModel
 import com.example.kftgcs.parammanagement.FlightModeScreen
 import com.example.kftgcs.parammanagement.FlightModeViewModel
 import com.example.kftgcs.parammanagement.ServoOutputScreen
 import com.example.kftgcs.parammanagement.SpraySettingsScreen
+import com.example.kftgcs.parammanagement.SpraySettingsViewModel
 import com.example.kftgcs.parammanagement.BatteryMonitorScreen
 import com.example.kftgcs.parammanagement.BatteryMonitorViewModel
 import com.example.kftgcs.parammanagement.MotorTestScreen
@@ -500,7 +502,12 @@ fun AppNavGraph(
         }
 
         composable(Screen.ParamBreakingSettings.route) {
-            BreakingSettingsScreen(navController = navController)
+            val brakingSettingsViewModel: BrakingSettingsViewModel =
+                viewModel { BrakingSettingsViewModel(sharedViewModel, application) }
+            BreakingSettingsScreen(
+                navController = navController,
+                viewModel = brakingSettingsViewModel
+            )
         }
 
         composable(Screen.ParamFlightMode.route) {
@@ -521,7 +528,12 @@ fun AppNavGraph(
         }
 
         composable(Screen.ParamSpraySettings.route) {
-            SpraySettingsScreen(navController = navController)
+            val spraySettingsViewModel: SpraySettingsViewModel =
+                viewModel { SpraySettingsViewModel(sharedViewModel, application) }
+            SpraySettingsScreen(
+                navController = navController,
+                viewModel = spraySettingsViewModel
+            )
         }
 
         composable(Screen.ParamMotorTest.route) {

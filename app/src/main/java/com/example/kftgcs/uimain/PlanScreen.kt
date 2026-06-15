@@ -105,8 +105,8 @@ fun PlanScreen(
     var gridAngle by remember { mutableStateOf(0f) }
     var surveySpeed by remember { mutableStateOf(1f) }
     var surveyAltitude by remember { mutableStateOf(1f) }
-    var holdNosePosition by remember { mutableStateOf(false) }
-    var autoSpray by remember { mutableStateOf(false) }
+    var holdNosePosition by remember { mutableStateOf(true) }
+    var autoSpray by remember { mutableStateOf(true) }
     var indentation by remember { mutableStateOf(1f) }  // Safe zone padding in meters (1-10m, 0.5 step)
 
     // Grid state

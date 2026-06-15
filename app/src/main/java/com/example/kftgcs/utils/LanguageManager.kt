@@ -1,6 +1,7 @@
 package com.example.kftgcs.utils
 
 import androidx.compose.runtime.staticCompositionLocalOf
+import com.example.kftgcs.BuildConfig
 
 /**
  * Language Manager for app-wide localization
@@ -341,7 +342,9 @@ object AppStrings {
     val undoneActionWarning get() = getString(mapOf("en" to "⚠️ This action cannot be undone.", "te" to "⚠️ ఈ చర్యను రద్దు చేయలేము.", "hi" to "⚠️ यह क्रिया पूर्ववत नहीं की जा सकती।", "mr" to "⚠️ ही क्रिया पूर्ववत केली जाऊ शकत नाही.", "ta" to "⚠️ இந்த செயலை மாற்ற முடியாது.", "kn" to "⚠️ ಈ ಕ್ರಿಯೆಯನ್ನು ರದ್ದುಮಾಡಲು ಸಾಧ್ಯವಿಲ್ಲ.", "ml" to "⚠️ ഈ പ്രവർത്തി പഴയപടിയാക്കാൻ കഴിയില്ല.", "gu" to "⚠️ આ ક્રિયા પૂર્વવત કરી શકાતી નથી.", "as" to "⚠️ এই কাৰ্যটো পূৰ্বৱৎ কৰিব নোৱাৰি।", "bn" to "⚠️ এই কাজটি পূর্বাবস্থায় ফেরানো যাবে না।", "pa" to "⚠️ ਇਹ ਕਾਰਵਾਈ ਵਾਪਸ ਨਹੀਂ ਕੀਤੀ ਜਾ ਸਕਦੀ।"))
 
     // TopNavBar Strings
-    val pavamanAviation get() = getString(mapOf("en" to "KFTGcs", "te" to "పవమాన్ ఏవియేషన్", "hi" to "KFTGcs", "mr" to "KFTGcs", "ta" to "KFTGcs", "kn" to "KFTGcs", "ml" to "KFTGcs", "gu" to "KFTGcs", "as" to "KFTGcs", "bn" to "KFTGcs", "pa" to "KFTGcs"))
+    // White-label home title: svd flavor shows "SCDGcs", everything else keeps "KFTGcs".
+    val pavamanAviation get() = if (BuildConfig.FLAVOR == "svd") "SVDGcs"
+        else getString(mapOf("en" to "KFTGcs", "te" to "పవమాన్ ఏవియేషన్", "hi" to "KFTGcs", "mr" to "KFTGcs", "ta" to "KFTGcs", "kn" to "KFTGcs", "ml" to "KFTGcs", "gu" to "KFTGcs", "as" to "KFTGcs", "bn" to "KFTGcs", "pa" to "KFTGcs"))
     val menu get() = getString(mapOf("en" to "Menu", "te" to "మెనూ", "hi" to "मेन्यू", "mr" to "मेन्यू", "ta" to "மெனு", "kn" to "ಮೆನು", "ml" to "മെനു", "gu" to "મેનુ", "as" to "মেনু", "bn" to "মেনু", "pa" to "ਮੀਨੂ"))
     val home get() = getString(mapOf("en" to "Home", "te" to "హోమ్", "hi" to "होम", "mr" to "होम", "ta" to "முகப்பு", "kn" to "ಹೋಮ್", "ml" to "ഹോം", "gu" to "હોમ", "as" to "হোম", "bn" to "হোম", "pa" to "ਹੋਮ"))
     val spray get() = getString(mapOf("en" to "Spray", "te" to "స్ప్రే", "hi" to "स्प्रे", "mr" to "स्प्रे", "ta" to "தெளிப்பு", "kn" to "ಸ್ಪ್ರೇ", "ml" to "സ്പ്രേ", "gu" to "સ્પ્રે", "as" to "স্প্ৰে", "bn" to "স্প্রে", "pa" to "ਸਪਰੇ"))

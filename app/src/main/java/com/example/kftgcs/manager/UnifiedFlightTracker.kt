@@ -37,6 +37,7 @@ class UnifiedFlightTracker(
 
     private var currentState = FlightState.IDLE
     private var monitoringJob: Job? = null
+    private var notificationJob: Job? = null
 
     // Mission mode tracking
     private enum class MissionMode {
@@ -96,6 +97,48 @@ class UnifiedFlightTracker(
                 }
             }
         }
+
+        // Persist user-facing warning/error notifications (tank empty, low voltage,
+        // etc.) into the local flight logs as they are shown to the pilot.
+        notificationJob = CoroutineScope(Dispatchers.Main).launch {
+            sharedViewModel.notificationEvents.collect { notification ->
+                try {
+                    logNotificationEvent(notification)
+                } catch (e: Exception) {
+                    // Error logging notification - keep collecting
+                }
+            }
+        }
+    }
+
+    /**
+     * Saves a warning/error [Notification] to the flight event log. INFO/SUCCESS
+     * notifications are skipped — only actionable warnings and errors are recorded.
+     * Notifications are only persisted while a flight is active (logEvent requires
+     * an active flightId).
+     */
+    private fun logNotificationEvent(notification: Notification) {
+        if (currentState != FlightState.ACTIVE) return
+
+        val severity = when (notification.type) {
+            NotificationType.ERROR -> EventSeverity.ERROR
+            NotificationType.WARNING -> EventSeverity.WARNING
+            else -> return  // ignore INFO / SUCCESS
+        }
+
+        // Classify well-known warnings so the log entry carries a meaningful type.
+        val msg = notification.message.lowercase()
+        val eventType = when {
+            msg.contains("tank empty") -> EventType.TANK_EMPTY
+            msg.contains("voltage") || msg.contains("battery") -> EventType.LOW_VOLTAGE
+            else -> EventType.NOTIFICATION
+        }
+
+        tlogViewModel.logEvent(
+            eventType = eventType,
+            severity = severity,
+            message = notification.message
+        )
     }
 
     private suspend fun processFlightStateMachine(telemetry: TelemetryState) {
@@ -746,6 +789,7 @@ class UnifiedFlightTracker(
 
     fun destroy() {
         monitoringJob?.cancel()
+        notificationJob?.cancel()
         loggingService?.stopLogging()
     }
 

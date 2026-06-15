@@ -43,7 +43,10 @@ enum class EventType {
     WAYPOINT_REACHED,
     MISSION_COMPLETE,
     CUSTOM_MAVLINK,
-    SYSTEM_ERROR
+    SYSTEM_ERROR,
+    TANK_EMPTY,
+    LOW_VOLTAGE,
+    NOTIFICATION
 }
 
 enum class EventSeverity {

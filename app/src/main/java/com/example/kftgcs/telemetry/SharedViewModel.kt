@@ -605,18 +605,42 @@ class SharedViewModel : ViewModel() {
                     return@launch
                 }
 
-                // Get the user's selected tank empty action from settings
+                // Get the user's selected tank empty action from settings.
+                // Manual flight and Auto missions have separate configured actions.
                 val context = GCSApplication.getInstance()
                 val tankEmptyAction = if (context != null) {
-                    getTankEmptyAction(context)
+                    getTankEmptyAction(context, isInAutoMode)
                 } else {
                     "HOVER" // Default fallback
                 }
 
                 LogUtils.i("SharedVM", "=== TANK EMPTY DETECTED ===")
-                LogUtils.i("SharedVM", "Current flight mode: $currentMode")
-                LogUtils.i("SharedVM", "User configured action: $tankEmptyAction")
+                LogUtils.i("SharedVM", "Current flight mode: $currentMode (isAuto=$isInAutoMode)")
+                LogUtils.i("SharedVM", "User configured action (${if (isInAutoMode) "Auto" else "Manual"}): $tankEmptyAction")
                 LogUtils.i("SharedVM", "Current waypoint: $currentWp, Last AUTO waypoint: $lastAutoWp")
+
+                // Report Only: do not change flight mode. The drone keeps flying;
+                // we simply notify the user and backend that the tank is empty.
+                if (tankEmptyAction.equals("REPORT_ONLY", ignoreCase = true)) {
+                    LogUtils.i("SharedVM", "Report Only selected - reporting tank empty without changing mode")
+                    ttsManager?.speak("Tank empty!")
+                    addNotification(
+                        Notification(
+                            message = "Tank empty - report only (drone continues flying)",
+                            type = NotificationType.WARNING
+                        )
+                    )
+                    try {
+                        WebSocketManager.getInstance().sendMissionEvent(
+                            eventType = "TANK_EMPTY_REPORT",
+                            eventStatus = "WARNING",
+                            description = "Tank empty in ${currentMode ?: "Unknown"} mode - action: Report Only"
+                        )
+                    } catch (e: Exception) {
+                        LogUtils.e("SharedVM", "Failed to send tank empty report status", e)
+                    }
+                    return@launch
+                }
 
                 // Determine the MAVLink mode based on user's setting
                 // Note: "HOVER" or "LOITER" setting uses BRAKE mode to keep drone in place
@@ -680,11 +704,16 @@ class SharedViewModel : ViewModel() {
     }
 
     /**
-     * Get the user's tank empty action setting from SharedPreferences
+     * Get the user's tank empty action setting from SharedPreferences.
+     * Manual flight and Auto missions are configured separately; [isAuto] selects which one.
+     * Falls back to the legacy single "tank_empty_action" value for users who haven't
+     * re-saved settings since the per-mode split.
      */
-    private fun getTankEmptyAction(context: Context): String {
+    private fun getTankEmptyAction(context: Context, isAuto: Boolean): String {
         val prefs = context.getSharedPreferences("failsafe_options", Context.MODE_PRIVATE)
-        return prefs.getString("tank_empty_action", "HOVER") ?: "HOVER"
+        val legacy = prefs.getString("tank_empty_action", "HOVER") ?: "HOVER"
+        val key = if (isAuto) "tank_empty_action_auto" else "tank_empty_action_manual"
+        return prefs.getString(key, legacy) ?: legacy
     }
 
     /**
@@ -2106,6 +2135,15 @@ class SharedViewModel : ViewModel() {
     private val _notifications = MutableStateFlow<List<Notification>>(emptyList())
     val notifications: StateFlow<List<Notification>> = _notifications.asStateFlow()
 
+    /**
+     * Event stream emitting each notification at the moment it is added. Unlike
+     * [notifications] (a snapshot list for the UI panel), this is a one-shot event
+     * source so observers — e.g. UnifiedFlightTracker — can persist warnings/errors
+     * (tank empty, low voltage, etc.) to the local flight logs without diffing the list.
+     */
+    private val _notificationEvents = MutableSharedFlow<Notification>(extraBufferCapacity = 32)
+    val notificationEvents: SharedFlow<Notification> = _notificationEvents.asSharedFlow()
+
     private val _isNotificationPanelVisible = MutableStateFlow(false)
     val isNotificationPanelVisible: StateFlow<Boolean> = _isNotificationPanelVisible.asStateFlow()
 
@@ -2155,6 +2193,7 @@ class SharedViewModel : ViewModel() {
 
     fun addNotification(notification: Notification) {
         _notifications.value = listOf(notification) + _notifications.value
+        _notificationEvents.tryEmit(notification)
     }
 
     fun toggleNotificationPanel() {

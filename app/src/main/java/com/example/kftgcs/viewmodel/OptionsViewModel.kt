@@ -13,7 +13,9 @@ import kotlinx.coroutines.launch
 
 data class FailsafeOptions(
     val missionCompletionAction: String = "HOVER",
-    val tankEmptyAction: String = "HOVER",
+    // Tank empty action is configured separately for Manual flight and Auto missions.
+    val tankEmptyActionManual: String = "HOVER",
+    val tankEmptyActionAuto: String = "HOVER",
     val lowVoltLevel1: Float = 22.2f,
     val lowVoltLevel2: Float = 21.0f,
     val lowVoltLevel2Action: String = "HOVER"
@@ -25,7 +27,10 @@ class OptionsViewModel(application: Application) : AndroidViewModel(application)
         private const val TAG = "OptionsVM"
         private const val PREFS_NAME = "failsafe_options"
         private const val KEY_MISSION_COMPLETION_ACTION = "mission_completion_action"
+        // Legacy single key, kept only to migrate existing users into the two new keys below.
         private const val KEY_TANK_EMPTY_ACTION = "tank_empty_action"
+        private const val KEY_TANK_EMPTY_ACTION_MANUAL = "tank_empty_action_manual"
+        private const val KEY_TANK_EMPTY_ACTION_AUTO = "tank_empty_action_auto"
         private const val KEY_LOW_VOLT_LEVEL_1 = "low_volt_level_1"
         private const val KEY_LOW_VOLT_LEVEL_2 = "low_volt_level_2"
         private const val KEY_LOW_VOLT_LEVEL_2_ACTION = "low_volt_level_2_action"
@@ -116,9 +121,12 @@ class OptionsViewModel(application: Application) : AndroidViewModel(application)
 
     private fun loadSettings() {
         val prefs = getApplication<Application>().getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        // Migration: if the new per-mode keys aren't set yet, fall back to the legacy single value.
+        val legacyTankEmpty = prefs.getString(KEY_TANK_EMPTY_ACTION, "HOVER") ?: "HOVER"
         _options.value = FailsafeOptions(
             missionCompletionAction = prefs.getString(KEY_MISSION_COMPLETION_ACTION, "HOVER") ?: "HOVER",
-            tankEmptyAction = prefs.getString(KEY_TANK_EMPTY_ACTION, "HOVER") ?: "HOVER",
+            tankEmptyActionManual = prefs.getString(KEY_TANK_EMPTY_ACTION_MANUAL, legacyTankEmpty) ?: legacyTankEmpty,
+            tankEmptyActionAuto = prefs.getString(KEY_TANK_EMPTY_ACTION_AUTO, legacyTankEmpty) ?: legacyTankEmpty,
             lowVoltLevel1 = prefs.getFloat(KEY_LOW_VOLT_LEVEL_1, 22.2f),
             lowVoltLevel2 = prefs.getFloat(KEY_LOW_VOLT_LEVEL_2, 21.0f),
             lowVoltLevel2Action = prefs.getString(KEY_LOW_VOLT_LEVEL_2_ACTION, "HOVER") ?: "HOVER"
@@ -129,8 +137,12 @@ class OptionsViewModel(application: Application) : AndroidViewModel(application)
         _options.value = _options.value.copy(missionCompletionAction = action)
     }
 
-    fun updateTankEmptyAction(action: String) {
-        _options.value = _options.value.copy(tankEmptyAction = action)
+    fun updateTankEmptyActionManual(action: String) {
+        _options.value = _options.value.copy(tankEmptyActionManual = action)
+    }
+
+    fun updateTankEmptyActionAuto(action: String) {
+        _options.value = _options.value.copy(tankEmptyActionAuto = action)
     }
 
     fun updateLowVoltLevel1(value: Float) {
@@ -157,7 +169,8 @@ class OptionsViewModel(application: Application) : AndroidViewModel(application)
                 .getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
                 .edit()
                 .putString(KEY_MISSION_COMPLETION_ACTION, current.missionCompletionAction)
-                .putString(KEY_TANK_EMPTY_ACTION, current.tankEmptyAction)
+                .putString(KEY_TANK_EMPTY_ACTION_MANUAL, current.tankEmptyActionManual)
+                .putString(KEY_TANK_EMPTY_ACTION_AUTO, current.tankEmptyActionAuto)
                 .putFloat(KEY_LOW_VOLT_LEVEL_1, current.lowVoltLevel1)
                 .putFloat(KEY_LOW_VOLT_LEVEL_2, current.lowVoltLevel2)
                 .putString(KEY_LOW_VOLT_LEVEL_2_ACTION, current.lowVoltLevel2Action)

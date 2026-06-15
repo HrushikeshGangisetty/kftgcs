@@ -163,15 +163,25 @@ class MavlinkTelemetryRepository(
     private var tankEmptyNotificationShown = false
     private var lastTankLevelPercent: Int? = null
 
-    // Zero flow detection for tank empty (when sprayer is ON but flow is 0)
+    // Low-flow detection for tank empty (when sprayer is ON but flow drops to ~zero)
     private var zeroFlowStartTime: Long? = null
     private var pumpTurnedOnTime: Long? = null  // Track when pump was turned ON for initial delay
-    private var consecutiveZeroFlowSamples: Int = 0  // Count of back-to-back confirmed zero-flow readings
-    private val ZERO_FLOW_THRESHOLD_MS = 1000L      // 1 second of confirmed zero flow = tank empty
-    private val PUMP_STARTUP_DELAY_MS = 1500L       // 1.5-second delay after pump turns ON before checking flow
-    private val MIN_ZERO_FLOW_SAMPLES = 4           // Require >=6 consecutive zero samples (guards against telemetry gaps; ~1.5s @ 4Hz)
-    // NOTE: Total worst-case time from pump ON to tank empty trigger = 4 seconds
-    // The 6-sample minimum prevents false triggers if BATT2 telemetry rate drops below 4Hz
+    private var consecutiveZeroFlowSamples: Int = 0  // Count of back-to-back low-flow readings
+    private val ZERO_FLOW_THRESHOLD_MS = 1000L      // 1.0s of confirmed low flow = tank empty
+    private val PUMP_STARTUP_DELAY_MS = 1500L       // 1.5-second grace period after pump turns ON before checking flow
+    private val MIN_ZERO_FLOW_SAMPLES = 5           // Require >=5 consecutive low-flow samples (~625ms @ 8Hz; guards against a dropped BATT2 packet)
+    // "Effectively empty" uses a tight ABSOLUTE near-zero threshold instead of waiting for exactly 0
+    // (which only happens once a draining pump fully stops — the source of the old ~5s lag) and instead
+    // of a relative %-of-baseline band (which fired falsely on normal flow dips at high spray rates).
+    // Empty means flow ≈ 0 regardless of spray rate, so a small fixed L/min cut-off is both fast and robust.
+    private val LOW_FLOW_THRESHOLD_LPM = 0.2f       // Flow at/below 0.2 L/min while spraying = "no effective flow"
+    // NOTE: Detection latency ≈ flow ramp down to <=0.2 L/min (~0.3–0.8s) + 1.0s confirmation ≈ ~1.3–1.8s.
+
+    // Flow-rate display hold: BATT2 occasionally reports -1 (no reading) for a frame, which would flick
+    // the on-screen flow to "N/A". Hold the last valid value briefly so the display stays stable.
+    private var lastValidFlowLpm: Float? = null
+    private var lastValidFlowTime: Long = 0L
+    private val FLOW_DISPLAY_HOLD_MS = 2000L
 
     // AUTO mode spray tracking
     // In AUTO mode, sprayer is controlled by DO_SET_SERVO, DO_SPRAYER, or ArduPilot Sprayer library
@@ -845,7 +855,18 @@ class MavlinkTelemetryRepository(
                             ratePerMin
                         }
 
-                        LogUtils.d("Flow", "BATT2 CONV: flowRate(L/h)=$flowRateLiterPerHour, filtered=$filteredFlowRate, flowRate(L/min)=$flowRateLiterPerMin")
+                        // Hold the last valid flow briefly so a single -1 (no-reading) frame doesn't
+                        // flicker the on-screen flow to "N/A". Detection below still uses the real
+                        // (possibly null) flowRateLiterPerMin — only the DISPLAY is smoothed here.
+                        val nowFlow = System.currentTimeMillis()
+                        if (flowRateLiterPerMin != null) {
+                            lastValidFlowLpm = flowRateLiterPerMin
+                            lastValidFlowTime = nowFlow
+                        }
+                        val displayFlowLpm = flowRateLiterPerMin
+                            ?: lastValidFlowLpm?.takeIf { nowFlow - lastValidFlowTime <= FLOW_DISPLAY_HOLD_MS }
+
+                        LogUtils.d("Flow", "BATT2 CONV: flowRate(L/h)=$flowRateLiterPerHour, filtered=$filteredFlowRate, flowRate(L/min)=$flowRateLiterPerMin, display=$displayFlowLpm")
 
                         // Parse consumed volume (current_consumed in mAh = mL)
                         val consumedLiters = if (b.currentConsumed == -1) {
@@ -868,8 +889,8 @@ class MavlinkTelemetryRepository(
                             remaining
                         }
 
-                        // Format values for UI
-                        val formattedFlowRate = flowRateLiterPerMin?.let {
+                        // Format values for UI (uses the held value so the field doesn't flicker to N/A)
+                        val formattedFlowRate = displayFlowLpm?.let {
                             "%.2f L/min".format(it)
                         }
 
@@ -944,33 +965,39 @@ class MavlinkTelemetryRepository(
                         // ║ Tank is considered empty when:                                   ║
                         // ║   1. Sprayer is ON (RC7 enabled, sprayEnabled = true)             ║
                         // ║   2. Flow was previously positive (pump was actually running)     ║
-                        // ║   3. Flow rate drops to CONFIRMED 0 for 2+ seconds AND            ║
-                        // ║      at least MIN_ZERO_FLOW_SAMPLES consecutive zero readings     ║
-                        // ║      (null = no data yet, NOT treated as zero)                    ║
+                        // ║   3. Flow drops to <= LOW_FLOW_THRESHOLD_LPM (~0.2 L/min) for     ║
+                        // ║      ZERO_FLOW_THRESHOLD_MS AND >= MIN_ZERO_FLOW_SAMPLES          ║
+                        // ║      consecutive low readings (null frame = unknown, see below)   ║
                         // ║   4. BATT2 is properly configured                                ║
                         // ║   5. NOT in a non-spray mode (BRAKE/RTL/LAND/Smart_RTL)          ║
                         // ║                                                                  ║
                         // ║ Timings:                                                         ║
-                        // ║   PUMP_STARTUP_DELAY_MS  = 2000ms (grace period after pump ON)   ║
-                        // ║   ZERO_FLOW_THRESHOLD_MS = 2000ms (zero flow to declare empty)   ║
-                        // ║   MIN_ZERO_FLOW_SAMPLES  = 6 (~1.5s @ 4Hz BATT2 rate)            ║
-                        // ║   Total worst-case = ~4 seconds from pump ON with empty tank     ║
+                        // ║   PUMP_STARTUP_DELAY_MS  = 1500ms (grace period after pump ON)   ║
+                        // ║   ZERO_FLOW_THRESHOLD_MS = 1000ms (low flow to declare empty)    ║
+                        // ║   MIN_ZERO_FLOW_SAMPLES  = 5 (~625ms @ 8Hz BATT2 rate)           ║
+                        // ║   Detection latency from tank-empty ≈ ~1.3–1.8 seconds          ║
                         // ║                                                                  ║
                         // ║ Key safety guards:                                               ║
                         // ║   - lastPositiveFlowTime != null: flow > 0 must have been        ║
                         // ║     observed at least once (prevents false alerts when RC7 is    ║
                         // ║     ON but pump hasn't started or pilot is just transiting).     ║
                         // ║   - Sample-count threshold: prevents false triggers if BATT2     ║
-                        // ║     telemetry rate drops below 4Hz (link congestion).            ║
-                        // ║   - Any non-zero reading resets BOTH the timer and counter.      ║
+                        // ║     telemetry rate drops (link congestion).                      ║
+                        // ║   - A HEALTHY reading (> threshold) resets timer + counter.      ║
+                        // ║   - A null (no-data) frame HOLDS state: neither triggers nor      ║
+                        // ║     resets, so a dropped frame can't cause a false flag.          ║
                         // ╚══════════════════════════════════════════════════════════════════╝
 
                         val currentSprayEnabledForEmpty = state.value.sprayTelemetry.sprayEnabled
                         val configValid = state.value.sprayTelemetry.configurationValid
-                        // IMPORTANT: null = no BATT2 data received yet, NOT zero flow.
-                        // Only treat confirmed 0f from the sensor as zero flow.
-                        // This prevents false tank-empty triggers before the sensor has reported.
-                        val flowIsZero = flowRateLiterPerMin != null && flowRateLiterPerMin == 0f
+
+                        // ═══ Tight absolute near-zero threshold for tank-empty detection ═══
+                        // null  = no BATT2 reading this frame → UNKNOWN (neither low nor healthy), so a
+                        //         dropped frame neither triggers nor resets the low-flow timer/counter.
+                        // <=thr = effectively empty (flow ≈ 0 while the pump should be pushing liquid).
+                        // > thr = healthy flow → resets the timer/counter.
+                        val flowIsLow = flowRateLiterPerMin != null && flowRateLiterPerMin <= LOW_FLOW_THRESHOLD_LPM
+                        val flowIsHealthy = flowRateLiterPerMin != null && flowRateLiterPerMin > LOW_FLOW_THRESHOLD_LPM
 
                         // ═══ Skip tank empty detection in non-spray modes ═══
                         // When failsafes (battery, geofence, RC) trigger a mode change to
@@ -1004,7 +1031,7 @@ class MavlinkTelemetryRepository(
                         val sprayerIsOn = (currentSprayEnabledForEmpty || (isInAutoMode && autoModeSprayDetected)) && !isInNonSprayMode && !missionEndPhaseActive
 
                         // ═══ TANK EMPTY DEBUG LOGS ═══
-                        LogUtils.d("TankEmpty", "━━━ Tank Empty Check ━━━ mode=$currentMode | flowRate=$flowRateLiterPerMin L/min | flowIsZero=$flowIsZero | configValid=$configValid")
+                        LogUtils.d("TankEmpty", "━━━ Tank Empty Check ━━━ mode=$currentMode | flowRate=$flowRateLiterPerMin L/min | flowIsLow=$flowIsLow | flowIsHealthy=$flowIsHealthy | lowThreshold=$LOW_FLOW_THRESHOLD_LPM L/min | configValid=$configValid")
                         LogUtils.d("TankEmpty", "  sprayEnabled=$currentSprayEnabledForEmpty | autoSprayDetected=$autoModeSprayDetected | isAutoMode=$isInAutoMode | isInNonSprayMode=$isInNonSprayMode | missionEnd=$missionEndPhaseActive | sprayerIsOn=$sprayerIsOn")
                         LogUtils.d("TankEmpty", "  pumpTurnedOnTime=$pumpTurnedOnTime | zeroFlowStartTime=$zeroFlowStartTime | tankEmptyShown=$tankEmptyNotificationShown | lastPositiveFlow=$lastPositiveFlowTime")
 
@@ -1025,36 +1052,40 @@ class MavlinkTelemetryRepository(
                             //   - Pilot is transiting in Loiter/Stabilize with RC7 ON
                             //   - Pump is priming and hasn't produced flow yet
                             // A genuine tank-empty scenario requires: flow was positive → flow dropped to 0.
-                            if (timeSincePumpOn >= PUMP_STARTUP_DELAY_MS && flowIsZero && lastPositiveFlowTime != null) {
+                            if (timeSincePumpOn >= PUMP_STARTUP_DELAY_MS && flowIsLow && lastPositiveFlowTime != null) {
                                 consecutiveZeroFlowSamples++
                                 if (zeroFlowStartTime == null) {
                                     zeroFlowStartTime = System.currentTimeMillis()
-                                    LogUtils.w("TankEmpty", "⏱️ Zero flow detected after startup delay - starting ${ZERO_FLOW_THRESHOLD_MS}ms zero-flow timer (need ≥$MIN_ZERO_FLOW_SAMPLES samples)")
-                                } else {
-                                    val zeroFlowDuration = System.currentTimeMillis() - zeroFlowStartTime!!
-                                    LogUtils.w("TankEmpty", "⏱️ Zero flow duration: ${zeroFlowDuration}ms / ${ZERO_FLOW_THRESHOLD_MS}ms threshold | samples=$consecutiveZeroFlowSamples / $MIN_ZERO_FLOW_SAMPLES")
-
-                                    if (zeroFlowDuration >= ZERO_FLOW_THRESHOLD_MS &&
-                                        consecutiveZeroFlowSamples >= MIN_ZERO_FLOW_SAMPLES &&
-                                        !tankEmptyNotificationShown) {
-                                        LogUtils.e("TankEmpty", "🚨 TANK EMPTY TRIGGERED! duration=${zeroFlowDuration}ms samples=$consecutiveZeroFlowSamples mode=$currentMode sprayEnabled=$currentSprayEnabledForEmpty")
-                                        sharedViewModel.addNotification(
-                                            Notification(
-                                                message = "Tank Empty! Sprayer is ON but no flow detected.",
-                                                type = NotificationType.WARNING
-                                            )
-                                        )
-                                        sharedViewModel.announceTankEmpty()
-                                        tankEmptyNotificationShown = true
-
-                                        // Switch to configured action (LOITER/RTL/LAND) regardless of flight mode
-                                        sharedViewModel.handleTankEmpty()
-                                    }
+                                    LogUtils.w("TankEmpty", "⏱️ Low flow detected after startup delay - starting ${ZERO_FLOW_THRESHOLD_MS}ms low-flow timer (need ≥$MIN_ZERO_FLOW_SAMPLES samples, threshold=$LOW_FLOW_THRESHOLD_LPM L/min)")
                                 }
-                            } else if (!flowIsZero) {
-                                // Flow detected (or pre-startup-delay/pre-positive-flow) - reset zero-flow tracking
+
+                                // Evaluate on EVERY low-flow sample (duration is ~0 on the first, which
+                                // can't pass the threshold gate — so the first sample never triggers).
+                                val zeroFlowDuration = System.currentTimeMillis() - (zeroFlowStartTime ?: System.currentTimeMillis())
+                                LogUtils.w("TankEmpty", "⏱️ Low flow duration: ${zeroFlowDuration}ms / ${ZERO_FLOW_THRESHOLD_MS}ms threshold | samples=$consecutiveZeroFlowSamples / $MIN_ZERO_FLOW_SAMPLES | flow=$flowRateLiterPerMin L/min")
+
+                                if (zeroFlowDuration >= ZERO_FLOW_THRESHOLD_MS &&
+                                    consecutiveZeroFlowSamples >= MIN_ZERO_FLOW_SAMPLES &&
+                                    !tankEmptyNotificationShown) {
+                                    LogUtils.e("TankEmpty", "🚨 TANK EMPTY TRIGGERED! duration=${zeroFlowDuration}ms samples=$consecutiveZeroFlowSamples mode=$currentMode sprayEnabled=$currentSprayEnabledForEmpty")
+                                    sharedViewModel.addNotification(
+                                        Notification(
+                                            message = "Tank Empty! Sprayer is ON but no flow detected.",
+                                            type = NotificationType.WARNING
+                                        )
+                                    )
+                                    sharedViewModel.announceTankEmpty()
+                                    tankEmptyNotificationShown = true
+
+                                    // Switch to configured action (LOITER/RTL/LAND) regardless of flight mode
+                                    sharedViewModel.handleTankEmpty()
+                                }
+                            } else if (flowIsHealthy) {
+                                // Healthy flow (> threshold) - reset low-flow tracking.
+                                // NOTE: a null (no-data) frame is intentionally NOT handled here, so a
+                                // dropped frame holds the timer/counter instead of resetting it.
                                 if (zeroFlowStartTime != null || consecutiveZeroFlowSamples > 0) {
-                                    LogUtils.i("TankEmpty", "✅ Flow resumed (${flowRateLiterPerMin} L/min) - resetting zero-flow timer/counter")
+                                    LogUtils.i("TankEmpty", "✅ Flow resumed (${flowRateLiterPerMin} L/min) - resetting low-flow timer/counter")
                                     zeroFlowStartTime = null
                                     consecutiveZeroFlowSamples = 0
                                 }

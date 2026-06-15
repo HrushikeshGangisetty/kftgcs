@@ -35,6 +35,10 @@ private val SectionBackground = Color(0xFF2C2F33)
 
 private val actionOptions = listOf("HOVER" to "Hover", "RTL" to "RTL", "LAND" to "Land")
 
+// Tank Empty has an extra "Report Only" action: the drone keeps flying and only
+// reports that the tank is empty, instead of switching to a safe/stop mode.
+private val tankEmptyActionOptions = actionOptions + ("REPORT_ONLY" to "Report Only")
+
 @Composable
 fun OptionsScreen(
     navController: NavHostController,
@@ -157,11 +161,22 @@ fun OptionsScreen(
 
             Spacer(modifier = Modifier.height(16.dp))
 
-            // Section: Tank Empty
+            // Section: Tank Empty — separate action for Manual flight vs Auto missions
             SectionCard(title = "Tank Empty") {
+                SubLabel("Manual Mode")
                 ActionRadioGroup(
-                    selected = options.tankEmptyAction,
-                    onSelectionChanged = { viewModel.updateTankEmptyAction(it) }
+                    selected = options.tankEmptyActionManual,
+                    onSelectionChanged = { viewModel.updateTankEmptyActionManual(it) },
+                    options = tankEmptyActionOptions
+                )
+
+                Spacer(modifier = Modifier.height(16.dp))
+
+                SubLabel("Auto Mode")
+                ActionRadioGroup(
+                    selected = options.tankEmptyActionAuto,
+                    onSelectionChanged = { viewModel.updateTankEmptyActionAuto(it) },
+                    options = tankEmptyActionOptions
                 )
             }
 
@@ -263,15 +278,27 @@ private fun SectionCard(
 }
 
 @Composable
+private fun SubLabel(text: String) {
+    Text(
+        text = text,
+        color = Color(0xFFB0B0B0),
+        fontSize = 14.sp,
+        fontWeight = FontWeight.SemiBold,
+        modifier = Modifier.padding(bottom = 6.dp, start = 4.dp)
+    )
+}
+
+@Composable
 private fun ActionRadioGroup(
     selected: String,
-    onSelectionChanged: (String) -> Unit
+    onSelectionChanged: (String) -> Unit,
+    options: List<Pair<String, String>> = actionOptions
 ) {
     Row(
         modifier = Modifier.fillMaxWidth(),
         horizontalArrangement = Arrangement.SpaceEvenly
     ) {
-        actionOptions.forEach { (value, label) ->
+        options.forEach { (value, label) ->
             Row(
                 verticalAlignment = Alignment.CenterVertically,
                 modifier = Modifier.clickable { onSelectionChanged(value) }

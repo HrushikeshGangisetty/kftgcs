@@ -113,6 +113,15 @@
 -keep class com.google.android.gms.maps.model.** { *; }
 
 # ============================================
+# BuildConfig: fields read via reflection (Class.forName + getField) in
+# ApiService.kt — API_BASE_URL, SERVER_IP, SERVER_PORT. R8 inlines/strips
+# string constants that are never referenced directly, so getField() would
+# throw NoSuchFieldException in release and the app would fall back to wrong
+# server config. Keep the class and its fields.
+# ============================================
+-keep class com.example.kftgcs.BuildConfig { *; }
+
+# ============================================
 # PRODUCTION BUILD: Remove all Android Log statements
 # This strips out all Log.d, Log.i, Log.v, Log.w, and Log.e calls
 # in release builds to improve performance and reduce log spam

@@ -153,12 +153,16 @@ object ApiService {
     private val client: OkHttpClient by lazy {
         OkHttpClient.Builder()
             .apply {
-                // Only apply certificate pinning in production with HTTPS
-                if (ServerConfig.useProductionServer && ServerConfig.apiBaseUrl.startsWith("https")) {
+                // Only apply certificate pinning in production with HTTPS, AND only once
+                // real pins are configured. Until then the pins are placeholders
+                // (sha256/AAAA…) which would make every HTTPS request fail with
+                // SSLPeerUnverifiedException in release. Skip pinning so release builds
+                // connect over standard HTTPS using the system trust store.
+                if (CERTIFICATE_PINS_CONFIGURED && ServerConfig.useProductionServer && ServerConfig.apiBaseUrl.startsWith("https")) {
                     certificatePinner(certificatePinner)
                     Timber.d("Certificate pinning enabled for production")
                 } else {
-                    Timber.d("Certificate pinning disabled (development mode or HTTP)")
+                    Timber.d("Certificate pinning disabled (not configured / development / HTTP)")
                 }
             }
             .connectTimeout(30, TimeUnit.SECONDS)
