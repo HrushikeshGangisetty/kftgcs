@@ -20,6 +20,7 @@ import androidx.compose.material3.CheckboxDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.LocalTextStyle
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Text
@@ -128,8 +129,9 @@ fun LoginPage(modifier: Modifier = Modifier, navController: NavController, authV
                 OutlinedTextField(
                     value = email,
                     onValueChange = { email = it },
-                    label = { Text(text = AppStrings.email) },
+                    label = { Text(text = AppStrings.email, color = Color.Black) },
                     modifier = Modifier.fillMaxWidth(),
+                    textStyle = LocalTextStyle.current.copy(color = Color.Black),
                     colors = OutlinedTextFieldDefaults.colors(
                         focusedTextColor = Color.Black,
                         unfocusedTextColor = Color.Black,
@@ -146,8 +148,9 @@ fun LoginPage(modifier: Modifier = Modifier, navController: NavController, authV
                 OutlinedTextField(
                     value = password,
                     onValueChange = { password = it },
-                    label = { Text(text = AppStrings.password) },
+                    label = { Text(text = AppStrings.password, color = Color.Black) },
                     modifier = Modifier.fillMaxWidth(),
+                    textStyle = LocalTextStyle.current.copy(color = Color.Black),
                     visualTransformation = if (passwordVisible) VisualTransformation.None else PasswordVisualTransformation(),
                     trailingIcon = {
                         IconButton(onClick = { passwordVisible = !passwordVisible }) {

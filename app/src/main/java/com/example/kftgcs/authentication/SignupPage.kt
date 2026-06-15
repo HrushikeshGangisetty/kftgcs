@@ -24,6 +24,7 @@ import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Icon
+import androidx.compose.material3.LocalTextStyle
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Text
@@ -63,6 +64,12 @@ private val textFieldColors
         focusedLabelColor = Color.Black,
         unfocusedLabelColor = Color.Black
     )
+
+// The app-wide typography injects an explicit (white) text color that otherwise
+// overrides the field `colors` above, so force black on the input text itself.
+private val blackTextStyle
+    @Composable
+    get() = LocalTextStyle.current.copy(color = Color.Black)
 
 @Composable
 fun SignupPage(
@@ -163,8 +170,9 @@ fun SignupPage(
                         value = if (companyNamesLoading) "Loading..." else selectedCompanyName,
                         onValueChange = { },
                         readOnly = true,
-                        label = { Text(text = AppStrings.companyName) },
-                        placeholder = { Text(text = AppStrings.selectCompany) },
+                        label = { Text(text = AppStrings.companyName, color = Color.Black) },
+                        placeholder = { Text(text = AppStrings.selectCompany, color = Color.Black) },
+                        textStyle = blackTextStyle,
                         trailingIcon = {
                             if (companyNamesLoading) {
                                 CircularProgressIndicator(
@@ -234,7 +242,8 @@ fun SignupPage(
                 OutlinedTextField(
                     value = firstName,
                     onValueChange = { firstName = it },
-                    label = { Text(text = AppStrings.firstName) },
+                    label = { Text(text = AppStrings.firstName, color = Color.Black) },
+                    textStyle = blackTextStyle,
                     colors = textFieldColors
                 )
 
@@ -244,7 +253,8 @@ fun SignupPage(
                 OutlinedTextField(
                     value = lastName,
                     onValueChange = { lastName = it },
-                    label = { Text(text = AppStrings.lastName) },
+                    label = { Text(text = AppStrings.lastName, color = Color.Black) },
+                    textStyle = blackTextStyle,
                     colors = textFieldColors
                 )
 
@@ -254,7 +264,8 @@ fun SignupPage(
                 OutlinedTextField(
                     value = email,
                     onValueChange = { email = it },
-                    label = { Text(text = AppStrings.email) },
+                    label = { Text(text = AppStrings.email, color = Color.Black) },
+                    textStyle = blackTextStyle,
                     colors = textFieldColors
                 )
 
@@ -277,7 +288,8 @@ fun SignupPage(
                 OutlinedTextField(
                     value = password,
                     onValueChange = { password = it },
-                    label = { Text(text = AppStrings.password) },
+                    label = { Text(text = AppStrings.password, color = Color.Black) },
+                    textStyle = blackTextStyle,
                     colors = textFieldColors,
                     modifier = Modifier.onFocusChanged { focusState ->
                         passwordFocused = focusState.isFocused
@@ -330,7 +342,8 @@ fun SignupPage(
                 OutlinedTextField(
                     value = rePassword,
                     onValueChange = { rePassword = it },
-                    label = { Text(text = AppStrings.re_password) },
+                    label = { Text(text = AppStrings.re_password, color = Color.Black) },
+                    textStyle = blackTextStyle,
                     colors = textFieldColors
                 )
 
@@ -411,7 +424,8 @@ private fun MobileNumberField(
                 modifier = Modifier
                     .width(120.dp)
                     .clickable { onExpandedChange(true) },
-                label = { Text(text = "Code") },
+                label = { Text(text = "Code", color = Color.Black) },
+                textStyle = blackTextStyle,
                 trailingIcon = {
                     Icon(
                         imageVector = Icons.Default.ArrowDropDown,
@@ -447,10 +461,11 @@ private fun MobileNumberField(
             onValueChange = { newValue ->
                 onMobileNumberChange(newValue.filter { it.isDigit() })
             },
-            label = { Text(text = AppStrings.mobileNumber) },
+            label = { Text(text = AppStrings.mobileNumber, color = Color.Black) },
             modifier = Modifier
                 .width(180.dp),
             keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Phone),
+            textStyle = blackTextStyle,
             colors = textFieldColors,
             singleLine = true
         )

@@ -105,9 +105,10 @@ fun ParamLoginPage(
                 OutlinedTextField(
                     value = email,
                     onValueChange = { email = it },
-                    label = { Text("Email") },
+                    label = { Text("Email", color = Color.Black) },
                     modifier = Modifier.fillMaxWidth(),
                     singleLine = true,
+                    textStyle = LocalTextStyle.current.copy(color = Color.Black),
                     colors = OutlinedTextFieldDefaults.colors(
                         focusedTextColor = Color.Black,
                         unfocusedTextColor = Color.Black,
@@ -124,9 +125,10 @@ fun ParamLoginPage(
                 OutlinedTextField(
                     value = password,
                     onValueChange = { password = it },
-                    label = { Text("Password") },
+                    label = { Text("Password", color = Color.Black) },
                     modifier = Modifier.fillMaxWidth(),
                     singleLine = true,
+                    textStyle = LocalTextStyle.current.copy(color = Color.Black),
                     colors = OutlinedTextFieldDefaults.colors(
                         focusedTextColor = Color.Black,
                         unfocusedTextColor = Color.Black,
