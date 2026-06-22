@@ -8,6 +8,20 @@ import kotlin.math.abs
  */
 class FlowRateFilter(private val windowSize: Int = 5) {
     private val values = mutableListOf<Float>()
+    // Count of back-to-back readings that fell outside the spike band. A single
+    // out-of-band sample is a genuine electrical spike to reject; several in a row
+    // are a real level change (pump started, tank refilled) that must be accepted.
+    private var consecutiveSpikes = 0
+
+    companion object {
+        // Absolute floor (L/h) for the spike band. The relative band (avg * threshold)
+        // collapses toward zero when the average is near-empty, which would flag every
+        // real flow resumption from a near-zero baseline as a spike and freeze the
+        // filter. This floor keeps the band meaningful at low averages.
+        private const val SPIKE_BAND_FLOOR_LPH = 30f
+        // After this many consecutive out-of-band readings, treat the new level as real.
+        private const val MAX_CONSECUTIVE_SPIKES = 2
+    }
 
     /**
      * Add a new value and return the filtered (averaged) value
@@ -15,19 +29,30 @@ class FlowRateFilter(private val windowSize: Int = 5) {
     fun addValue(value: Float): Float {
         values.add(value)
         if (values.size > windowSize) values.removeAt(0)
+        consecutiveSpikes = 0  // a value was accepted into the window
         return values.average().toFloat()
     }
 
     /**
-     * Detect if a new value is a spike (anomaly) compared to the moving average
+     * Detect if a new value is an isolated spike (single erratic sample) versus a real
+     * sustained change. Mutates an internal consecutive-spike counter, so call it exactly
+     * once per sample. Returns true ONLY for an isolated outlier the caller should drop;
+     * a value that stays out-of-band for [MAX_CONSECUTIVE_SPIKES] readings is reported as
+     * NOT a spike so the caller re-seeds the filter with the new (real) level.
+     *
      * @param newValue The new value to check
-     * @param threshold Multiplier for spike detection (default 2.0 = 200% deviation)
-     * @return true if the value is likely an erratic reading
+     * @param threshold Multiplier for the relative spike band (default 2.0 = 200% deviation)
+     * @return true if the value is an isolated erratic reading that should be rejected
      */
     fun detectSpike(newValue: Float, threshold: Float = 2.0f): Boolean {
         if (values.isEmpty()) return false
         val avg = values.average().toFloat()
-        return abs(newValue - avg) > avg * threshold
+        val band = avg * threshold + SPIKE_BAND_FLOOR_LPH
+        val outOfBand = abs(newValue - avg) > band
+        consecutiveSpikes = if (outOfBand) consecutiveSpikes + 1 else 0
+        // Only the FIRST out-of-band sample is treated as a spike; a persistent
+        // out-of-band reading is a genuine level change and must be let through.
+        return outOfBand && consecutiveSpikes < MAX_CONSECUTIVE_SPIKES
     }
 
     /**
@@ -42,6 +67,7 @@ class FlowRateFilter(private val windowSize: Int = 5) {
      */
     fun reset() {
         values.clear()
+        consecutiveSpikes = 0
     }
 }
 
