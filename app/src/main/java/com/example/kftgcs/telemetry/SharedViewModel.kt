@@ -152,6 +152,28 @@ class SharedViewModel : ViewModel() {
         // Level 2 (critical) - takes priority
         if (voltage <= level2Threshold) {
 
+            // ═══ GEOFENCE PRIORITY: defer the voltage action while the fence is breached ═══
+            // If the drone is currently breaching the geofence, the FC is already enforcing
+            // the fence action (BRAKE / RTL-to-return-point) at 400Hz to pull it back inside.
+            // Issuing our own DO_SET_MODE here would OVERRIDE that fence recovery — an RTL
+            // action flies straight home through the fence, and even a BRAKE cancels the FC's
+            // return-to-point and strands the drone outside. That is the "geofence stops
+            // working when the voltage failsafe fires" bug.
+            //
+            // So while breached we suppress the mode change WITHOUT consuming the one-shot
+            // (voltageAlertLevel2Triggered stays false). The instant the breach clears and the
+            // drone is safely back inside the fence, the normal first-trigger path below fires
+            // the action. The pilot still hears the critical-voltage TTS warning meanwhile.
+            if (!voltageAlertLevel2Triggered &&
+                _geofenceEnabled.value && _geofenceViolationDetected.value) {
+                if (now - lastVoltageAlertLevel2Time >= VOLTAGE_CRITICAL_INTERVAL_MS) {
+                    lastVoltageAlertLevel2Time = now
+                    LogUtils.w("BatteryFailsafe", "⏸️ Critical voltage ${voltage}V but GEOFENCE BREACHED — deferring $level2Action so the FC fence recovery can finish (one-shot NOT consumed)")
+                    ttsManager?.speak("Critical battery. Returning inside the fence first.")
+                }
+                return
+            }
+
             if (!voltageAlertLevel2Triggered) {
                 // ═══ FIRST TRIGGER: Execute mode change action (one-shot per arm cycle) ═══
                 voltageAlertLevel2Triggered = true
