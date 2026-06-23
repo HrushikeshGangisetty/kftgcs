@@ -225,6 +225,21 @@ class MavlinkTelemetryRepository(
     // This prevents false "Tank Empty" alerts when the sprayer is intentionally turned off by the mission
     private var missionEndPhaseActive = false
 
+    // ═══ Tank-empty false-positive guard ═══
+    // A genuinely full tank ALWAYS produces healthy flow shortly after the pump turns on.
+    // A flow sensor that is disconnected / mis-wired / mis-calibrated reports a steady 0,
+    // which is indistinguishable from "empty" to the flow comparison. So we require at least
+    // one healthy-flow reading per spray pass BEFORE allowing the machine to latch TANK_EMPTY.
+    // If low flow persists but healthy flow was NEVER seen, it's a sensor/config fault — we
+    // warn the pilot instead of falsely declaring empty (and crucially do NOT change flight mode).
+    // Reset to false on every IDLE→PRIMING transition (start of a new spray pass).
+    @Volatile private var hasSeenHealthyFlow = false
+    // One-shot guards so the field warnings fire once per spray pass, not every BATT2 tick.
+    private var sensorFaultWarned = false       // "no flow ever seen" warning (reset each PRIMING)
+    private var configInvalidWarned = false     // "monitoring inactive" warning (reset when sprayer off)
+    private var lastZeroFlowWarnTime = 0L       // debounce for the raw-0-while-enabled warning
+    private val ZERO_FLOW_WARN_INTERVAL_MS = 10000L
+
     /**
      * Reset all AUTO mode spray detection state.
      * Called when spray is explicitly disabled (e.g., mode change from Auto)
@@ -259,6 +274,18 @@ class MavlinkTelemetryRepository(
         LogUtils.i("TankEmpty", "🔀 Sprayer state: $previousState → $newState (spent ${timeInPrevious}ms in $previousState)")
         sprayerState = newState
         stateEntryTime = System.currentTimeMillis()
+
+        // Start of a new spray pass: require fresh proof of healthy flow before this pass
+        // can ever latch TANK_EMPTY, and re-arm the one-shot sensor-fault warning.
+        if (newState == SprayerState.PRIMING) {
+            hasSeenHealthyFlow = false
+            sensorFaultWarned = false
+        }
+        // Sprayer commanded off: re-arm the config/zero-flow warnings for the next pass.
+        if (newState == SprayerState.IDLE) {
+            configInvalidWarned = false
+            lastZeroFlowWarnTime = 0L
+        }
 
         if (newState == SprayerState.TANK_EMPTY_LOCKED) {
             LogUtils.e("TankEmpty", "🚨 TANK EMPTY confirmed — dispatching notification + TTS + handleTankEmpty()")
@@ -908,6 +935,21 @@ class MavlinkTelemetryRepository(
 
                         if (currentSprayEnabled && b.currentBattery == 0.toShort()) {
                             LogUtils.w("Flow", "WARN: Spray enabled (RC7=$currentRc7) but currentBattery=0 (no flow). Check BATT2_MONITOR=${state.value.sprayTelemetry.batt2MonitorType}, BATT2_CURR_PIN=${state.value.sprayTelemetry.batt2CurrPin}, BATT2_AMP_PERVLT=${state.value.sprayTelemetry.batt2AmpPerVolt}")
+
+                            // Surface the wiring/calibration hint to the pilot (debounced). Gated on
+                            // !hasSeenHealthyFlow so it NEVER fires during a genuine empty (which always
+                            // sees healthy flow first and reports "Tank Empty" instead) — avoiding a
+                            // contradictory "check wiring" message on a tank that simply ran dry.
+                            val nowZeroWarn = System.currentTimeMillis()
+                            if (!hasSeenHealthyFlow && nowZeroWarn - lastZeroFlowWarnTime >= ZERO_FLOW_WARN_INTERVAL_MS) {
+                                lastZeroFlowWarnTime = nowZeroWarn
+                                sharedViewModel.addNotification(
+                                    Notification(
+                                        message = "Spray ON but flow sensor reads 0 — verify flow sensor wiring / BATT2 calibration.",
+                                        type = NotificationType.WARNING
+                                    )
+                                )
+                            }
                         }
 
                         // â•â•â• IMPROVED: Input validation and conversion â•â•â•
@@ -1119,6 +1161,19 @@ class MavlinkTelemetryRepository(
                                 if (sprayerIsOn && configValid) {
                                     LogUtils.i("TankEmpty", "🟢 Sprayer ON → PRIMING (${PRIMING_DURATION_MS}ms grace, flow ignored)")
                                     transitionTo(SprayerState.PRIMING)
+                                } else if (sprayerIsOn && !configValid && !configInvalidWarned) {
+                                    // Sprayer is ON but the spray config is invalid, so tank-empty
+                                    // monitoring is INACTIVE. Surface this once so the pilot doesn't
+                                    // assume they're protected. (Re-armed when the sprayer goes off.)
+                                    configInvalidWarned = true
+                                    val reason = state.value.sprayTelemetry.configurationError ?: "spray sensor parameters not configured"
+                                    LogUtils.w("TankEmpty", "⚠️ Sprayer ON but configValid=false — tank-empty monitoring INACTIVE ($reason)")
+                                    sharedViewModel.addNotification(
+                                        Notification(
+                                            message = "Tank-empty monitoring INACTIVE — $reason",
+                                            type = NotificationType.WARNING
+                                        )
+                                    )
                                 }
                             }
 
@@ -1136,6 +1191,13 @@ class MavlinkTelemetryRepository(
                             }
 
                             SprayerState.ACTIVE_FLOW -> {
+                                // Record that this spray pass has produced real flow at least once.
+                                // This is the proof that the flow sensor is alive and the tank had
+                                // liquid — without it we can't distinguish "empty" from "dead sensor".
+                                if (flowIsHealthy && !hasSeenHealthyFlow) {
+                                    hasSeenHealthyFlow = true
+                                    LogUtils.i("TankEmpty", "💧 Healthy flow observed (${flowRateLiterPerMin} L/min) — tank-empty latch now armed")
+                                }
                                 when {
                                     !sprayerIsOn -> transitionTo(SprayerState.IDLE)
                                     // Flow fell to ~0 while spraying → start the empty debounce.
@@ -1155,10 +1217,27 @@ class MavlinkTelemetryRepository(
                                         LogUtils.i("TankEmpty", "✅ Flow recovered (${flowRateLiterPerMin} L/min) → ACTIVE_FLOW (air bubble)")
                                         transitionTo(SprayerState.ACTIVE_FLOW)
                                     }
-                                    // Low flow persisted past the debounce window → tank really is empty.
+                                    // Low flow persisted past the debounce window.
                                     timeInState >= DEBOUNCE_DURATION_MS -> {
-                                        LogUtils.e("TankEmpty", "🚨 Low flow persisted ${timeInState}ms (mode=$currentMode) → TANK_EMPTY_LOCKED")
-                                        transitionTo(SprayerState.TANK_EMPTY_LOCKED)
+                                        if (hasSeenHealthyFlow) {
+                                            // We saw real flow earlier this pass, then it stopped → tank really is empty.
+                                            LogUtils.e("TankEmpty", "🚨 Low flow persisted ${timeInState}ms after healthy flow (mode=$currentMode) → TANK_EMPTY_LOCKED")
+                                            transitionTo(SprayerState.TANK_EMPTY_LOCKED)
+                                        } else {
+                                            // Flow was NEVER healthy this pass → this is a sensor/config fault,
+                                            // NOT an empty tank. Warn once and do NOT change flight mode.
+                                            // Stay in DEBOUNCING so a later genuine flow can still recover/arm.
+                                            if (!sensorFaultWarned) {
+                                                sensorFaultWarned = true
+                                                LogUtils.e("TankEmpty", "⚠️ No spray flow EVER seen this pass (${timeInState}ms low) — treating as sensor/config fault, NOT tank empty")
+                                                sharedViewModel.addNotification(
+                                                    Notification(
+                                                        message = "No spray flow detected — check flow sensor, wiring, and BATT2 calibration. (Tank-empty action suppressed.)",
+                                                        type = NotificationType.WARNING
+                                                    )
+                                                )
+                                            }
+                                        }
                                     }
                                     // else (flow null/unknown): HOLD — a dropped frame can't trigger or reset.
                                 }

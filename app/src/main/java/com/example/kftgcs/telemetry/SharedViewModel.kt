@@ -159,6 +159,13 @@ class SharedViewModel : ViewModel() {
 
                 LogUtils.i("BatteryFailsafe", "⚠️ CRITICAL: Battery voltage ${voltage}V <= ${level2Threshold}V - Triggering $level2Action (one-shot)")
 
+                // ═══ Diagnostic: capture state when a critical-battery failsafe fires near a fence ═══
+                // The GCS handles the action (BRAKE/RTL/LAND); the FC's own critical action is
+                // forced to 0 (None) so it can't RTL through the geofence. This line records the
+                // voltage/mode/fence context so any future "didn't stop at the fence" report can
+                // be traced to the exact failsafe sequence.
+                LogUtils.i("BatteryFailsafe", "🔎 FENCE-CONTEXT: voltage=${voltage}V crit=${level2Threshold}V mode=${_telemetryState.value.mode} geofenceEnabled=${_geofenceEnabled.value} fenceBreached=${_geofenceViolationDetected.value} action=$level2Action")
+
                 // TTS alert
                 ttsManager?.speak("Critical! Battery voltage ${String.format(Locale.US, "%.1f", voltage)} volts. Activating $level2Action mode.")
 
@@ -716,20 +723,55 @@ class SharedViewModel : ViewModel() {
         return prefs.getString(key, legacy) ?: legacy
     }
 
+    // ═══ Pack-aware voltage thresholds (mixed 6S / 12S fleet) ═══
+    // A single hardcoded default (e.g. 21V or 42V) is wrong for one of the two pack
+    // types: 42V is a NORMAL in-flight voltage for a 12S pack but an impossible one
+    // for 6S. So when the user hasn't explicitly configured thresholds, derive them
+    // from the live summed pack voltage instead of guessing a fixed number.
+    private val PER_CELL_WARN_V = 3.6f   // per-cell low/warning voltage
+    private val PER_CELL_CRIT_V = 3.5f   // per-cell critical voltage
+
     /**
-     * Get the user's low voltage level 1 threshold from SharedPreferences
+     * Detect LiPo cell count from the live summed pack voltage.
+     * Split the mixed fleet at ~35V: 6S sits ~22-25V, 12S sits ~44-50V.
+     * Returns null when there is no plausible pack reading yet.
+     */
+    private fun detectCellCount(packVoltage: Float?): Int? {
+        val v = packVoltage ?: return null
+        return when {
+            v >= 35f -> 12   // 12S: full ~50.4V, nominal ~44.4V, critical ~42V
+            v >= 15f -> 6    // 6S: full ~25.2V, nominal ~22.2V, critical ~21V
+            else -> null     // implausible (no real pack telemetry)
+        }
+    }
+
+    /** Pack-aware default warning (level 1) voltage; falls back to 6S when unknown. */
+    private fun defaultWarnVoltage(packVoltage: Float?): Float =
+        (detectCellCount(packVoltage) ?: 6) * PER_CELL_WARN_V
+
+    /** Pack-aware default critical (level 2) voltage; falls back to 6S when unknown. */
+    private fun defaultCritVoltage(packVoltage: Float?): Float =
+        (detectCellCount(packVoltage) ?: 6) * PER_CELL_CRIT_V
+
+    /**
+     * Get the low-voltage level 1 (warning) threshold.
+     * Honors an explicitly saved value; otherwise derives a pack-aware default
+     * from the live pack voltage so a 12S pack isn't held to a 6S threshold.
      */
     private fun getLowVoltLevel1(context: Context): Float {
         val prefs = context.getSharedPreferences("failsafe_options", Context.MODE_PRIVATE)
-        return prefs.getFloat("low_volt_level_1", 22.2f)
+        if (prefs.contains("low_volt_level_1")) return prefs.getFloat("low_volt_level_1", 22.2f)
+        return defaultWarnVoltage(_telemetryState.value.voltage)
     }
 
     /**
-     * Get the user's low voltage level 2 threshold from SharedPreferences
+     * Get the low-voltage level 2 (critical) threshold.
+     * Honors an explicitly saved value; otherwise derives a pack-aware default.
      */
     private fun getLowVoltLevel2(context: Context): Float {
         val prefs = context.getSharedPreferences("failsafe_options", Context.MODE_PRIVATE)
-        return prefs.getFloat("low_volt_level_2", 21.0f)
+        if (prefs.contains("low_volt_level_2")) return prefs.getFloat("low_volt_level_2", 21.0f)
+        return defaultCritVoltage(_telemetryState.value.voltage)
     }
 
     /**
@@ -4508,14 +4550,38 @@ class SharedViewModel : ViewModel() {
                 val context = GCSApplication.getInstance() ?: return@launch
                 val prefs = context.getSharedPreferences("failsafe_options", Context.MODE_PRIVATE)
 
-                val lowVoltLevel1 = prefs.getFloat("low_volt_level_1", 43.0f) // defaults to 43
-                val lowVoltLevel2 = prefs.getFloat("low_volt_level_2", 42.0f) // defaults to 42
-                val lowVoltLevel2Action = prefs.getString("low_volt_level_2_action", "HOVER") ?: "HOVER"
-
                 LogUtils.i("OptionsSync", "Auto-syncing failsafe options to drone on connect...")
 
-                // Small delay to let the connection stabilize
+                // Small delay to let the connection stabilize AND for the first
+                // BATTERY_STATUS frames to arrive so we can read the live pack voltage.
                 delay(2000)
+
+                // ═══ Pack-aware thresholds (mixed 6S / 12S fleet) ═══
+                // Honor explicitly saved values; otherwise derive from the live pack
+                // voltage. NEVER hardcode 42/43 — for a 12S pack 42V is a normal
+                // in-flight voltage, so pushing BATT_CRT_VOLT=42 made the FC trip its
+                // critical-battery failsafe mid-mission and RTL straight through the
+                // geofence (the "voltage 42 doesn't stop at the fence" report).
+                val livePackVoltage = _telemetryState.value.voltage
+                val lowVoltLevel1 = if (prefs.contains("low_volt_level_1")) {
+                    prefs.getFloat("low_volt_level_1", 22.2f)
+                } else defaultWarnVoltage(livePackVoltage)
+                val lowVoltLevel2 = if (prefs.contains("low_volt_level_2")) {
+                    prefs.getFloat("low_volt_level_2", 21.0f)
+                } else defaultCritVoltage(livePackVoltage)
+
+                LogUtils.i("OptionsSync", "Pack voltage=${livePackVoltage}V → cells=${detectCellCount(livePackVoltage)} | lowVolt=$lowVoltLevel1 critVolt=$lowVoltLevel2")
+
+                // Sanity guard: never push a critical threshold at/above the current
+                // live pack voltage — that would trip the failsafe the instant it lands.
+                if (livePackVoltage != null && lowVoltLevel2 >= livePackVoltage) {
+                    LogUtils.w("OptionsSync", "⚠️ Critical threshold ${lowVoltLevel2}V ≥ live pack ${livePackVoltage}V — skipping voltage sync to avoid immediate failsafe trip")
+                    addNotification(Notification(
+                        message = "Battery failsafe not auto-set: configured critical voltage (${String.format(Locale.US, "%.1f", lowVoltLevel2)}V) is above current pack (${String.format(Locale.US, "%.1f", livePackVoltage)}V). Set it manually in Options.",
+                        type = NotificationType.WARNING
+                    ))
+                    return@launch
+                }
 
                 val failures = mutableListOf<String>()
 
@@ -4546,16 +4612,15 @@ class SharedViewModel : ViewModel() {
                     LogUtils.e("OptionsSync", "✗ Failed to set BATT_FS_LOW_ACT")
                 }
 
-                // BATT_FS_CRT_ACT ← lowVoltLevel2Action
-                val crtActValue = when (lowVoltLevel2Action) {
-                    "LAND" -> 1.0f
-                    "RTL" -> 2.0f
-                    "HOVER", "LOITER" -> 0.0f
-                    else -> 0.0f
-                }
-                val r4 = setParameter("BATT_FS_CRT_ACT", crtActValue)
+                // BATT_FS_CRT_ACT ← ALWAYS 0 (None) on the FC.
+                // The GCS handles the critical-voltage action (BRAKE/RTL/LAND) via
+                // handleBatteryVoltageFailsafe. Letting the FC ALSO act caused a dual
+                // failsafe: at the critical voltage the FC would RTL with priority over
+                // the geofence and fly through the fence. This now matches the behavior
+                // of OptionsViewModel.saveAndSync (which already forces 0).
+                val r4 = setParameter("BATT_FS_CRT_ACT", 0.0f)
                 if (r4 != null) {
-                    LogUtils.i("OptionsSync", "✓ BATT_FS_CRT_ACT = $crtActValue ($lowVoltLevel2Action)")
+                    LogUtils.i("OptionsSync", "✓ BATT_FS_CRT_ACT = 0 (None — GCS handles critical action)")
                 } else {
                     failures.add("BATT_FS_CRT_ACT")
                     LogUtils.e("OptionsSync", "✗ Failed to set BATT_FS_CRT_ACT")
