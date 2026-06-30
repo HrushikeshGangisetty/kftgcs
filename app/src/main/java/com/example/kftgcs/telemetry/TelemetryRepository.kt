@@ -37,6 +37,7 @@ import com.example.kftgcs.auth.AuthResult
 import com.example.kftgcs.utils.LogUtils
 import kotlinx.coroutines.withTimeoutOrNull
 import timber.log.Timber
+import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicLong
 
 
@@ -3010,18 +3011,19 @@ class MavlinkTelemetryRepository(
     suspend fun downloadLog(
         id: Int,
         sizeBytes: Long,
-        idleTimeoutMs: Long = 5000L,
+        idleTimeoutMs: Long = 3000L,
+        maxStallRetries: Int = 8,
         onProgress: (Float) -> Unit
     ): ByteArray = withContext(Dispatchers.IO) {
         if (!state.value.fcuDetected) throw IllegalStateException("No flight controller connected")
 
         // Pre-size when the size is known; otherwise start small and grow.
         var buffer = ByteArray(if (sizeBytes > 0) sizeBytes.toInt() else 64 * 1024)
-        var highWaterMark = 0  // highest (ofs + len) written so far == bytes of the file we have
-
-        // Each LOG_DATA chunk completes this deferred; we re-arm it per chunk so the
-        // idle timeout measures the gap between consecutive chunks.
-        var chunkSignal = CompletableDeferred<Unit>()
+        // Highest (ofs + len) written so far == bytes of the file we have. Atomic because it is
+        // written by the collector coroutine and read by the watchdog loop below.
+        val highWaterMark = AtomicInteger(0)
+        // Wall-clock time of the most recent LOG_DATA chunk, for the idle watchdog.
+        val lastDataAt = AtomicLong(System.currentTimeMillis())
         val finished = CompletableDeferred<Unit>()
 
         val job = AppScope.launch {
@@ -3039,42 +3041,58 @@ class MavlinkTelemetryRepository(
                     for (i in 0 until count) {
                         buffer[ofs + i] = bytes[i]
                     }
-                    if (end > highWaterMark) highWaterMark = end
+                    if (end > highWaterMark.get()) highWaterMark.set(end)
+                    lastDataAt.set(System.currentTimeMillis())
 
                     if (sizeBytes > 0) {
-                        onProgress((highWaterMark.toFloat() / sizeBytes).coerceIn(0f, 1f))
+                        onProgress((highWaterMark.get().toFloat() / sizeBytes).coerceIn(0f, 1f))
                     }
 
-                    // Signal a chunk arrived (re-arm a fresh deferred for the next one).
-                    if (!chunkSignal.isCompleted) chunkSignal.complete(Unit)
-
                     // A short final chunk, or reaching the expected size, ends the log.
-                    val reachedEnd = (sizeBytes > 0 && highWaterMark >= sizeBytes) || count < 90
+                    val reachedEnd = (sizeBytes > 0 && highWaterMark.get() >= sizeBytes) || count < 90
                     if (reachedEnd && !finished.isCompleted) finished.complete(Unit)
                 }
             }
         }
 
         try {
-            val req = LogRequestData(
-                targetSystem = fcuSystemId,
-                targetComponent = fcuComponentId,
-                id = id.toUShort(),
-                ofs = 0u,
-                count = 0xFFFFFFFFu
-            )
-            connection.trySendUnsignedV2(gcsSystemId, gcsComponentId, req)
+            // Initial request: stream the whole log from offset 0.
+            sendLogRequest(id, ofs = 0)
 
-            // Pump until finished, or fail if a chunk gap exceeds the idle timeout.
+            // Watchdog: instead of failing on the first gap, re-request from where we stopped so a
+            // brief FC pause or a dropped packet resumes cleanly. Only give up after the FC stays
+            // silent across [maxStallRetries] consecutive idle windows (~idleTimeoutMs each).
+            var lastProgress = 0
+            var stalls = 0
+            val pollMs = 200L
             while (!finished.isCompleted) {
-                val got = withTimeoutOrNull(idleTimeoutMs) { chunkSignal.await() } != null
-                if (!got) {
-                    throw java.io.IOException(
-                        "Log download stalled (no data for ${idleTimeoutMs}ms at $highWaterMark bytes)"
-                    )
-                }
+                delay(pollMs)
                 if (finished.isCompleted) break
-                chunkSignal = CompletableDeferred()  // re-arm for the next chunk
+
+                val hwm = highWaterMark.get()
+                if (hwm > lastProgress) {
+                    // Data is flowing again — reset the stall counter.
+                    lastProgress = hwm
+                    stalls = 0
+                    continue
+                }
+
+                if (System.currentTimeMillis() - lastDataAt.get() >= idleTimeoutMs) {
+                    stalls++
+                    if (stalls > maxStallRetries) {
+                        throw java.io.IOException(
+                            "Log download stalled (no data for ${idleTimeoutMs}ms at $hwm bytes " +
+                                "after $maxStallRetries resume attempts)"
+                        )
+                    }
+                    LogUtils.w(
+                        "LogDownload",
+                        "Stalled at $hwm bytes; resume attempt $stalls/$maxStallRetries"
+                    )
+                    // Re-request the remainder from the current offset and re-arm the window.
+                    sendLogRequest(id, ofs = hwm)
+                    lastDataAt.set(System.currentTimeMillis())
+                }
             }
 
             try {
@@ -3086,10 +3104,23 @@ class MavlinkTelemetryRepository(
 
             onProgress(1f)
             // Trim to the actual number of bytes received.
-            if (highWaterMark == buffer.size) buffer else buffer.copyOf(highWaterMark)
+            val hwm = highWaterMark.get()
+            if (hwm == buffer.size) buffer else buffer.copyOf(hwm)
         } finally {
             job.cancel()
         }
+    }
+
+    /** Send a LOG_REQUEST_DATA for log [id] starting at byte [ofs], requesting the remainder. */
+    private suspend fun sendLogRequest(id: Int, ofs: Int) {
+        val req = LogRequestData(
+            targetSystem = fcuSystemId,
+            targetComponent = fcuComponentId,
+            id = id.toUShort(),
+            ofs = ofs.toUInt(),
+            count = 0xFFFFFFFFu
+        )
+        connection.trySendUnsignedV2(gcsSystemId, gcsComponentId, req)
     }
 
     /**

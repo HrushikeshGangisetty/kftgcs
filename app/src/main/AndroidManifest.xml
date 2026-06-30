@@ -32,6 +32,9 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
 
+    <!-- Foreground service for screen-recording the flight replay (MediaProjection). -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION" />
+
     <!-- Notification permission (required on Android 13+ / API 33+) for foreground service notification -->
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
@@ -102,6 +105,12 @@
                 android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
                 android:value="UDP video stream relay forwarding" />
         </service>
+
+        <!-- Screen-recording the flight replay via MediaProjection -->
+        <service
+            android:name=".ui.replay.recording.ScreenRecordService"
+            android:exported="false"
+            android:foregroundServiceType="mediaProjection" />
     </application>
 
 </manifest>

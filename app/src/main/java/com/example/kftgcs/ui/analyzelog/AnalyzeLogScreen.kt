@@ -33,6 +33,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.navigation.NavHostController
+import com.example.kftgcs.navigation.Screen
 import com.example.kftgcs.telemetry.LogEntryInfo
 import com.example.kftgcs.telemetry.SharedViewModel
 import java.text.SimpleDateFormat
@@ -195,6 +196,10 @@ fun AnalyzeLogScreen(
                             fontSize = 12.sp
                         )
                         Spacer(Modifier.height(24.dp))
+                        AccentButton(text = "Analyze") {
+                            navController.navigate(Screen.LogAnalysis.createRoute(state.file.absolutePath))
+                        }
+                        Spacer(Modifier.height(12.dp))
                         AccentButton(text = "Back to list") {
                             vm.loadLogs(sharedViewModel.repository)
                         }

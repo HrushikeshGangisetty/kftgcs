@@ -53,7 +53,9 @@ import com.example.kftgcs.uimain.AboutAppScreen
 import com.example.kftgcs.uimain.OptionsScreen
 import com.example.kftgcs.ui.components.PlotTemplatesScreen
 import com.example.kftgcs.ui.logs.LogsScreen
+import com.example.kftgcs.loganalysis.LogAnalysisScreen
 import com.example.kftgcs.ui.analyzelog.AnalyzeLogScreen
+import com.example.kftgcs.ui.replay.LogReplayScreen
 import com.example.kftgcs.ui.LanguageSelectionPage
 import com.example.kftgcs.uiflyingmethod.SelectFlyingMethodScreen
 import com.example.kftgcs.viewmodel.MissionTemplateViewModel
@@ -126,6 +128,12 @@ sealed class Screen(val route: String) {
     object ParamMotorTest : Screen("param_motor_test")
     object UserSettings : Screen("user_settings")
     object AnalyzeLog : Screen("analyze_log")
+    object LogAnalysis : Screen("log_analysis/{binPath}") {
+        /** Build a concrete route for [binPath], URL-encoding it so path separators don't break matching. */
+        fun createRoute(binPath: String): String =
+            "log_analysis/" + java.net.URLEncoder.encode(binPath, "UTF-8")
+    }
+    object LogReplay : Screen("log_replay")
 }
 
 @Composable
@@ -363,6 +371,20 @@ fun AppNavGraph(
 
         composable(Screen.AnalyzeLog.route) {
             AnalyzeLogScreen(navController = navController, sharedViewModel = sharedViewModel)
+        }
+
+        composable(Screen.LogAnalysis.route) { backStackEntry ->
+            val encoded = backStackEntry.arguments?.getString("binPath") ?: ""
+            val binPath = try {
+                java.net.URLDecoder.decode(encoded, "UTF-8")
+            } catch (e: Exception) {
+                encoded
+            }
+            LogAnalysisScreen(navController = navController, binFilePath = binPath)
+        }
+
+        composable(Screen.LogReplay.route) {
+            LogReplayScreen(navController = navController)
         }
 
         composable(Screen.Options.route) {
