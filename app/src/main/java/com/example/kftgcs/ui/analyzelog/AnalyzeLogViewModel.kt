@@ -1,6 +1,7 @@
 package com.example.kftgcs.ui.analyzelog
 
 import android.app.Application
+import android.net.Uri
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.kftgcs.telemetry.LogEntryInfo
@@ -19,13 +20,17 @@ import java.io.File
  *
  * The flow is: [Loading] (reading the list from the FC) → [ListReady] → user taps a log →
  * [Downloading] (with live percent) → [Downloaded] (raw .bin cached, ready for analysis).
+ * Alternatively the user can import a local `.bin` ([Copying] → [Downloaded] with a null log).
  * Any failure surfaces [Error].
  */
 sealed interface AnalyzeLogUiState {
     data object Loading : AnalyzeLogUiState
     data class ListReady(val logs: List<LogEntryInfo>) : AnalyzeLogUiState
     data class Downloading(val log: LogEntryInfo, val percent: Float) : AnalyzeLogUiState
-    data class Downloaded(val log: LogEntryInfo, val file: File) : AnalyzeLogUiState
+    /** Copying a SAF-picked local file into the cache. */
+    data object Copying : AnalyzeLogUiState
+    /** Raw `.bin` is cached and ready for analysis. [log] is null for a locally imported file. */
+    data class Downloaded(val log: LogEntryInfo?, val file: File) : AnalyzeLogUiState
     data class Error(val message: String) : AnalyzeLogUiState
 }
 
@@ -94,6 +99,27 @@ class AnalyzeLogViewModel(application: Application) : AndroidViewModel(applicati
                 LogUtils.e("AnalyzeLogVM", "Failed to download log ${log.id}", e)
                 _uiState.value = AnalyzeLogUiState.Error(
                     "Download failed: ${e.message ?: "unknown error"}"
+                )
+            }
+        }
+    }
+
+    /**
+     * Import a local `.bin` picked through the Storage Access Framework (e.g. from an SD-card reader).
+     * Copies it into the cache off the main thread, then exposes [AnalyzeLogUiState.Downloaded] with a
+     * null log — the rest of the analysis flow is identical to a USB download.
+     */
+    fun importLocalLog(uri: Uri) {
+        _uiState.value = AnalyzeLogUiState.Copying
+        viewModelScope.launch {
+            try {
+                val file = importLogUriToCache(getApplication<Application>(), uri)
+                LogUtils.i("AnalyzeLogVM", "Imported local log (${file.length()} bytes) at ${file.absolutePath}")
+                _uiState.value = AnalyzeLogUiState.Downloaded(null, file)
+            } catch (e: Exception) {
+                LogUtils.e("AnalyzeLogVM", "Failed to import local log", e)
+                _uiState.value = AnalyzeLogUiState.Error(
+                    "Import failed: ${e.message ?: "unknown error"}"
                 )
             }
         }

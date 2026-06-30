@@ -1,5 +1,8 @@
 package com.example.kftgcs.ui.analyzelog
 
+import android.net.Uri
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -57,6 +60,14 @@ fun AnalyzeLogScreen(
     val vm: AnalyzeLogViewModel = viewModel()
     val uiState by vm.uiState.collectAsState()
 
+    // SAF picker for a local `.bin` fallback. Mime is */* because .bin has no standard Android type.
+    val importLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.GetContent()
+    ) { uri: Uri? ->
+        if (uri != null) vm.importLocalLog(uri)
+    }
+    val onImport: () -> Unit = { importLauncher.launch("*/*") }
+
     // Kick off log discovery once when the screen is first shown.
     LaunchedEffect(Unit) {
         vm.loadLogs(sharedViewModel.repository)
@@ -111,25 +122,36 @@ fun AnalyzeLogScreen(
                 )
 
                 is AnalyzeLogUiState.ListReady -> {
-                    if (state.logs.isEmpty()) {
-                        CenteredStatus(
-                            spinner = false,
-                            text = "No logs found on the flight controller."
-                        )
-                    } else {
-                        LazyColumn(
-                            modifier = Modifier.fillMaxSize(),
-                            verticalArrangement = Arrangement.spacedBy(12.dp)
-                        ) {
-                            items(state.logs, key = { it.id }) { log ->
-                                LogRow(
-                                    log = log,
-                                    onClick = { vm.downloadLog(sharedViewModel.repository, log) }
+                    Column(modifier = Modifier.fillMaxSize()) {
+                        Box(modifier = Modifier.weight(1f).fillMaxWidth()) {
+                            if (state.logs.isEmpty()) {
+                                CenteredStatus(
+                                    spinner = false,
+                                    text = "No logs found on the flight controller."
                                 )
+                            } else {
+                                LazyColumn(
+                                    modifier = Modifier.fillMaxSize(),
+                                    verticalArrangement = Arrangement.spacedBy(12.dp)
+                                ) {
+                                    items(state.logs, key = { it.id }) { log ->
+                                        LogRow(
+                                            log = log,
+                                            onClick = { vm.downloadLog(sharedViewModel.repository, log) }
+                                        )
+                                    }
+                                }
                             }
                         }
+                        Spacer(Modifier.height(16.dp))
+                        AccentButton(text = "Import Local Log", onClick = onImport)
                     }
                 }
+
+                is AnalyzeLogUiState.Copying -> CenteredStatus(
+                    spinner = true,
+                    text = "Importing local log…"
+                )
 
                 is AnalyzeLogUiState.Downloading -> {
                     Column(
@@ -185,7 +207,8 @@ fun AnalyzeLogScreen(
                         )
                         Spacer(Modifier.height(8.dp))
                         Text(
-                            text = "Log #${state.log.id} • ${formatBytes(state.file.length())}",
+                            text = state.log?.let { "Log #${it.id} • ${formatBytes(state.file.length())}" }
+                                ?: "Imported log • ${formatBytes(state.file.length())}",
                             color = Color.White,
                             fontSize = 16.sp
                         )
@@ -223,6 +246,8 @@ fun AnalyzeLogScreen(
                         AccentButton(text = "Retry") {
                             vm.loadLogs(sharedViewModel.repository)
                         }
+                        Spacer(Modifier.height(12.dp))
+                        AccentButton(text = "Import Local Log", onClick = onImport)
                     }
                 }
             }
