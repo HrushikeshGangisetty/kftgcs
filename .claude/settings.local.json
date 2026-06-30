@@ -17,7 +17,13 @@
       "Bash(magick -version)",
       "Bash(cwebp -version)",
       "Bash(python -c \"import PIL; print\\('PIL', PIL.__version__\\)\")",
-      "Bash(py -c \"import PIL,sys;print\\('PIL ok'\\)\")"
+      "Bash(py -c \"import PIL,sys;print\\('PIL ok'\\)\")",
+      "Bash(find ~/.gradle /c/Users/Hrushikesh/.gradle -path \"*mavlink*connection*\" -name \"*.jar\" 2>/dev/null | head; echo \"---\"; find / -name \"BufferedMavConnection*\" 2>/dev/null | head)",
+      "Read(//c//**)",
+      "Bash(unzip -o -q connection-core-jvm-1.2.8-sources.jar -d /tmp/mavsrc)",
+      "Read(//tmp/**)",
+      "Bash(sed -n '1,60p' /tmp/mavsrc/com/divpundir/mavlink/connection/BufferedMavConnection.kt)",
+      "WebFetch(domain:raw.githubusercontent.com)"
     ]
   }
 }

@@ -53,6 +53,7 @@ import com.example.kftgcs.uimain.AboutAppScreen
 import com.example.kftgcs.uimain.OptionsScreen
 import com.example.kftgcs.ui.components.PlotTemplatesScreen
 import com.example.kftgcs.ui.logs.LogsScreen
+import com.example.kftgcs.ui.analyzelog.AnalyzeLogScreen
 import com.example.kftgcs.ui.LanguageSelectionPage
 import com.example.kftgcs.uiflyingmethod.SelectFlyingMethodScreen
 import com.example.kftgcs.viewmodel.MissionTemplateViewModel
@@ -124,6 +125,7 @@ sealed class Screen(val route: String) {
     object ParamSpraySettings : Screen("param_spray_settings")
     object ParamMotorTest : Screen("param_motor_test")
     object UserSettings : Screen("user_settings")
+    object AnalyzeLog : Screen("analyze_log")
 }
 
 @Composable
@@ -355,10 +357,12 @@ fun AppNavGraph(
         }
 
         composable(Screen.Settings.route) {
-            val telemetryState by sharedViewModel.telemetryState.collectAsState()
-
             // TopNavBar removed - show settings directly
-            SettingsScreen(navController = navController)
+            SettingsScreen(navController = navController, sharedViewModel = sharedViewModel)
+        }
+
+        composable(Screen.AnalyzeLog.route) {
+            AnalyzeLogScreen(navController = navController, sharedViewModel = sharedViewModel)
         }
 
         composable(Screen.Options.route) {

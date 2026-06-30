@@ -23,8 +23,11 @@ import androidx.compose.material.icons.filled.BatteryChargingFull
 import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Person
+import androidx.compose.material.icons.filled.Analytics
 import androidx.compose.material3.IconButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -35,10 +38,20 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.navigation.NavHostController
 import androidx.compose.ui.graphics.vector.ImageVector
+import com.example.kftgcs.telemetry.ConnectionType
+import com.example.kftgcs.telemetry.SharedViewModel
 
 @Composable
-fun SettingsScreen(navController: NavHostController) {
+fun SettingsScreen(
+    navController: NavHostController,
+    sharedViewModel: SharedViewModel
+) {
     val context = LocalContext.current
+    val telemetry by sharedViewModel.telemetryState.collectAsState()
+    // "Analyze Log" pulls DataFlash logs over USB serial, so it only makes sense — and is only
+    // shown — when a USB link is actually live.
+    val usbConnected = telemetry.connected &&
+        sharedViewModel.connectionType.value == ConnectionType.USB
     Box(
         modifier = Modifier
             .fillMaxSize()
@@ -195,6 +208,19 @@ fun SettingsScreen(navController: NavHostController) {
                 onClick = { navController.navigate("user_settings") },
                 height = buttonHeight
             )
+
+            // 10. Analyze Log — visible only on an active USB connection
+            if (usbConnected) {
+                Spacer(modifier = Modifier.height(buttonSpacing))
+
+                NumberedButton(
+                    number = 10,
+                    icon = Icons.Filled.Analytics,
+                    title = "Analyze Log",
+                    onClick = { navController.navigate("analyze_log") },
+                    height = buttonHeight
+                )
+            }
 
         }
     }

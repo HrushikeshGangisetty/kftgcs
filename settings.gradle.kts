@@ -16,6 +16,8 @@ dependencyResolutionManagement {
     repositories {
         google()
         mavenCentral()
+        // JitPack — hosts usb-serial-for-android (com.github.mik3y)
+        maven { url = uri("https://jitpack.io") }
     }
 }
 

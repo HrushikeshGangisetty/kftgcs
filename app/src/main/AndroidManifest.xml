@@ -38,6 +38,10 @@
     <!-- Declare that the app uses Bluetooth -->
     <uses-feature android:name="android.hardware.bluetooth" android:required="true"/>
 
+    <!-- USB OTG host mode for direct serial connection to the flight controller.
+         required=false so devices without OTG can still install the app. -->
+    <uses-feature android:name="android.hardware.usb.host" android:required="false" />
+
     <application
         android:name=".GCSApplication"
         android:allowBackup="true"
@@ -68,6 +72,14 @@
 
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
+
+            <!-- Offer the app when a matching USB serial device is attached -->
+            <intent-filter>
+                <action android:name="android.hardware.usb.action.USB_DEVICE_ATTACHED" />
+            </intent-filter>
+            <meta-data
+                android:name="android.hardware.usb.action.USB_DEVICE_ATTACHED"
+                android:resource="@xml/device_filter" />
         </activity>
 
         <!-- FileProvider for sharing exported flight logs -->

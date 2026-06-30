@@ -4,6 +4,20 @@ import com.divpundir.mavlink.definitions.common.OpenDroneIdBasicId
 import com.divpundir.mavlink.definitions.common.MavOdidIdType
 
 /**
+ * UI-friendly description of a single DataFlash log stored on the flight controller,
+ * derived from a MAVLink LOG_ENTRY message.
+ *
+ * @param id log number on the FC (used in LOG_REQUEST_DATA).
+ * @param sizeBytes log size in bytes.
+ * @param timeUtcSec UTC unix-seconds the log was written, or 0 if the FC had no RTC.
+ */
+data class LogEntryInfo(
+    val id: Int,
+    val sizeBytes: Long,
+    val timeUtcSec: Long
+)
+
+/**
  * Drone identifier extracted from OpenDroneID messages
  * Used to uniquely identify drones for backend storage
  */

@@ -2921,6 +2921,177 @@ class MavlinkTelemetryRepository(
         }
     }
 
+    // ─────────────────────────────────────────────────────────────────────────
+    //  DataFlash log download (MAVLink LOG_* protocol)
+    //
+    //  Mirrors the mission-download request/response idiom above: launch a
+    //  collector on connection.mavFrame, fire the request with trySendUnsignedV2,
+    //  and await completion with CompletableDeferred + withTimeoutOrNull. All
+    //  blocking work runs on Dispatchers.IO so the UI never stutters.
+    // ─────────────────────────────────────────────────────────────────────────
+
+    /**
+     * Fetch the list of DataFlash logs stored on the flight controller.
+     *
+     * Sends a single LOG_REQUEST_LIST (start=0, end=0xFFFF = "all entries") and
+     * collects the LOG_ENTRY replies. The first reply reports numLogs (total count);
+     * we accumulate entries keyed by id and finish once every entry has arrived or
+     * [timeoutMs] elapses. An FC with zero logs reports numLogs=0 and we return an
+     * empty list.
+     *
+     * @return the discovered logs sorted by id, or an empty list if none / no FC.
+     */
+    suspend fun requestLogList(timeoutMs: Long = 8000L): List<LogEntryInfo> =
+        withContext(Dispatchers.IO) {
+            if (!state.value.fcuDetected) return@withContext emptyList()
+
+            val entries = mutableMapOf<Int, LogEntryInfo>()
+            val done = CompletableDeferred<Unit>()
+            // numLogs is reported on every LOG_ENTRY; -1 until the first one arrives.
+            var expectedCount = -1
+
+            val job = AppScope.launch {
+                connection.mavFrame.collect { frame ->
+                    val msg = frame.message
+                    if (msg is LogEntry) {
+                        expectedCount = msg.numLogs.toInt()
+                        if (expectedCount == 0) {
+                            // No logs on the FC — a single empty LOG_ENTRY terminates the list.
+                            if (!done.isCompleted) done.complete(Unit)
+                            return@collect
+                        }
+                        entries[msg.id.toInt()] = LogEntryInfo(
+                            id = msg.id.toInt(),
+                            sizeBytes = msg.size.toLong() and 0xFFFFFFFFL,
+                            timeUtcSec = msg.timeUtc.toLong() and 0xFFFFFFFFL
+                        )
+                        if (entries.size >= expectedCount && !done.isCompleted) {
+                            done.complete(Unit)
+                        }
+                    }
+                }
+            }
+
+            try {
+                val req = LogRequestList(
+                    targetSystem = fcuSystemId,
+                    targetComponent = fcuComponentId,
+                    start = UShort.MIN_VALUE,        // 0 — first log
+                    end = UShort.MAX_VALUE           // 0xFFFF — "all logs"
+                )
+                connection.trySendUnsignedV2(gcsSystemId, gcsComponentId, req)
+
+                withTimeoutOrNull(timeoutMs) { done.await() }
+            } catch (e: Exception) {
+                LogUtils.e("LogDownload", "requestLogList failed", e)
+            } finally {
+                job.cancel()
+            }
+
+            entries.values.sortedBy { it.id }
+        }
+
+    /**
+     * Download a single DataFlash log over MAVLink and return its raw bytes.
+     *
+     * Sends LOG_REQUEST_DATA for the whole log (ofs=0, count=0xFFFFFFFF) and
+     * reassembles the LOG_DATA chunks (up to 90 bytes each) into a contiguous
+     * buffer. Progress is reported via [onProgress] in the range 0f..1f. A chunk
+     * carrying fewer than 90 bytes marks the end of the log. A LOG_REQUEST_END is
+     * sent on completion so the FC stops transmitting.
+     *
+     * If no chunk arrives within an idle window the transfer fails (throws) so a
+     * stalled link surfaces an error instead of hanging.
+     *
+     * @param id the log id from [LogEntryInfo].
+     * @param sizeBytes the expected size from [LogEntryInfo] (used for progress and
+     *   buffer allocation). If 0/unknown the buffer grows dynamically.
+     */
+    suspend fun downloadLog(
+        id: Int,
+        sizeBytes: Long,
+        idleTimeoutMs: Long = 5000L,
+        onProgress: (Float) -> Unit
+    ): ByteArray = withContext(Dispatchers.IO) {
+        if (!state.value.fcuDetected) throw IllegalStateException("No flight controller connected")
+
+        // Pre-size when the size is known; otherwise start small and grow.
+        var buffer = ByteArray(if (sizeBytes > 0) sizeBytes.toInt() else 64 * 1024)
+        var highWaterMark = 0  // highest (ofs + len) written so far == bytes of the file we have
+
+        // Each LOG_DATA chunk completes this deferred; we re-arm it per chunk so the
+        // idle timeout measures the gap between consecutive chunks.
+        var chunkSignal = CompletableDeferred<Unit>()
+        val finished = CompletableDeferred<Unit>()
+
+        val job = AppScope.launch {
+            connection.mavFrame.collect { frame ->
+                val msg = frame.message
+                if (msg is LogData && msg.id.toInt() == id) {
+                    val ofs = (msg.ofs.toLong() and 0xFFFFFFFFL).toInt()
+                    val count = msg.count.toInt() and 0xFF
+                    val bytes = msg.data.take(count).map { it.toByte() }
+
+                    val end = ofs + count
+                    if (end > buffer.size) {
+                        buffer = buffer.copyOf(maxOf(end, buffer.size * 2))
+                    }
+                    for (i in 0 until count) {
+                        buffer[ofs + i] = bytes[i]
+                    }
+                    if (end > highWaterMark) highWaterMark = end
+
+                    if (sizeBytes > 0) {
+                        onProgress((highWaterMark.toFloat() / sizeBytes).coerceIn(0f, 1f))
+                    }
+
+                    // Signal a chunk arrived (re-arm a fresh deferred for the next one).
+                    if (!chunkSignal.isCompleted) chunkSignal.complete(Unit)
+
+                    // A short final chunk, or reaching the expected size, ends the log.
+                    val reachedEnd = (sizeBytes > 0 && highWaterMark >= sizeBytes) || count < 90
+                    if (reachedEnd && !finished.isCompleted) finished.complete(Unit)
+                }
+            }
+        }
+
+        try {
+            val req = LogRequestData(
+                targetSystem = fcuSystemId,
+                targetComponent = fcuComponentId,
+                id = id.toUShort(),
+                ofs = 0u,
+                count = 0xFFFFFFFFu
+            )
+            connection.trySendUnsignedV2(gcsSystemId, gcsComponentId, req)
+
+            // Pump until finished, or fail if a chunk gap exceeds the idle timeout.
+            while (!finished.isCompleted) {
+                val got = withTimeoutOrNull(idleTimeoutMs) { chunkSignal.await() } != null
+                if (!got) {
+                    throw java.io.IOException(
+                        "Log download stalled (no data for ${idleTimeoutMs}ms at $highWaterMark bytes)"
+                    )
+                }
+                if (finished.isCompleted) break
+                chunkSignal = CompletableDeferred()  // re-arm for the next chunk
+            }
+
+            try {
+                val end = LogRequestEnd(targetSystem = fcuSystemId, targetComponent = fcuComponentId)
+                connection.trySendUnsignedV2(gcsSystemId, gcsComponentId, end)
+            } catch (e: Exception) {
+                LogUtils.w("LogDownload", "Failed to send LOG_REQUEST_END: ${e.message}")
+            }
+
+            onProgress(1f)
+            // Trim to the actual number of bytes received.
+            if (highWaterMark == buffer.size) buffer else buffer.copyOf(highWaterMark)
+        } finally {
+            job.cancel()
+        }
+    }
+
     /**
      * 🔥 Upload fence items to Flight Controller
      * Similar to uploadMissionWithAck but specifically for geofence points

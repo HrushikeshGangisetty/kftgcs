@@ -164,6 +164,9 @@ dependencies {
     // Coroutines adapter (recommended for Android)
     implementation("com.divpundir.mavlink:adapter-coroutines:1.2.8")
 
+    // USB OTG serial transport (FTDI/CP210x/CH340/Prolific/CDC)
+    implementation("com.github.mik3y:usb-serial-for-android:3.8.1")
+
     // Room database
     implementation("androidx.room:room-runtime:2.6.1")
     implementation("androidx.room:room-ktx:2.6.1")

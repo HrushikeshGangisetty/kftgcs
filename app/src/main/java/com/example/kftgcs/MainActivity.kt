@@ -1,6 +1,8 @@
 package com.example.kftgcs
 
 import android.Manifest
+import android.content.Intent
+import android.hardware.usb.UsbManager
 import android.os.Build
 import android.os.Bundle
 import android.os.Handler
@@ -23,6 +25,7 @@ import androidx.navigation.compose.rememberNavController
 import com.example.kftgcs.navigation.AppNavGraph
 import com.example.kftgcs.integration.TlogIntegration
 import androidx.lifecycle.viewmodel.compose.viewModel
+import com.example.kftgcs.telemetry.ConnectionType
 import com.example.kftgcs.telemetry.SharedViewModel
 import com.example.kftgcs.telemetry.WebSocketManager
 import com.example.kftgcs.api.SessionManager
@@ -51,6 +54,9 @@ class MainActivity : ComponentActivity() {
 
     private val hasRequiredPermissions = mutableStateOf(false)
     private val wsManager by lazy { WebSocketManager.getInstance() }
+
+    // Bumped whenever a USB serial device is attached so Compose can react and pre-select the USB tab.
+    private val usbAttachSignal = mutableStateOf(0)
 
     // 🔥 Flag to prevent duplicate low battery events
     private var lowBatteryEventSent = false
@@ -83,6 +89,9 @@ class MainActivity : ComponentActivity() {
         installSplashScreen()
 
         super.onCreate(savedInstanceState)
+
+        // If launched/resumed via a USB device attach, flag it so the UI can show the USB tab.
+        handleUsbAttachIntent(intent)
 
         // MapsInitializer is now called early in GCSApplication.onCreate()
         // to avoid race conditions with map tile loading
@@ -132,6 +141,16 @@ class MainActivity : ComponentActivity() {
             // Initialize TextToSpeech when the app starts
             LaunchedEffect(Unit) {
                 sharedViewModel.initializeTextToSpeech(this@MainActivity)
+            }
+
+            // When a USB serial device is attached, pre-select the USB tab and refresh the device
+            // list so it's ready when the user reaches the Connection screen. No auto-connect.
+            val usbSignal by usbAttachSignal
+            LaunchedEffect(usbSignal) {
+                if (usbSignal > 0) {
+                    sharedViewModel.onConnectionTypeChange(ConnectionType.USB)
+                    sharedViewModel.refreshUsbDevices(this@MainActivity)
+                }
             }
 
             // Monitor flight status for crash handler and update WebSocket telemetry
@@ -266,6 +285,19 @@ class MainActivity : ComponentActivity() {
                     }
                 }
             }
+        }
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        handleUsbAttachIntent(intent)
+    }
+
+    /** Detect a USB attach launch intent and signal Compose to pre-select the USB connection tab. */
+    private fun handleUsbAttachIntent(intent: Intent?) {
+        if (intent?.action == UsbManager.ACTION_USB_DEVICE_ATTACHED) {
+            usbAttachSignal.value += 1
         }
     }
 

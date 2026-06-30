@@ -23,6 +23,15 @@ import com.example.kftgcs.telemetry.TelemetryState
 import com.example.kftgcs.telemetry.connections.BluetoothConnectionProvider
 import com.example.kftgcs.telemetry.connections.MavConnectionProvider
 import com.example.kftgcs.telemetry.connections.TcpConnectionProvider
+import com.example.kftgcs.telemetry.connections.UsbSerialConnectionProvider
+import android.app.PendingIntent
+import android.content.BroadcastReceiver
+import android.content.Intent
+import android.content.IntentFilter
+import android.hardware.usb.UsbDevice
+import android.hardware.usb.UsbManager
+import android.os.Build
+import com.hoho.android.usbserial.driver.UsbSerialProber
 import com.example.kftgcs.utils.GeofenceUtils
 import com.example.kftgcs.utils.LogUtils
 import com.example.kftgcs.utils.TextToSpeechManager
@@ -45,8 +54,11 @@ import java.util.Locale
 import com.example.kftgcs.api.ApiService
 
 enum class ConnectionType {
-    TCP, BLUETOOTH
+    TCP, BLUETOOTH, USB
 }
+
+/** Private broadcast action used to receive the USB device permission result. */
+private const val ACTION_USB_PERMISSION = "com.example.kftgcs.USB_PERMISSION"
 
 data class MissionUploadProgress(
     val stage: String,
@@ -69,6 +81,15 @@ data class PairedDevice(
         address = device.address,
         device = device
     )
+}
+
+/** A USB serial device discovered by usb-serial-for-android, analogous to [PairedDevice]. */
+data class UsbDeviceInfo(
+    val name: String,
+    val device: UsbDevice
+) {
+    /** Stable identifier for selection comparisons (device path is unique while attached). */
+    val id: String get() = device.deviceName
 }
 
 class SharedViewModel : ViewModel() {
@@ -954,6 +975,108 @@ class SharedViewModel : ViewModel() {
         _selectedDevice.value = device
     }
 
+    // --- USB OTG Serial connection state ---
+    private val _usbDevices = MutableStateFlow<List<UsbDeviceInfo>>(emptyList())
+    val usbDevices: StateFlow<List<UsbDeviceInfo>> = _usbDevices.asStateFlow()
+
+    private val _selectedUsbDevice = mutableStateOf<UsbDeviceInfo?>(null)
+    val selectedUsbDevice: State<UsbDeviceInfo?> = _selectedUsbDevice
+
+    // Supported telemetry baud rates; 115200 is the ArduPilot/SiK default.
+    private val _baudRate = mutableStateOf(115200)
+    val baudRate: State<Int> = _baudRate
+
+    // Cached UsbManager (from applicationContext) so connect() — which has no Context — can build
+    // the provider. Populated whenever the USB device list is refreshed from the UI.
+    private var usbManager: UsbManager? = null
+
+    fun onUsbDeviceSelected(device: UsbDeviceInfo) {
+        _selectedUsbDevice.value = device
+    }
+
+    fun clearUsbSelection() {
+        _selectedUsbDevice.value = null
+    }
+
+    fun onBaudRateChange(newValue: Int) {
+        _baudRate.value = newValue
+    }
+
+    /** Enumerate attached USB serial devices (FTDI/CP210x/CH340/Prolific/CDC). */
+    fun refreshUsbDevices(context: Context) {
+        val usbManager = context.applicationContext.getSystemService(Context.USB_SERVICE) as? UsbManager
+        if (usbManager == null) {
+            LogUtils.e("SharedVM", "USB service not available")
+            return
+        }
+        this.usbManager = usbManager
+        val drivers = UsbSerialProber.getDefaultProber().findAllDrivers(usbManager)
+        val devices = drivers.map { driver ->
+            val dev = driver.device
+            val label = dev.productName ?: driver.javaClass.simpleName.removeSuffix("SerialDriver")
+            UsbDeviceInfo(name = "$label (${dev.deviceName})", device = dev)
+        }
+        _usbDevices.value = devices
+        // Drop a stale selection if the device was detached.
+        if (devices.none { it.id == _selectedUsbDevice.value?.id }) {
+            _selectedUsbDevice.value = null
+        }
+        LogUtils.d("SharedVM", "Refreshed ${devices.size} USB serial devices")
+    }
+
+    fun hasUsbPermission(context: Context, device: UsbDevice): Boolean {
+        val usbManager = context.getSystemService(Context.USB_SERVICE) as? UsbManager ?: return false
+        return usbManager.hasPermission(device)
+    }
+
+    /**
+     * Request runtime permission for a USB device. The result is delivered via a one-shot
+     * [BroadcastReceiver]; [onResult] is invoked with whether access was granted.
+     */
+    fun requestUsbPermission(context: Context, device: UsbDevice, onResult: (Boolean) -> Unit) {
+        val usbManager = context.getSystemService(Context.USB_SERVICE) as? UsbManager
+        if (usbManager == null) {
+            onResult(false)
+            return
+        }
+        if (usbManager.hasPermission(device)) {
+            onResult(true)
+            return
+        }
+
+        val appContext = context.applicationContext
+        val receiver = object : BroadcastReceiver() {
+            override fun onReceive(ctx: Context, intent: Intent) {
+                if (intent.action != ACTION_USB_PERMISSION) return
+                try {
+                    appContext.unregisterReceiver(this)
+                } catch (e: Exception) {
+                    // Already unregistered — ignore.
+                }
+                val granted = intent.getBooleanExtra(UsbManager.EXTRA_PERMISSION_GRANTED, false)
+                onResult(granted)
+            }
+        }
+
+        val filter = IntentFilter(ACTION_USB_PERMISSION)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            appContext.registerReceiver(receiver, filter, Context.RECEIVER_NOT_EXPORTED)
+        } else {
+            @Suppress("UnspecifiedRegisterReceiverFlag")
+            appContext.registerReceiver(receiver, filter)
+        }
+
+        val flags = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_MUTABLE
+        } else {
+            PendingIntent.FLAG_UPDATE_CURRENT
+        }
+        val permissionIntent = PendingIntent.getBroadcast(
+            appContext, 0, Intent(ACTION_USB_PERMISSION).setPackage(appContext.packageName), flags
+        )
+        usbManager.requestPermission(device, permissionIntent)
+    }
+
     // --- Telemetry & Repository ---
     private var repo: MavlinkTelemetryRepository? = null
 
@@ -1362,6 +1485,25 @@ class SharedViewModel : ViewModel() {
                         } ?: run {
                             LogUtils.e("SharedVM", "No Bluetooth device selected.")
                             null
+                        }
+                    }
+                    ConnectionType.USB -> {
+                        val device = selectedUsbDevice.value?.device
+                        val manager = usbManager
+                        when {
+                            device == null -> {
+                                LogUtils.e("SharedVM", "No USB device selected.")
+                                null
+                            }
+                            manager == null -> {
+                                LogUtils.e("SharedVM", "USB manager unavailable; refresh devices first.")
+                                null
+                            }
+                            !manager.hasPermission(device) -> {
+                                LogUtils.e("SharedVM", "USB permission not granted for selected device.")
+                                null
+                            }
+                            else -> UsbSerialConnectionProvider(manager, device, baudRate.value)
                         }
                     }
                 }

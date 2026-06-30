@@ -12,6 +12,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Bluetooth
 import androidx.compose.material.icons.filled.Cloud
 import androidx.compose.material.icons.filled.SignalWifiOff
+import androidx.compose.material.icons.filled.Usb
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -30,6 +31,7 @@ import com.example.kftgcs.navigation.Screen
 import com.example.kftgcs.telemetry.ConnectionType
 import com.example.kftgcs.telemetry.PairedDevice
 import com.example.kftgcs.telemetry.SharedViewModel
+import com.example.kftgcs.telemetry.UsbDeviceInfo
 import com.example.kftgcs.utils.AppStrings
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -125,6 +127,7 @@ fun ConnectionPage(
     val isConnectEnabled = !isConnecting && when (connectionType) {
         ConnectionType.TCP -> viewModel.ipAddress.value.isNotBlank() && viewModel.port.value.isNotBlank()
         ConnectionType.BLUETOOTH -> viewModel.selectedDevice.value != null
+        ConnectionType.USB -> viewModel.selectedUsbDevice.value != null
     }
 
     Box(
@@ -173,6 +176,7 @@ fun ConnectionPage(
                             when (connectionType) {
                                 ConnectionType.TCP -> Icons.Default.Cloud
                                 ConnectionType.BLUETOOTH -> Icons.Default.Bluetooth
+                                ConnectionType.USB -> Icons.Default.Usb
                             },
                             contentDescription = "Connection",
                             tint = Color.White,
@@ -201,7 +205,7 @@ fun ConnectionPage(
 
             Spacer(modifier = Modifier.height(6.dp))
 
-            val tabs = listOf(AppStrings.tcp, AppStrings.bluetooth)
+            val tabs = listOf(AppStrings.tcp, AppStrings.bluetooth, AppStrings.usb)
             TabRow(
                 selectedTabIndex = connectionType.ordinal,
                 containerColor = Color(0xFF1E293B).copy(alpha = 0.6f),
@@ -223,6 +227,7 @@ fun ConnectionPage(
             when (connectionType) {
                 ConnectionType.TCP -> TcpConnectionContent(viewModel)
                 ConnectionType.BLUETOOTH -> BluetoothConnectionContent(viewModel)
+                ConnectionType.USB -> UsbConnectionContent(viewModel)
             }
 
             Spacer(modifier = Modifier.height(20.dp))
@@ -372,6 +377,121 @@ fun BluetoothConnectionContent(viewModel: SharedViewModel) {
         )
     ) {
         Text("Refresh Devices")
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun UsbConnectionContent(viewModel: SharedViewModel) {
+    val usbDevices by viewModel.usbDevices.collectAsState()
+    val selectedUsbDevice by viewModel.selectedUsbDevice
+    val baudRate by viewModel.baudRate
+    val context = LocalContext.current
+    var permissionMessage by remember { mutableStateOf("") }
+
+    // Populate the device list as soon as the USB tab is shown.
+    LaunchedEffect(Unit) {
+        viewModel.refreshUsbDevices(context)
+    }
+
+    if (usbDevices.isEmpty()) {
+        Box(modifier = Modifier.fillMaxWidth().height(120.dp), contentAlignment = Alignment.Center) {
+            Text(AppStrings.noUsbDevices, color = Color.White)
+        }
+    } else {
+        LazyColumn(modifier = Modifier.fillMaxWidth().height(120.dp)) {
+            items(usbDevices) { device ->
+                UsbDeviceRow(
+                    device = device,
+                    isSelected = device.id == selectedUsbDevice?.id,
+                    onClick = {
+                        viewModel.onUsbDeviceSelected(device)
+                        permissionMessage = ""
+                        // USB devices need a per-device runtime grant before we can open them.
+                        viewModel.requestUsbPermission(context, device.device) { granted ->
+                            if (!granted) {
+                                // Clear the selection so Connect stays disabled until granted.
+                                if (viewModel.selectedUsbDevice.value?.id == device.id) {
+                                    viewModel.clearUsbSelection()
+                                }
+                                permissionMessage = "USB permission denied for ${device.name}"
+                            }
+                        }
+                    }
+                )
+            }
+        }
+    }
+
+    if (permissionMessage.isNotEmpty()) {
+        Spacer(modifier = Modifier.height(8.dp))
+        Text(permissionMessage, color = Color(0xFFFF5252), style = MaterialTheme.typography.bodySmall)
+    }
+
+    Spacer(modifier = Modifier.height(12.dp))
+
+    // Baud rate selector — 115200 is the ArduPilot/SiK default.
+    val baudOptions = listOf(57600, 115200, 921600)
+    var expanded by remember { mutableStateOf(false) }
+    ExposedDropdownMenuBox(
+        expanded = expanded,
+        onExpandedChange = { expanded = it }
+    ) {
+        OutlinedTextField(
+            value = baudRate.toString(),
+            onValueChange = {},
+            readOnly = true,
+            label = { Text(AppStrings.baudRate, color = Color.White) },
+            trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = expanded) },
+            textStyle = LocalTextStyle.current.copy(color = Color.White),
+            modifier = Modifier
+                .fillMaxWidth()
+                .menuAnchor()
+        )
+        ExposedDropdownMenu(
+            expanded = expanded,
+            onDismissRequest = { expanded = false }
+        ) {
+            baudOptions.forEach { option ->
+                DropdownMenuItem(
+                    text = { Text(option.toString()) },
+                    onClick = {
+                        viewModel.onBaudRateChange(option)
+                        expanded = false
+                    }
+                )
+            }
+        }
+    }
+
+    Spacer(modifier = Modifier.height(12.dp))
+
+    Button(
+        onClick = { viewModel.refreshUsbDevices(context) },
+        modifier = Modifier.fillMaxWidth(),
+        colors = ButtonDefaults.buttonColors(
+            containerColor = Color(0xFF00796B),
+            contentColor = Color.White
+        )
+    ) {
+        Text("Refresh Devices")
+    }
+}
+
+@Composable
+fun UsbDeviceRow(device: UsbDeviceInfo, isSelected: Boolean, onClick: () -> Unit) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(onClick = onClick)
+            .background(if (isSelected) MaterialTheme.colorScheme.primary.copy(alpha = 0.5f) else Color.Transparent)
+            .padding(16.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Column {
+            Text(device.name, color = Color.White, style = MaterialTheme.typography.bodyLarge)
+            Text(device.id, color = Color.Gray, style = MaterialTheme.typography.bodyMedium)
+        }
     }
 }
 
