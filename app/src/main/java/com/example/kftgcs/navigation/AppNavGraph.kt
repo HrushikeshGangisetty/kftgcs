@@ -34,6 +34,7 @@ import com.example.kftgcs.calibration.LevelCalibrationScreen
 import com.example.kftgcs.calibration.LevelCalibrationViewModel
 import androidx.compose.runtime.saveable.rememberSaveable
 import com.example.kftgcs.integration.TlogIntegration
+import com.example.kftgcs.safety.ArmingCheckSafetyDialog
 import com.example.kftgcs.telemetry.SharedViewModel
 import com.example.kftgcs.update.UpdateAvailableDialog
 import com.example.kftgcs.update.UpdateDownloadedDialog
@@ -266,6 +267,16 @@ fun AppNavGraph(
                     )
                 is UpdateUiState.None -> Unit
             }
+
+            // ARMING_CHECK safety-check dialog (targeted accounts only — see SharedViewModel)
+            val armingCheckState by sharedViewModel.armingCheckState.collectAsState()
+            ArmingCheckSafetyDialog(
+                state = armingCheckState,
+                onWrite = { sharedViewModel.fixArmingCheck() },
+                onSkip = { sharedViewModel.skipArmingCheckWarning() },
+                onReboot = { sharedViewModel.confirmArmingCheckReboot() },
+                onLater = { sharedViewModel.dismissArmingCheckRebootPrompt() }
+            )
         }
 
         composable(Screen.Plan.route) {

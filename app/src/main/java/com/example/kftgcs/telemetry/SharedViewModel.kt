@@ -92,6 +92,9 @@ data class UsbDeviceInfo(
     val id: String get() = device.deviceName
 }
 
+/** Drives the ARMING_CHECK safety-check dialog. See [SharedViewModel.armingCheckState]. */
+enum class ArmingCheckState { HIDDEN, PROMPT_WRITE, WRITING, WRITE_FAILED, PROMPT_REBOOT }
+
 class SharedViewModel : ViewModel() {
 
     // TextToSpeech manager for voice announcements
@@ -4642,6 +4645,14 @@ class SharedViewModel : ViewModel() {
     companion object {
         // Default fence radius - Distance between waypoints and geofence boundary
         private const val DEFAULT_FENCE_RADIUS_METERS = 17.0f
+
+        // ARMING_CHECK safety check (MVP — hardcoded target account list).
+        // ARMING_CHECK=0 lets the FC arm despite failing PreArm checks; a
+        // fielded drone crashed because of this. Correct value is 4390.
+        private val ARMING_CHECK_TARGET_EMAILS = setOf(
+            "pavamantesting@gmail.com"
+        )
+        private const val ARMING_CHECK_REQUIRED_VALUE = 4390f
     }
 
     // Current fence configuration uploaded to FC
@@ -4672,6 +4683,10 @@ class SharedViewModel : ViewModel() {
     val isGeofenceTriggeringModeChange: Boolean
         get() = geofenceTriggeringModeChange
 
+    // ARMING_CHECK safety-check dialog state (see companion object for target emails/value)
+    private val _armingCheckState = MutableStateFlow(ArmingCheckState.HIDDEN)
+    val armingCheckState: StateFlow<ArmingCheckState> = _armingCheckState.asStateFlow()
+
     init {
         // Monitor connection status and announce via TTS
         // Also start fence status monitoring when connected
@@ -4685,6 +4700,8 @@ class SharedViewModel : ViewModel() {
                     startFenceStatusMonitoring()
                     // Auto-sync failsafe options to drone on connect
                     syncFailsafeOptionsOnConnect()
+                    // Check ARMING_CHECK safety param for targeted accounts
+                    checkArmingCheckOnConnect()
                 } else if (!connected) {
                     // Stop fence monitoring on disconnect to prevent stale state
                     stopFenceStatusMonitoring()
@@ -4798,6 +4815,62 @@ class SharedViewModel : ViewModel() {
                 LogUtils.e("OptionsSync", "Error syncing failsafe options on connect", e)
             }
         }
+    }
+
+    /**
+     * ARMING_CHECK=0 lets the FC arm despite failing PreArm checks (a fielded
+     * drone crashed because of this). For targeted accounts only, check on every
+     * connection whether ARMING_CHECK is still 0 and surface a fix dialog if so.
+     * Re-runs on every reconnect, so the prompt keeps appearing until fixed.
+     */
+    private fun checkArmingCheckOnConnect() {
+        viewModelScope.launch {
+            try {
+                val context = GCSApplication.getInstance() ?: return@launch
+                val email = com.example.kftgcs.api.SessionManager.getEmail(context)?.trim()
+                if (email == null || ARMING_CHECK_TARGET_EMAILS.none { it.equals(email, ignoreCase = true) }) {
+                    return@launch
+                }
+
+                delay(2000) // let connection/param link stabilize (mirrors syncFailsafeOptionsOnConnect)
+
+                val value = readParameter("ARMING_CHECK", timeoutMs = 5000L)
+                _armingCheckState.value =
+                    if (value == 0f) ArmingCheckState.PROMPT_WRITE
+                    else ArmingCheckState.HIDDEN
+            } catch (e: Exception) {
+                LogUtils.e("ArmingSafety", "Failed to check ARMING_CHECK", e)
+            }
+        }
+    }
+
+    /** Writes ARMING_CHECK to the required safety value, retrying on timeout. */
+    fun fixArmingCheck() {
+        _armingCheckState.value = ArmingCheckState.WRITING
+        viewModelScope.launch {
+            var ack: com.divpundir.mavlink.definitions.common.ParamValue? = null
+            for (attempt in 1..3) {
+                ack = setParameter("ARMING_CHECK", ARMING_CHECK_REQUIRED_VALUE, timeoutMs = 5000L)
+                if (ack != null) break
+                if (attempt < 3) delay(500)
+            }
+            _armingCheckState.value =
+                if (ack != null && ack.paramValue == ARMING_CHECK_REQUIRED_VALUE) ArmingCheckState.PROMPT_REBOOT
+                else ArmingCheckState.WRITE_FAILED
+        }
+    }
+
+    fun skipArmingCheckWarning() {
+        _armingCheckState.value = ArmingCheckState.HIDDEN
+    }
+
+    fun confirmArmingCheckReboot() {
+        viewModelScope.launch { rebootAutopilot() }
+        _armingCheckState.value = ArmingCheckState.HIDDEN
+    }
+
+    fun dismissArmingCheckRebootPrompt() {
+        _armingCheckState.value = ArmingCheckState.HIDDEN
     }
 
     /**
