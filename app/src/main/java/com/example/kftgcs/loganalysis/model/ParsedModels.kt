@@ -49,5 +49,9 @@ data class ReplayFrame(
     val hdop: Double,       // GPS.HDop (horizontal dilution of precision)
     val escOutputs: List<Int>, // RCOU C1..Cn motor/ESC PWM outputs (µs), empty if unknown
     val modeNum: Int,       // MODE.ModeNum (-1 if unknown)
-    val modeName: String?   // MODE.Mode resolved to a name, null if unknown
+    val modeName: String?,  // MODE.Mode resolved to a name, null if unknown
+    val rcRoll: Int,        // RCIN.C1 pilot roll stick (µs, -1 if unknown)
+    val rcPitch: Int,       // RCIN.C2 pilot pitch stick (µs, -1 if unknown)
+    val rcThrottle: Int,    // RCIN.C3 pilot throttle stick (µs, -1 if unknown)
+    val rcYaw: Int          // RCIN.C4 pilot yaw stick (µs, -1 if unknown)
 )

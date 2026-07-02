@@ -145,6 +145,7 @@ class SharedViewModel : ViewModel() {
                     voltageAlertLevel2Triggered = false
                     lastVoltageAlertLevel1Time = 0L
                     lastVoltageAlertLevel2Time = 0L
+                    repository?.setVoltageFailsafeActive(false)
                 }
             }
         }
@@ -199,6 +200,7 @@ class SharedViewModel : ViewModel() {
                 // ═══ FIRST TRIGGER: Execute mode change action (one-shot per arm cycle) ═══
                 voltageAlertLevel2Triggered = true
                 lastVoltageAlertLevel2Time = now
+                repository?.setVoltageFailsafeActive(true)
 
                 LogUtils.i("BatteryFailsafe", "⚠️ CRITICAL: Battery voltage ${voltage}V <= ${level2Threshold}V - Triggering $level2Action (one-shot)")
 
@@ -1768,7 +1770,6 @@ class SharedViewModel : ViewModel() {
             } else 0.0
 
             val totalSprayUsed = currentState.sprayTelemetry.consumedLiters?.toDouble() ?: 0.0
-            val batteryEnd = currentState.batteryPercent ?: 0
 
             // Parse sprayed acres from the completion data string (e.g., "0.13 acres")
             val totalSprayedAcres = completionData.sprayedAcres
@@ -1783,8 +1784,6 @@ class SharedViewModel : ViewModel() {
                 totalSprayUsed = totalSprayUsed,
                 flyingTimeMinutes = flyingTimeMinutes,
                 averageSpeed = 0.0, // Average speed would need to be calculated
-                batteryStart = wsManager.missionBatteryStart,
-                batteryEnd = batteryEnd,
                 alertsCount = wsManager.missionAlertsCount,
                 status = "COMPLETED",
                 projectName = projectName,

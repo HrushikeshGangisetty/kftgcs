@@ -33,6 +33,10 @@ class ReplayTimelineBuilder {
     private var escOutputs: List<Int> = emptyList()
     private var modeNum = -1
     private var modeName: String? = null
+    private var rcRoll = -1
+    private var rcPitch = -1
+    private var rcThrottle = -1
+    private var rcYaw = -1
 
     private var nextGridUs = -1L
     private var seenPosition = false
@@ -80,6 +84,14 @@ class ReplayTimelineBuilder {
                 modeNum = msg.getLong("ModeNum").toInt()
                 modeName = FlightMode.name(modeNum)
             }
+            "RCIN" -> {
+                // Pilot stick inputs (µs). ArduCopter default channel order:
+                // C1=roll, C2=pitch, C3=throttle, C4=yaw.
+                if (msg.has("C1")) rcRoll = msg.getDouble("C1").toInt()
+                if (msg.has("C2")) rcPitch = msg.getDouble("C2").toInt()
+                if (msg.has("C3")) rcThrottle = msg.getDouble("C3").toInt()
+                if (msg.has("C4")) rcYaw = msg.getDouble("C4").toInt()
+            }
             else -> return
         }
 
@@ -115,7 +127,11 @@ class ReplayTimelineBuilder {
         hdop = hdop,
         escOutputs = escOutputs,
         modeNum = modeNum,
-        modeName = modeName
+        modeName = modeName,
+        rcRoll = rcRoll,
+        rcPitch = rcPitch,
+        rcThrottle = rcThrottle,
+        rcYaw = rcYaw
     )
 
     companion object {

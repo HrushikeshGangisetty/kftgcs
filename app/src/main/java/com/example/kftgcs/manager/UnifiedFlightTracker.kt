@@ -90,7 +90,6 @@ class UnifiedFlightTracker(
             sharedViewModel.telemetryState.collect { telemetry ->
                 try {
                     processFlightStateMachine(telemetry)
-                    handleBatteryWarnings(telemetry)
                     handleConnectionLoss(telemetry)
                 } catch (e: Exception) {
                     // Error in flight state machine - continue monitoring
@@ -445,7 +444,6 @@ class UnifiedFlightTracker(
 
             // Send mission summary — will enqueue offline if disconnected
             val flyingTimeMinutes = flightTime / 60.0
-            val batteryEnd = sharedViewModel.telemetryState.value.batteryPercent ?: 0
 
             // Get plot name, project name, and crop type from SharedViewModel
             val plotName = sharedViewModel.currentPlotName.value
@@ -457,8 +455,6 @@ class UnifiedFlightTracker(
                 totalSprayUsed = consumedLitres?.toDouble() ?: 0.0,
                 flyingTimeMinutes = flyingTimeMinutes,
                 averageSpeed = 0.0,
-                batteryStart = wsManager.missionBatteryStart,
-                batteryEnd = batteryEnd,
                 alertsCount = wsManager.missionAlertsCount,
                 status = "COMPLETED",
                 projectName = projectName,
@@ -714,29 +710,6 @@ class UnifiedFlightTracker(
     }
 
     // ==================== EDGE CASES ====================
-
-    private suspend fun handleBatteryWarnings(telemetry: TelemetryState) {
-        if (currentState != FlightState.ACTIVE) return
-
-        telemetry.batteryPercent?.let { percent ->
-            when {
-                percent <= 15 -> {
-                    tlogViewModel.logEvent(
-                        eventType = EventType.LOW_BATTERY,
-                        severity = EventSeverity.CRITICAL,
-                        message = "Critical battery: ${percent}%"
-                    )
-                }
-                percent <= 20 -> {
-                    tlogViewModel.logEvent(
-                        eventType = EventType.LOW_BATTERY,
-                        severity = EventSeverity.WARNING,
-                        message = "Low battery: ${percent}%"
-                    )
-                }
-            }
-        }
-    }
 
     private suspend fun handleConnectionLoss(telemetry: TelemetryState) {
         if (currentState == FlightState.ACTIVE && !telemetry.connected) {

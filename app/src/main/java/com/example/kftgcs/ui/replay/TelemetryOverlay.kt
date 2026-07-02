@@ -37,7 +37,8 @@ private val Accent = Color(0xFF87CEEB)
 @Composable
 fun TelemetryOverlay(
     frameProvider: () -> ReplayFrame,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    showEsc: Boolean = true
 ) {
     val frame = frameProvider()
     Column(
@@ -66,7 +67,7 @@ fun TelemetryOverlay(
             Cell("HDOP", fmtPlain(frame.hdop), Modifier.weight(1f))
         }
 
-        if (frame.escOutputs.isNotEmpty()) {
+        if (showEsc && frame.escOutputs.isNotEmpty()) {
             EscRow(frame.escOutputs)
         }
 

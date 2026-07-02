@@ -189,17 +189,16 @@ class WebSocketManager {
     @Volatile var missionId: String? = null
 
     // Stats
-    var missionBatteryStart: Int = 100
     var missionAlertsCount:  Int = 0
         private set
 
     // Live telemetry values (written from MAVSDK callbacks)
     var lat = 0.0; var lng = 0.0; var alt = 0.0; var speed = 0.0
     var roll = 0.0; var pitch = 0.0; var yaw = 0.0
-    var voltage = 0.0; var current = 0.0; var batteryRemaining = 0
+    var voltage = 0.0; var current = 0.0
     var hdop = 0.0; var satellites = 0
     var flightMode = "UNKNOWN"; var isArmed = false; var failsafe = false
-    var sprayOn = false; var sprayRate = 0.0; var flowPulse = 0; var tankLevel = 0.0
+    var sprayOn = false; var sprayRate = 0.0; var consumedLiters = 0.0; var tankLevel = 0.0
 
     // ── OkHttp client ────────────────────────────────────────────────────────
 
@@ -344,7 +343,6 @@ class WebSocketManager {
             connectionOpenedTime  = System.currentTimeMillis()
             sessionAckReceivedTime = 0
             missionAlertsCount    = 0
-            missionBatteryStart   = batteryRemaining
 
             val droneUidToSend = resolveDroneUid()
             val vehicleName = if (droneUidToSend.isNotBlank() && droneUidToSend != "SITL_DRONE_001")
@@ -546,7 +544,6 @@ class WebSocketManager {
                 })
                 put("battery", JSONObject().apply {
                     put("voltage", voltage); put("current", current)
-                    put("remaining", batteryRemaining)
                 })
                 put("gps", JSONObject().apply {
                     put("satellites", satellites); put("hdop", hdop); put("speed", speed)
@@ -557,7 +554,7 @@ class WebSocketManager {
                 })
                 put("spray", JSONObject().apply {
                     put("on", sprayOn); put("rate_lpm", sprayRate)
-                    put("flow_pulse", flowPulse); put("tank_level", tankLevel)
+                    put("consumed_liters", consumedLiters); put("tank_level", tankLevel)
                 })
             }.toString())
         } catch (e: Exception) { /* ignore — next tick will retry */ }
@@ -616,8 +613,6 @@ class WebSocketManager {
         totalSprayUsed: Double,
         flyingTimeMinutes: Double,
         averageSpeed: Double,
-        batteryStart: Int,
-        batteryEnd: Int,
         alertsCount: Int,
         status: String,
         projectName: String = "",
@@ -634,8 +629,6 @@ class WebSocketManager {
             put("total_spray_used",    totalSprayUsed)
             put("flying_time_minutes", flyingTimeMinutes)
             put("average_speed",       averageSpeed)
-            put("battery_start",       batteryStart)
-            put("battery_end",         batteryEnd)
             put("alerts_count",        alertsCount)
             put("status",              status)
             put("project_name",        projectName)

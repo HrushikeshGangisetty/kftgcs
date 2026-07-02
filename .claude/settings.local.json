@@ -23,7 +23,9 @@
       "Bash(unzip -o -q connection-core-jvm-1.2.8-sources.jar -d /tmp/mavsrc)",
       "Read(//tmp/**)",
       "Bash(sed -n '1,60p' /tmp/mavsrc/com/divpundir/mavlink/connection/BufferedMavConnection.kt)",
-      "WebFetch(domain:raw.githubusercontent.com)"
+      "WebFetch(domain:raw.githubusercontent.com)",
+      "Bash(javap -p -cp /c/Users/Hrushikesh/.gradle/caches/modules-2/files-2.1/com.divpundir.mavlink/definitions-jvm/1.2.8/7929fe5dadc5946da69bf5dcc0c00bc025a7988/definitions-jvm-1.2.8.jar com.divpundir.mavlink.definitions.common.FileTransferProtocol)",
+      "Bash('/c/Program Files/Android/Android Studio/jbr/bin/javap.exe' -p -cp /c/Users/Hrushikesh/.gradle/caches/modules-2/files-2.1/com.divpundir.mavlink/definitions-jvm/1.2.8/7929fe5dadc5946da69bf5dcc0c00bc025a7988/definitions-jvm-1.2.8.jar com.divpundir.mavlink.definitions.common.FileTransferProtocol)"
     ]
   }
 }

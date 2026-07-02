@@ -58,9 +58,6 @@ class MainActivity : ComponentActivity() {
     // Bumped whenever a USB serial device is attached so Compose can react and pre-select the USB tab.
     private val usbAttachSignal = mutableStateOf(0)
 
-    // 🔥 Flag to prevent duplicate low battery events
-    private var lowBatteryEventSent = false
-
     private val requestPermissionsLauncher = registerForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
     ) { grants ->
@@ -180,10 +177,9 @@ class MainActivity : ComponentActivity() {
                         wsManager.pitch = (telemetryState.pitch ?: 0f).toDouble()
                         wsManager.yaw = (telemetryState.heading ?: 0f).toDouble()
 
-                        // Battery
+                        // Battery (voltage + current only — percentage is unreliable and not sent)
                         wsManager.voltage = (telemetryState.voltage ?: 0f).toDouble()
                         wsManager.current = (telemetryState.currentA ?: 0f).toDouble()
-                        wsManager.batteryRemaining = telemetryState.batteryPercent ?: 0
 
                         // GPS
                         wsManager.satellites = telemetryState.sats ?: 0
@@ -192,12 +188,12 @@ class MainActivity : ComponentActivity() {
                         // Status
                         wsManager.flightMode = telemetryState.mode ?: "UNKNOWN"
                         wsManager.isArmed = telemetryState.armed
-                        wsManager.failsafe = false // TODO: Add failsafe detection if available
+                        wsManager.failsafe = telemetryState.failsafeActive
 
                         // Spray telemetry
                         wsManager.sprayOn = telemetryState.sprayTelemetry.sprayEnabled
                         wsManager.sprayRate = (telemetryState.sprayTelemetry.flowRateLiterPerMin ?: 0f).toDouble()
-                        wsManager.flowPulse = telemetryState.sprayTelemetry.rc7Value ?: 0
+                        wsManager.consumedLiters = (telemetryState.sprayTelemetry.consumedLiters ?: 0f).toDouble()
                         wsManager.tankLevel = (telemetryState.sprayTelemetry.tankLevelPercent ?: 0).toDouble()
 
                         // 🔥 Drone UID from Flight Controller (AUTOPILOT_VERSION)
@@ -205,24 +201,6 @@ class MainActivity : ComponentActivity() {
                             if (wsManager.droneUid != uid) {
                                 wsManager.droneUid = uid
                             }
-                        }
-
-                        // 🔥 Low Battery Event Detection
-                        val batteryPercent = telemetryState.batteryPercent
-                        if (batteryPercent != null && batteryPercent <= 20 && !lowBatteryEventSent) {
-                            try {
-                                wsManager.sendMissionEvent(
-                                    eventType = "LOW_BATTERY",
-                                    eventStatus = "WARNING",
-                                    description = "Battery dropped below 20% (${batteryPercent}%)"
-                                )
-                                lowBatteryEventSent = true
-                            } catch (e: Exception) {
-                                // Failed to send LOW_BATTERY event - silently handled
-                            }
-                        } else if (batteryPercent != null && batteryPercent > 25) {
-                            // Reset flag when battery is above 25% (allows re-triggering if battery replaced)
-                            lowBatteryEventSent = false
                         }
 
                         // NOTE: Don't call sendTelemetry() here - throttled sender handles it every 1 second

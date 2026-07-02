@@ -18,6 +18,23 @@ data class LogEntryInfo(
 )
 
 /**
+ * A DataFlash log discovered by browsing the FC's SD card over MAVLink FTP (`/APM/LOGS`), used as a
+ * fallback when the MAVLink LOG_REQUEST log index is empty (e.g. our custom FC).
+ *
+ * Unlike [LogEntryInfo] this is path-based, because FTP addresses files by absolute path rather than
+ * the numeric log id the LOG protocol uses.
+ *
+ * @param name the file name, e.g. `1.BIN`.
+ * @param path the absolute path on the FC's SD card, e.g. `/APM/LOGS/1.BIN`.
+ * @param sizeBytes file size in bytes (0 if the directory listing didn't report it).
+ */
+data class SdLogEntry(
+    val name: String,
+    val path: String,
+    val sizeBytes: Long
+)
+
+/**
  * Drone identifier extracted from OpenDroneID messages
  * Used to uniquely identify drones for backend storage
  */
@@ -177,6 +194,8 @@ data class TelemetryState(
     val mode: String? = null,
     val armed: Boolean = false,
     val armable: Boolean = false,
+    // True while a GCS-side failsafe (battery voltage or RC-battery) is active
+    val failsafeActive: Boolean = false,
 
     // Simple boolean flag for mission active state - easy to use throughout the app
     // True when flight tracking has started (drone armed + airborne/moving)

@@ -36,7 +36,6 @@ class FlightManager(
             telemetryViewModel.telemetryState.collect { telemetryState ->
                 handleFlightStateChange(telemetryState)
                 handleConnectionStateChange(telemetryState)
-                handleLowBatteryWarning(telemetryState)
             }
         }
     }
@@ -83,27 +82,6 @@ class FlightManager(
                 severity = EventSeverity.WARNING,
                 message = "Connection to drone lost"
             )
-        }
-    }
-
-    private suspend fun handleLowBatteryWarning(telemetryState: TelemetryState) {
-        // Only log battery warnings during active flight
-        if (!isFlightActive) return
-
-        telemetryState.batteryPercent?.let { batteryPercent ->
-            if (batteryPercent <= 20 && batteryPercent > 15) {
-                tlogViewModel.logEvent(
-                    eventType = EventType.LOW_BATTERY,
-                    severity = EventSeverity.WARNING,
-                    message = "Low battery warning: ${batteryPercent}%"
-                )
-            } else if (batteryPercent <= 15) {
-                tlogViewModel.logEvent(
-                    eventType = EventType.LOW_BATTERY,
-                    severity = EventSeverity.CRITICAL,
-                    message = "Critical battery level: ${batteryPercent}%"
-                )
-            }
         }
     }
 

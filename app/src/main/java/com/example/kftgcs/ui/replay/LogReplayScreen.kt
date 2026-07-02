@@ -5,14 +5,17 @@ import android.media.projection.MediaProjectionManager
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.material.icons.Icons
@@ -20,13 +23,21 @@ import androidx.compose.material.icons.filled.ArrowBack
 import androidx.compose.material.icons.filled.FiberManualRecord
 import androidx.compose.material.icons.filled.Share
 import androidx.compose.material.icons.filled.Stop
+import androidx.compose.material.icons.filled.Tune
+import androidx.compose.material.icons.filled.Warning
+import androidx.compose.material3.Checkbox
+import androidx.compose.material3.CheckboxDefaults
+import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -36,6 +47,8 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.navigation.NavHostController
+import com.example.kftgcs.loganalysis.model.DiagnosticFlag
+import com.example.kftgcs.loganalysis.model.DiagnosticSeverity
 import com.example.kftgcs.loganalysis.model.ReplayFrame
 import com.example.kftgcs.loganalysis.shareLogFile
 import com.example.kftgcs.loganalysis.shareRecording
@@ -48,6 +61,9 @@ import kotlinx.coroutines.delay
 
 private val ScreenBg = Color(0xFF23272A)
 private val Accent = Color(0xFF87CEEB)
+private val CriticalColor = Color(0xFFE57373)
+private val WarningColor = Color(0xFFFFB74D)
+private val BannerBg = Color(0x33E57373)
 
 /**
  * Visual flight-replay screen: a video-player-style view of a parsed flight log. Plays/pauses/scrubs the
@@ -64,6 +80,10 @@ fun LogReplayScreen(navController: NavHostController) {
     val frames = remember { ReplaySession.frames }
     val sourceFilePath = remember { ReplaySession.sourceFilePath }
     val context = LocalContext.current
+
+    // Which panels/fields the engineer wants on screen (item 2). Hoisted here so the header dropdown
+    // and the content share one source of truth.
+    var prefs by remember { mutableStateOf(ReplayDisplayPrefs()) }
 
     // Screen-record (MediaProjection): the system consent dialog returns here, then we hand the
     // result to the foreground service which records the screen to an mp4.
@@ -111,6 +131,7 @@ fun LogReplayScreen(navController: NavHostController) {
                     fontWeight = FontWeight.Bold
                 )
                 Row(verticalAlignment = Alignment.CenterVertically) {
+                    DisplayPrefsMenu(prefs = prefs, onPrefsChange = { prefs = it })
                     val isRecording = ScreenRecordController.isRecording
                     IconButton(
                         onClick = {
@@ -175,18 +196,93 @@ fun LogReplayScreen(navController: NavHostController) {
                 return@Column
             }
 
-            ReplayContent(frames)
+            ReplayContent(frames, prefs)
+        }
+    }
+}
+
+/**
+ * Which replay panels/fields are visible. Toggled from the header [DisplayPrefsMenu] (item 2) so an
+ * engineer can focus on exactly the data they care about. Everything defaults on.
+ */
+data class ReplayDisplayPrefs(
+    val map: Boolean = true,
+    val horizon: Boolean = true,
+    val telemetry: Boolean = true,
+    val rcSticks: Boolean = true,
+    val esc: Boolean = true,
+    val crashBanner: Boolean = true
+)
+
+/** Header dropdown with a checkbox per panel/field, driving [ReplayDisplayPrefs]. */
+@Composable
+private fun DisplayPrefsMenu(
+    prefs: ReplayDisplayPrefs,
+    onPrefsChange: (ReplayDisplayPrefs) -> Unit
+) {
+    var expanded by remember { mutableStateOf(false) }
+    Box {
+        IconButton(onClick = { expanded = true }, modifier = Modifier.size(48.dp)) {
+            Icon(
+                imageVector = Icons.Filled.Tune,
+                contentDescription = "Choose data to show",
+                tint = Accent,
+                modifier = Modifier.size(26.dp)
+            )
+        }
+        DropdownMenu(
+            expanded = expanded,
+            onDismissRequest = { expanded = false },
+            modifier = Modifier.background(ScreenBg)
+        ) {
+            PrefRow("Map", prefs.map) { onPrefsChange(prefs.copy(map = it)) }
+            PrefRow("Artificial horizon", prefs.horizon) { onPrefsChange(prefs.copy(horizon = it)) }
+            PrefRow("Telemetry", prefs.telemetry) { onPrefsChange(prefs.copy(telemetry = it)) }
+            PrefRow("RC sticks", prefs.rcSticks) { onPrefsChange(prefs.copy(rcSticks = it)) }
+            PrefRow("ESC outputs", prefs.esc) { onPrefsChange(prefs.copy(esc = it)) }
+            PrefRow("Crash findings", prefs.crashBanner) { onPrefsChange(prefs.copy(crashBanner = it)) }
         }
     }
 }
 
 @Composable
-private fun ReplayContent(frames: List<ReplayFrame>) {
+private fun PrefRow(label: String, checked: Boolean, onChecked: (Boolean) -> Unit) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 12.dp, vertical = 2.dp)
+            .clickable { onChecked(!checked) },
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Checkbox(
+            checked = checked,
+            onCheckedChange = onChecked,
+            colors = CheckboxDefaults.colors(
+                checkedColor = Accent,
+                uncheckedColor = Color.Gray,
+                checkmarkColor = Color.Black
+            )
+        )
+        Spacer(Modifier.size(8.dp))
+        Text(text = label, color = Color.White, fontSize = 15.sp)
+    }
+}
+
+@Composable
+private fun ReplayContent(frames: List<ReplayFrame>, prefs: ReplayDisplayPrefs) {
     val controller = rememberReplayController(frames.size)
 
     // Stable provider — defining it does not read the index; invoking it (in children) does.
     val frameProvider: () -> ReplayFrame = remember(frames, controller) {
         { controller.frameOf(frames) }
+    }
+
+    // Crash/abnormal findings handed over from analysis, sorted so the banner can pick the latest
+    // one whose timestamp has been reached during playback (item 4).
+    val diagnostics = remember {
+        ReplaySession.diagnostics
+            .filter { it.severity != DiagnosticSeverity.INFO }
+            .sortedBy { it.timeUs }
     }
 
     // Precompute the GPS path + bounding box once (skip frames before the first valid fix).
@@ -211,37 +307,66 @@ private fun ReplayContent(frames: List<ReplayFrame>) {
     }
 
     Column(modifier = Modifier.fillMaxSize()) {
+        // Red crash/abnormal-findings banner (item 4). Its own recomposition island: it reads the
+        // current frame time in its composition scope, so only it re-composes per tick.
+        if (prefs.crashBanner && diagnostics.isNotEmpty()) {
+            CrashBanner(diagnostics = diagnostics, frameProvider = frameProvider)
+        }
+
         Row(
             modifier = Modifier
                 .fillMaxWidth()
                 .weight(1f),
             horizontalArrangement = Arrangement.spacedBy(12.dp)
         ) {
-            ReplayMap(
-                path = path,
-                bounds = bounds,
-                frameProvider = frameProvider,
-                modifier = Modifier
-                    .weight(1.4f)
-                    .fillMaxHeight()
-            )
-            Column(
-                modifier = Modifier
-                    .weight(1f)
-                    .fillMaxHeight(),
-                verticalArrangement = Arrangement.spacedBy(12.dp)
-            ) {
-                ArtificialHorizon(
+            // Left: map gets the largest share of the horizontal space.
+            if (prefs.map) {
+                ReplayMap(
+                    path = path,
+                    bounds = bounds,
                     frameProvider = frameProvider,
                     modifier = Modifier
-                        .fillMaxWidth()
-                        .aspectRatio(1f)
+                        .weight(1.8f)
+                        .fillMaxHeight()
                 )
+            }
+
+            // Centre: attitude indicator + RC sticks — kept in its own column so aspectRatio(1f)
+            // only consumes ~25 % of the screen width as a square, not 40 %+.
+            if (prefs.horizon || prefs.rcSticks) {
+                Column(
+                    modifier = Modifier
+                        .weight(1f)
+                        .fillMaxHeight(),
+                    verticalArrangement = Arrangement.Center
+                ) {
+                    if (prefs.horizon) {
+                        ArtificialHorizon(
+                            frameProvider = frameProvider,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .aspectRatio(1f)
+                        )
+                    }
+                    if (prefs.rcSticks) {
+                        Spacer(Modifier.height(12.dp))
+                        RcStickView(
+                            frameProvider = frameProvider,
+                            modifier = Modifier.fillMaxWidth()
+                        )
+                    }
+                }
+            }
+
+            // Right: telemetry gets its own full-height panel — no longer crammed
+            // below the HUD where it ran out of room.
+            if (prefs.telemetry) {
                 TelemetryOverlay(
                     frameProvider = frameProvider,
+                    showEsc = prefs.esc,
                     modifier = Modifier
-                        .fillMaxWidth()
-                        .weight(1f)
+                        .weight(1.2f)
+                        .fillMaxHeight()
                 )
             }
         }
@@ -252,6 +377,50 @@ private fun ReplayContent(frames: List<ReplayFrame>) {
             modifier = Modifier.padding(top = 12.dp)
         )
     }
+}
+
+/**
+ * Red banner surfacing the WARNING/CRITICAL findings whose timestamp playback has already reached.
+ * Reads [frameProvider] in composition, so it is an isolated recomposition island (like the other
+ * replay panels) and shows the most recent applicable finding as the scrubber advances.
+ */
+@Composable
+private fun CrashBanner(
+    diagnostics: List<DiagnosticFlag>,
+    frameProvider: () -> ReplayFrame
+) {
+    val nowUs = frameProvider().timeUs
+    val active = diagnostics.lastOrNull { it.timeUs <= nowUs } ?: return
+    val color = if (active.severity == DiagnosticSeverity.CRITICAL) CriticalColor else WarningColor
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(bottom = 8.dp)
+            .background(BannerBg, androidx.compose.foundation.shape.RoundedCornerShape(8.dp))
+            .padding(horizontal = 12.dp, vertical = 8.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Icon(
+            imageVector = Icons.Filled.Warning,
+            contentDescription = null,
+            tint = color,
+            modifier = Modifier.size(20.dp)
+        )
+        Spacer(Modifier.size(8.dp))
+        Text(
+            text = "${formatT(active.timeUs)}  ${active.title}" +
+                (active.description.takeIf { it.isNotBlank() }?.let { " — $it" } ?: ""),
+            color = color,
+            fontSize = 14.sp,
+            fontWeight = FontWeight.Bold
+        )
+    }
+}
+
+/** Format a boot-relative timestamp (µs) as `T+mm:ss`. */
+private fun formatT(timeUs: Long): String {
+    val totalSec = (timeUs / 1_000_000L).coerceAtLeast(0L)
+    return "T+%02d:%02d".format(totalSec / 60, totalSec % 60)
 }
 
 /**

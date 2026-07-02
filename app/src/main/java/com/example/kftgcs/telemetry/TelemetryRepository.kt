@@ -176,6 +176,23 @@ class MavlinkTelemetryRepository(
     // RC Battery failsafe tracking
     private var rcBatteryFailsafeTriggered = false
 
+    // GCS-side battery-voltage failsafe flag, driven by SharedViewModel's voltage failsafe.
+    private var voltageFailsafeActive = false
+
+    /** Called by SharedViewModel when the battery-voltage failsafe fires (true) or clears (false). */
+    fun setVoltageFailsafeActive(active: Boolean) {
+        if (voltageFailsafeActive != active) {
+            voltageFailsafeActive = active
+            updateFailsafeState()
+        }
+    }
+
+    /** Pushes the combined GCS failsafe state (voltage OR RC-battery) into telemetry state. */
+    private fun updateFailsafeState() {
+        val active = voltageFailsafeActive || rcBatteryFailsafeTriggered
+        _state.update { it.copy(failsafeActive = active) }
+    }
+
     // Tracks last BATT3 tank-level % to fire the "Tank Low" warning on the 15% crossing.
     private var lastTankLevelPercent: Int? = null
 
@@ -1536,7 +1553,6 @@ class MavlinkTelemetryRepository(
 
                                             // ðŸ”¥ Send mission summary with all statistics
                                             val currentState = state.value
-                                            val batteryEnd = currentState.batteryPercent ?: 0
                                             val totalDistance = currentState.totalDistanceMeters ?: 0f
                                             val flyingTimeMinutes = (lastElapsed ?: 0L) / 60.0
                                             val avgSpeed = if (flyingTimeMinutes > 0) (totalDistance / 1000.0) / (flyingTimeMinutes / 60.0) else 0.0 // km/h
@@ -1552,8 +1568,6 @@ class MavlinkTelemetryRepository(
                                                 totalSprayUsed = totalSprayUsed,
                                                 flyingTimeMinutes = flyingTimeMinutes,
                                                 averageSpeed = avgSpeed,
-                                                batteryStart = wsManager.missionBatteryStart,
-                                                batteryEnd = batteryEnd,
                                                 alertsCount = wsManager.missionAlertsCount,
                                                 status = "COMPLETED"
                                             )
@@ -1613,7 +1627,6 @@ class MavlinkTelemetryRepository(
 
                                     // Send mission summary
                                     val currentState = state.value
-                                    val batteryEnd = currentState.batteryPercent ?: 0
                                     val totalDistance = currentState.totalDistanceMeters ?: 0f
                                     val flyingTimeMinutes = (lastElapsed ?: 0L) / 60.0
                                     val avgSpeed = if (flyingTimeMinutes > 0) (totalDistance / 1000.0) / (flyingTimeMinutes / 60.0) else 0.0
@@ -1627,8 +1640,6 @@ class MavlinkTelemetryRepository(
                                         totalSprayUsed = totalSprayUsed,
                                         flyingTimeMinutes = flyingTimeMinutes,
                                         averageSpeed = avgSpeed,
-                                        batteryStart = wsManager.missionBatteryStart,
-                                        batteryEnd = batteryEnd,
                                         alertsCount = wsManager.missionAlertsCount,
                                         status = "COMPLETED"
                                     )
@@ -1741,6 +1752,7 @@ class MavlinkTelemetryRepository(
 
                         // Mark failsafe as triggered to prevent multiple RTL commands
                         rcBatteryFailsafeTriggered = true
+                        updateFailsafeState()
 
                         // ═══ FIX: Reset spray detection IMMEDIATELY before failsafe mode change ═══
                         // Prevents false "Tank Empty" when RC battery failsafe stops the sprayer
@@ -1774,9 +1786,8 @@ class MavlinkTelemetryRepository(
                     // Reset failsafe flag when battery recovers and drone is disarmed
                     else if (!state.value.armed && rcBatteryFailsafeTriggered) {
                         rcBatteryFailsafeTriggered = false
+                        updateFailsafeState()
                     }
-
-                    _state.update { it.copy(rcBatteryPercent = rcBattPct) }
 
                     _state.update { it.copy(rcBatteryPercent = rcBattPct) }
                 }
@@ -2973,22 +2984,37 @@ class MavlinkTelemetryRepository(
                 }
             }
 
+            val req = LogRequestList(
+                targetSystem = fcuSystemId,
+                targetComponent = fcuComponentId,
+                start = UShort.MIN_VALUE,        // 0 — first log
+                end = UShort.MAX_VALUE           // 0xFFFF — "all logs"
+            )
+            // Some FCs drop the very first request (USB just enumerated); retransmit until the first
+            // LOG_ENTRY arrives so a lost initial request doesn't look like "no logs".
+            val resendJob = AppScope.launch {
+                var attempts = 0
+                while (isActive && expectedCount < 0 && attempts < 6) {
+                    connection.trySendUnsignedV2(gcsSystemId, gcsComponentId, req)
+                    attempts++
+                    delay(1500L)
+                }
+            }
             try {
-                val req = LogRequestList(
-                    targetSystem = fcuSystemId,
-                    targetComponent = fcuComponentId,
-                    start = UShort.MIN_VALUE,        // 0 — first log
-                    end = UShort.MAX_VALUE           // 0xFFFF — "all logs"
-                )
-                connection.trySendUnsignedV2(gcsSystemId, gcsComponentId, req)
-
                 withTimeoutOrNull(timeoutMs) { done.await() }
             } catch (e: Exception) {
                 LogUtils.e("LogDownload", "requestLogList failed", e)
             } finally {
+                resendJob.cancel()
                 job.cancel()
             }
 
+            // Distinguishes "FC reports 0 logs" (index empty → use FTP fallback) from "we missed
+            // packets" (numLogs > received) when triaging a blank list.
+            LogUtils.i(
+                "LogDownload",
+                "requestLogList: FC numLogs=$expectedCount, received ${entries.size} entries"
+            )
             entries.values.sortedBy { it.id }
         }
 
@@ -3122,6 +3148,40 @@ class MavlinkTelemetryRepository(
         )
         connection.trySendUnsignedV2(gcsSystemId, gcsComponentId, req)
     }
+
+    /** Build a MAVLink FTP client bound to the current connection and FC ids. */
+    private fun newFtpClient() = MavlinkFtpClient(
+        frames = connection.mavFrame,
+        send = { msg -> connection.trySendUnsignedV2(gcsSystemId, gcsComponentId, msg) },
+        targetSystem = fcuSystemId,
+        targetComponent = fcuComponentId
+    )
+
+    /**
+     * List DataFlash `.bin` logs on the FC's SD card via MAVLink FTP (default `/APM/LOGS`).
+     *
+     * This is the fallback for FCs whose MAVLink LOG_REQUEST index comes back empty even though the
+     * files are present on the card (our custom FC). Returns newest-first by file name.
+     */
+    suspend fun listSdLogs(dir: String = "/APM/LOGS"): List<SdLogEntry> =
+        withContext(Dispatchers.IO) {
+            if (!state.value.fcuDetected) return@withContext emptyList()
+            val entries = newFtpClient().listDirectory(dir)
+            entries
+                .filter { !it.isDir && it.name.endsWith(".bin", ignoreCase = true) }
+                .map { SdLogEntry(name = it.name, path = "$dir/${it.name}", sizeBytes = it.sizeBytes) }
+                .sortedByDescending { it.name }
+        }
+
+    /**
+     * Download a log from the FC's SD card by absolute [path] (from [listSdLogs]) over MAVLink FTP.
+     * Progress is reported `0f..1f`. The `.bin` bytes returned are identical to a LOG_DATA download.
+     */
+    suspend fun downloadSdLog(path: String, onProgress: (Float) -> Unit): ByteArray =
+        withContext(Dispatchers.IO) {
+            if (!state.value.fcuDetected) throw IllegalStateException("No flight controller connected")
+            newFtpClient().downloadFile(path, onProgress)
+        }
 
     /**
      * 🔥 Upload fence items to Flight Controller

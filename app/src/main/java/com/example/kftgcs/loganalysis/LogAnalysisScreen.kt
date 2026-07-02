@@ -134,7 +134,8 @@ fun LogAnalysisScreen(
                         ReplaySession.set(
                             frames = state.replayTimeline,
                             sourceFilePath = binFilePath,
-                            sourceLabel = File(binFilePath).name
+                            sourceLabel = File(binFilePath).name,
+                            diagnostics = state.diagnostics
                         )
                         navController.navigate(Screen.LogReplay.route)
                     },

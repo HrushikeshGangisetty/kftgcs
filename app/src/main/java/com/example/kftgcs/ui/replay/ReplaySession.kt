@@ -1,5 +1,6 @@
 package com.example.kftgcs.ui.replay
 
+import com.example.kftgcs.loganalysis.model.DiagnosticFlag
 import com.example.kftgcs.loganalysis.model.ReplayFrame
 
 /**
@@ -26,15 +27,29 @@ object ReplaySession {
     @Volatile
     var sourceFilePath: String? = null
 
-    fun set(frames: List<ReplayFrame>, sourceFilePath: String? = null, sourceLabel: String = "") {
+    /**
+     * Crash/abnormal findings from the [com.example.kftgcs.loganalysis.diagnostic.CrashAnalyzer],
+     * so the replay screen can surface them (in red) as playback reaches each one's timestamp.
+     */
+    @Volatile
+    var diagnostics: List<DiagnosticFlag> = emptyList()
+
+    fun set(
+        frames: List<ReplayFrame>,
+        sourceFilePath: String? = null,
+        sourceLabel: String = "",
+        diagnostics: List<DiagnosticFlag> = emptyList()
+    ) {
         this.frames = frames
         this.sourceFilePath = sourceFilePath
         this.sourceLabel = sourceLabel
+        this.diagnostics = diagnostics
     }
 
     fun clear() {
         frames = emptyList()
         sourceLabel = ""
         sourceFilePath = null
+        diagnostics = emptyList()
     }
 }

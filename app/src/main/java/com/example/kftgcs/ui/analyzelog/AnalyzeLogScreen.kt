@@ -38,6 +38,7 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.navigation.NavHostController
 import com.example.kftgcs.navigation.Screen
 import com.example.kftgcs.telemetry.LogEntryInfo
+import com.example.kftgcs.telemetry.SdLogEntry
 import com.example.kftgcs.telemetry.SharedViewModel
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -144,6 +145,37 @@ fun AnalyzeLogScreen(
                             }
                         }
                         Spacer(Modifier.height(16.dp))
+                        AccentButton(text = "Browse SD card (/APM/LOGS)") {
+                            vm.browseSdLogs(sharedViewModel.repository)
+                        }
+                        Spacer(Modifier.height(12.dp))
+                        AccentButton(text = "Import Local Log", onClick = onImport)
+                    }
+                }
+
+                is AnalyzeLogUiState.SdListReady -> {
+                    Column(modifier = Modifier.fillMaxSize()) {
+                        Box(modifier = Modifier.weight(1f).fillMaxWidth()) {
+                            if (state.logs.isEmpty()) {
+                                CenteredStatus(
+                                    spinner = false,
+                                    text = "No .bin logs found in /APM/LOGS on the SD card."
+                                )
+                            } else {
+                                LazyColumn(
+                                    modifier = Modifier.fillMaxSize(),
+                                    verticalArrangement = Arrangement.spacedBy(12.dp)
+                                ) {
+                                    items(state.logs, key = { it.path }) { log ->
+                                        SdLogRow(
+                                            log = log,
+                                            onClick = { vm.downloadSdLog(sharedViewModel.repository, log) }
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                        Spacer(Modifier.height(16.dp))
                         AccentButton(text = "Import Local Log", onClick = onImport)
                     }
                 }
@@ -152,6 +184,43 @@ fun AnalyzeLogScreen(
                     spinner = true,
                     text = "Importing local log…"
                 )
+
+                is AnalyzeLogUiState.BrowsingSd -> CenteredStatus(
+                    spinner = true,
+                    text = "Browsing SD card (/APM/LOGS)…"
+                )
+
+                is AnalyzeLogUiState.DownloadingSd -> {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .padding(top = 32.dp),
+                        horizontalAlignment = Alignment.CenterHorizontally
+                    ) {
+                        Text(
+                            text = "Downloading ${state.log.name} (${formatBytes(state.log.sizeBytes)})",
+                            color = Color.White,
+                            fontSize = 18.sp,
+                            fontWeight = FontWeight.Medium
+                        )
+                        Spacer(Modifier.height(20.dp))
+                        LinearProgressIndicator(
+                            progress = { state.percent },
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(8.dp),
+                            color = Accent,
+                            trackColor = CardBorder
+                        )
+                        Spacer(Modifier.height(12.dp))
+                        Text(
+                            text = "${(state.percent * 100).toInt()}%",
+                            color = Accent,
+                            fontSize = 16.sp,
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
+                }
 
                 is AnalyzeLogUiState.Downloading -> {
                     Column(
@@ -208,7 +277,7 @@ fun AnalyzeLogScreen(
                         Spacer(Modifier.height(8.dp))
                         Text(
                             text = state.log?.let { "Log #${it.id} • ${formatBytes(state.file.length())}" }
-                                ?: "Imported log • ${formatBytes(state.file.length())}",
+                                ?: "${state.label ?: "Imported log"} • ${formatBytes(state.file.length())}",
                             color = Color.White,
                             fontSize = 16.sp
                         )
@@ -245,6 +314,10 @@ fun AnalyzeLogScreen(
                         Spacer(Modifier.height(24.dp))
                         AccentButton(text = "Retry") {
                             vm.loadLogs(sharedViewModel.repository)
+                        }
+                        Spacer(Modifier.height(12.dp))
+                        AccentButton(text = "Browse SD card (/APM/LOGS)") {
+                            vm.browseSdLogs(sharedViewModel.repository)
                         }
                         Spacer(Modifier.height(12.dp))
                         AccentButton(text = "Import Local Log", onClick = onImport)
@@ -297,6 +370,40 @@ private fun LogRow(log: LogEntryInfo, onClick: () -> Unit) {
             )
             Text(
                 text = "${formatBytes(log.sizeBytes)}  •  ${formatTimestamp(log.timeUtcSec)}",
+                color = Color.Gray,
+                fontSize = 13.sp
+            )
+        }
+    }
+}
+
+@Composable
+private fun SdLogRow(log: SdLogEntry, onClick: () -> Unit) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(12.dp))
+            .clickable(onClick = onClick)
+            .border(BorderStroke(1.dp, CardBorder), RoundedCornerShape(12.dp))
+            .padding(horizontal = 12.dp, vertical = 14.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Icon(
+            imageVector = Icons.Filled.Description,
+            contentDescription = null,
+            tint = Color.White,
+            modifier = Modifier.size(24.dp)
+        )
+        Spacer(Modifier.width(12.dp))
+        Column(modifier = Modifier.weight(1f)) {
+            Text(
+                text = log.name,
+                color = Color.White,
+                fontSize = 18.sp,
+                fontWeight = FontWeight.Medium
+            )
+            Text(
+                text = if (log.sizeBytes > 0) formatBytes(log.sizeBytes) else log.path,
                 color = Color.Gray,
                 fontSize = 13.sp
             )
