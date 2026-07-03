@@ -2243,7 +2243,8 @@ class MavlinkTelemetryRepository(
                 }
         }
 
-        // Still process AUTOPILOT_VERSION for firmware/hardware info but not for droneUid
+        // Process AUTOPILOT_VERSION for firmware/hardware info, and as the droneUid source
+        // (chip UID) whenever OpenDroneID hasn't already supplied one
         scope.launch {
             mavFrame
                 .filter { state.value.fcuDetected && it.systemId == fcuSystemId }
@@ -2260,13 +2261,22 @@ class MavlinkTelemetryRepository(
                         val formattedFirmware = "$major.$minor.$patch (type: $fwType)"
 
                         _state.update { state ->
-                            // 🔥 FALLBACK DRONE UID: If no OpenDroneID available, use AUTOPILOT_VERSION info
+                            // 🔥 FALLBACK DRONE UID: If no OpenDroneID available, use the hardware
+                            // Silicon Serial Number (uid2, 96-bit chip UID) from AUTOPILOT_VERSION.
+                            // Identical hardware models share the same vendor/product/board-version
+                            // IDs, so those alone can't tell physical units apart — uid2 can.
                             val fallbackDroneUid = if (state.droneUid.isNullOrBlank()) {
-                                // Create a fallback drone UID from autopilot version info
-                                val vendorId = autopilotVersion.vendorId.toInt()
-                                val productId = autopilotVersion.productId.toInt()
-                                val boardVersion = autopilotVersion.boardVersion.toInt()
-                                "FC_${vendorId}_${productId}_${boardVersion}"
+                                autopilotVersion.uid2.toChipUidHex()
+                                    ?: autopilotVersion.uid.takeIf { it != 0uL }
+                                        ?.toString(16)?.uppercase()?.padStart(16, '0')
+                                    ?: run {
+                                        // Last resort: no hardware UID reported at all (very old
+                                        // firmware / SITL). May collide across identical hardware.
+                                        val vendorId = autopilotVersion.vendorId.toInt()
+                                        val productId = autopilotVersion.productId.toInt()
+                                        val boardVersion = autopilotVersion.boardVersion.toInt()
+                                        "FC_${vendorId}_${productId}_${boardVersion}"
+                                    }
                             } else {
                                 state.droneUid // Keep existing OpenDroneID
                             }

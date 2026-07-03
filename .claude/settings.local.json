@@ -25,7 +25,21 @@
       "Bash(sed -n '1,60p' /tmp/mavsrc/com/divpundir/mavlink/connection/BufferedMavConnection.kt)",
       "WebFetch(domain:raw.githubusercontent.com)",
       "Bash(javap -p -cp /c/Users/Hrushikesh/.gradle/caches/modules-2/files-2.1/com.divpundir.mavlink/definitions-jvm/1.2.8/7929fe5dadc5946da69bf5dcc0c00bc025a7988/definitions-jvm-1.2.8.jar com.divpundir.mavlink.definitions.common.FileTransferProtocol)",
-      "Bash('/c/Program Files/Android/Android Studio/jbr/bin/javap.exe' -p -cp /c/Users/Hrushikesh/.gradle/caches/modules-2/files-2.1/com.divpundir.mavlink/definitions-jvm/1.2.8/7929fe5dadc5946da69bf5dcc0c00bc025a7988/definitions-jvm-1.2.8.jar com.divpundir.mavlink.definitions.common.FileTransferProtocol)"
+      "Bash('/c/Program Files/Android/Android Studio/jbr/bin/javap.exe' -p -cp /c/Users/Hrushikesh/.gradle/caches/modules-2/files-2.1/com.divpundir.mavlink/definitions-jvm/1.2.8/7929fe5dadc5946da69bf5dcc0c00bc025a7988/definitions-jvm-1.2.8.jar com.divpundir.mavlink.definitions.common.FileTransferProtocol)",
+      "Bash(find / -iname \"AutopilotVersion*\" 2>/dev/null | head -50)",
+      "PowerShell(Get-ChildItem -Path \"$env:USERPROFILE\\\\.gradle\\\\caches\\\\modules-2\\\\files-2.1\\\\com.divpundir.mavlink\\\\definitions-jvm\\\\1.2.8\" -Recurse | Select-Object FullName)",
+      "PowerShell(Get-ChildItem -Path \"$env:USERPROFILE\\\\.gradle\\\\caches\\\\modules-2\\\\files-2.1\\\\com.divpundir.mavlink\\\\definitions-jvm\\\\1.2.8\" -Recurse -File | ForEach-Object { $_.FullName })",
+      "Bash(find / -path \"*/T/tmp*/src/commonMain/com/divpundir/mavlink/definitions/common/AutopilotVersion.kt\" 2>/dev/null)",
+      "Bash(cygpath -w \"/c/Users/HRUSHI~1/AppData/Local/Temp/claude/c--Users-Hrushikesh-AndroidStudioProjects-kftgcs/89ac33d3-d673-4a92-ab46-616d5618d5ed/scratchpad/mavsrc/src/commonMain/com/divpundir/mavlink/definitions/common/AutopilotVersion.kt\")",
+      "Bash(cat \"/c/Users/HRUSHI~1/AppData/Local/Temp/claude/c--Users-Hrushikesh-AndroidStudioProjects-kftgcs/89ac33d3-d673-4a92-ab46-616d5618d5ed/scratchpad/mavsrc/src/commonMain/com/divpundir/mavlink/definitions/common/AutopilotVersion.kt\")",
+      "Read(//c/Users/HRUSHI~1/AppData/Local/Temp/claude/c--Users-Hrushikesh-AndroidStudioProjects-kftgcs/89ac33d3-d673-4a92-ab46-616d5618d5ed/scratchpad/mavsrc/src/commonMain/com/divpundir/mavlink/definitions/common/**)",
+      "Bash(ls \"/c/Users/Hrushikesh/AppData/Local/Temp/claude/c--Users-Hrushikesh-AndroidStudioProjects-kftgcs/89ac33d3-d673-4a92-ab46-616d5618d5ed/scratchpad/mavsrc/src/commonMain/com/divpundir/mavlink/definitions/common/\" 2>&1 | head -20)",
+      "Read(//c/Users/Hrushikesh/AppData/Local/Temp/claude/c--Users-Hrushikesh-AndroidStudioProjects-kftgcs/89ac33d3-d673-4a92-ab46-616d5618d5ed/scratchpad/mavsrc/src/commonMain/com/divpundir/mavlink/definitions/**)",
+      "Read(//c/Users/Hrushikesh/AppData/Local/Temp/claude/c--Users-Hrushikesh-AndroidStudioProjects-kftgcs/89ac33d3-d673-4a92-ab46-616d5618d5ed/scratchpad/**)",
+      "Bash(mkdir -p /c/Users/Hrushikesh/AppData/Local/Temp/claude/c--Users-Hrushikesh-AndroidStudioProjects-kftgcs/89ac33d3-d673-4a92-ab46-616d5618d5ed/scratchpad/mavsrc2)",
+      "Bash(unzip -o /c/Users/Hrushikesh/.gradle/caches/modules-2/files-2.1/com.divpundir.mavlink/definitions-jvm/1.2.8/eea910bc71aeee3e062df7420a05a41b82b54a5b/definitions-jvm-1.2.8-sources.jar -d /c/Users/Hrushikesh/AppData/Local/Temp/claude/c--Users-Hrushikesh-AndroidStudioProjects-kftgcs/89ac33d3-d673-4a92-ab46-616d5618d5ed/scratchpad/mavsrc2)",
+      "Bash(cat \"/c/Users/Hrushikesh/AppData/Local/Temp/claude/c--Users-Hrushikesh-AndroidStudioProjects-kftgcs/89ac33d3-d673-4a92-ab46-616d5618d5ed/scratchpad/mavsrc2/commonMain/com/divpundir/mavlink/definitions/common/AutopilotVersion.kt\")",
+      "Read(//c/Users/Hrushikesh/AppData/Local/Temp/claude/c--Users-Hrushikesh-AndroidStudioProjects-kftgcs/89ac33d3-d673-4a92-ab46-616d5618d5ed/scratchpad/mavsrc2/commonMain/com/divpundir/mavlink/definitions/common/**)"
     ]
   }
 }

@@ -120,6 +120,19 @@ fun extractUuidString(bytes: List<UByte>): String {
 }
 
 /**
+ * Converts the AUTOPILOT_VERSION `uid2` field (18-byte / 96-bit Silicon Serial Number reported by
+ * ArduPilot) into an uppercase hex string, e.g. "3200330...". Identical hardware models share the
+ * same vendor/product/board-version IDs, but this chip UID is unique per physical unit.
+ *
+ * Returns null when the field wasn't populated (all zero bytes) — older firmware, MAVLink 1 links
+ * that drop MAVLink 2 extension fields, or boards without a readable UID.
+ */
+fun List<UByte>.toChipUidHex(): String? {
+    if (isEmpty() || all { it == 0.toUByte() }) return null
+    return joinToString("") { it.toString(16).padStart(2, '0').uppercase() }
+}
+
+/**
  * Spray telemetry data for agricultural drones
  * Maps to BATTERY_STATUS messages from flow sensor (BATT2) and level sensor (BATT3)
  */
@@ -231,8 +244,8 @@ data class TelemetryState(
     val lastAutoWaypoint: Int = -1,
 
     // Drone identification from OpenDroneID BASIC_ID message (uasId field - SERIAL_NUMBER)
-    val droneUid: String? = null,  // Primary UID from OpenDroneID serial number
-    val droneUid2: String? = null, // Secondary UID from uid2 field (if different from uid)
+    val droneUid: String? = null,  // Primary UID: OpenDroneID serial number, else AUTOPILOT_VERSION chip UID (uid2) hex
+    val droneUid2: String? = null, // Secondary UID from OpenDroneID idOrMac (MAC address)
     val vendorId: Int? = null,     // Board vendor ID
     val productId: Int? = null,    // Board product ID
     val firmwareVersion: String? = null, // Formatted firmware version
