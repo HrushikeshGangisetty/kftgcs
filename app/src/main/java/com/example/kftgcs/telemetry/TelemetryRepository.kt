@@ -831,6 +831,52 @@ class MavlinkTelemetryRepository(
                 }
         }
 
+        // DISTANCE_SENSOR (132) - downward-facing rangefinder -> distance to ground (terrain widget).
+        // Raw distances are centimetres; convert to metres. signalQuality raw 0 means unknown.
+        scope.launch {
+            mavFrame
+                .filter { state.value.fcuDetected && it.systemId == fcuSystemId }
+                .map { it.message }
+                .filterIsInstance<DistanceSensor>()
+                .collect { ds ->
+                    val terrain = TerrainData(
+                        currentDistanceM = ds.currentDistance.toInt() / 100f,
+                        minDistanceM = ds.minDistance.toInt() / 100f,
+                        maxDistanceM = ds.maxDistance.toInt() / 100f,
+                        isDownwardFacing =
+                            ds.orientation.entry == MavSensorOrientation.MAV_SENSOR_ROTATION_PITCH_270,
+                        signalQuality = ds.signalQuality.toInt().takeIf { it in 1..100 }
+                    )
+                    _state.update { it.copy(terrainData = terrain) }
+                }
+        }
+
+        // OBSTACLE_DISTANCE (330) - horizontal proximity scan -> radar widget.
+        // Sectors are centimetres; UINT16_MAX (unknown) and max_distance+1 (no obstacle) -> NaN.
+        scope.launch {
+            mavFrame
+                .filter { state.value.fcuDetected && it.systemId == fcuSystemId }
+                .map { it.message }
+                .filterIsInstance<ObstacleDistance>()
+                .collect { od ->
+                    val maxCm = od.maxDistance.toInt()
+                    val distancesM = od.distances.map { raw ->
+                        val cm = raw.toInt()
+                        if (cm >= 65535 || cm > maxCm) Float.NaN else cm / 100f
+                    }
+                    val incrementDeg =
+                        if (od.incrementF != 0f) od.incrementF else od.increment.toInt().toFloat()
+                    val proximity = ProximityData(
+                        distancesM = distancesM,
+                        incrementDeg = incrementDeg,
+                        angleOffsetDeg = od.angleOffset,
+                        minDistanceM = od.minDistance.toInt() / 100f,
+                        maxDistanceM = maxCm / 100f
+                    )
+                    _state.update { it.copy(proximityData = proximity) }
+                }
+        }
+
         // GLOBAL_POSITION_INT
         scope.launch {
             mavFrame

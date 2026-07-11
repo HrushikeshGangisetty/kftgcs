@@ -48,10 +48,16 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.navigation.NavController
+import com.example.kftgcs.BuildConfig
 import com.example.kftgcs.R
 import com.example.kftgcs.navigation.Screen
 import com.example.kftgcs.utils.AppStrings
 import java.net.URLEncoder
+
+// SVD white-label build ships a single fixed company. Hide the company picker
+// and always submit this name so the value the backend expects is unchanged.
+private const val SVD_COMPANY_NAME = "SRI VIGNESHWARA DRONES PVT LTD"
+private val isSvdFlavor = BuildConfig.FLAVOR == "svd"
 
 private val textFieldColors
     @Composable
@@ -87,7 +93,7 @@ fun SignupPage(
     var expanded by remember { mutableStateOf(false) }
 
     // Company name dropdown state
-    var selectedCompanyName by remember { mutableStateOf("") }
+    var selectedCompanyName by remember { mutableStateOf(if (isSvdFlavor) SVD_COMPANY_NAME else "") }
     var companyDropdownExpanded by remember { mutableStateOf(false) }
 
     val companyNames by authViewModel.companyNames.observeAsState(emptyList())
@@ -97,9 +103,11 @@ fun SignupPage(
     val authState by authViewModel.authState.observeAsState()
     val context = LocalContext.current
 
-    // Fetch company names when the page loads
+    // Fetch company names when the page loads (not needed for the fixed-company SVD build)
     LaunchedEffect(Unit) {
-        authViewModel.fetchCompanyNames()
+        if (!isSvdFlavor) {
+            authViewModel.fetchCompanyNames()
+        }
     }
 
 
@@ -164,7 +172,8 @@ fun SignupPage(
 
                 Spacer(modifier = Modifier.height(16.dp))
 
-                // Company Name Dropdown
+                // Company Name Dropdown — hidden for the SVD build (fixed company)
+                if (!isSvdFlavor) {
                 Box {
                     OutlinedTextField(
                         value = if (companyNamesLoading) "Loading..." else selectedCompanyName,
@@ -237,6 +246,7 @@ fun SignupPage(
                 }
 
                 Spacer(modifier = Modifier.height(8.dp))
+                } // end company picker (non-SVD)
 
                 // First Name
                 OutlinedTextField(

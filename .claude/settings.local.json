@@ -39,7 +39,13 @@
       "Bash(mkdir -p /c/Users/Hrushikesh/AppData/Local/Temp/claude/c--Users-Hrushikesh-AndroidStudioProjects-kftgcs/89ac33d3-d673-4a92-ab46-616d5618d5ed/scratchpad/mavsrc2)",
       "Bash(unzip -o /c/Users/Hrushikesh/.gradle/caches/modules-2/files-2.1/com.divpundir.mavlink/definitions-jvm/1.2.8/eea910bc71aeee3e062df7420a05a41b82b54a5b/definitions-jvm-1.2.8-sources.jar -d /c/Users/Hrushikesh/AppData/Local/Temp/claude/c--Users-Hrushikesh-AndroidStudioProjects-kftgcs/89ac33d3-d673-4a92-ab46-616d5618d5ed/scratchpad/mavsrc2)",
       "Bash(cat \"/c/Users/Hrushikesh/AppData/Local/Temp/claude/c--Users-Hrushikesh-AndroidStudioProjects-kftgcs/89ac33d3-d673-4a92-ab46-616d5618d5ed/scratchpad/mavsrc2/commonMain/com/divpundir/mavlink/definitions/common/AutopilotVersion.kt\")",
-      "Read(//c/Users/Hrushikesh/AppData/Local/Temp/claude/c--Users-Hrushikesh-AndroidStudioProjects-kftgcs/89ac33d3-d673-4a92-ab46-616d5618d5ed/scratchpad/mavsrc2/commonMain/com/divpundir/mavlink/definitions/common/**)"
+      "Read(//c/Users/Hrushikesh/AppData/Local/Temp/claude/c--Users-Hrushikesh-AndroidStudioProjects-kftgcs/89ac33d3-d673-4a92-ab46-616d5618d5ed/scratchpad/mavsrc2/commonMain/com/divpundir/mavlink/definitions/common/**)",
+      "Bash(find ~/.gradle/caches -name \"*.jar\" -path \"*divpundir*definitions*\" 2>/dev/null | head; echo \"---classes---\"; ls ~/.gradle/caches/modules-2/files-2.1/com.divpundir.mavlink/ 2>/dev/null)",
+      "Read(//c/Users/Hrushikesh/.gradle/caches/modules-2/files-2.1/com.divpundir.mavlink/**)",
+      "Bash(sed -n '/public data class DistanceSensor/,/^\\) :/p' /tmp/tmp.1roVkuIwiw/commonMain/com/divpundir/mavlink/definitions/common/DistanceSensor.kt)",
+      "Bash(sed -n '/public data class ObstacleDistance/,/^\\) :/p' /tmp/tmp.1roVkuIwiw/commonMain/com/divpundir/mavlink/definitions/common/ObstacleDistance.kt)",
+      "Read(//tmp/tmp.1roVkuIwiw/commonMain/com/divpundir/mavlink/definitions/common/**)",
+      "Bash(unzip -l /c/Users/Hrushikesh/.gradle/caches/8.11.1/transforms/099057fc9128ae82b498d771c5ebd8cf/transformed/material-icons-extended-release-api.jar)"
     ]
   }
 }

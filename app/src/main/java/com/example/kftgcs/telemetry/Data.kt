@@ -251,6 +251,11 @@ data class TelemetryState(
     val firmwareVersion: String? = null, // Formatted firmware version
     val boardVersion: Int? = null, // Hardware/board version
 
+    // Obstacle-avoidance / terrain telemetry relayed from the CAN hub as standard MAVLink messages.
+    // terrainData <- DISTANCE_SENSOR (132, downward rangefinder); proximityData <- OBSTACLE_DISTANCE (330).
+    val terrainData: TerrainData? = null,
+    val proximityData: ProximityData? = null,
+
     // Spray telemetry for agricultural drones
     val sprayTelemetry: SprayTelemetry = SprayTelemetry()
 )

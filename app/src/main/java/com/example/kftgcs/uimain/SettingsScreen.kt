@@ -24,6 +24,7 @@ import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Person
 import androidx.compose.material.icons.filled.Analytics
+import androidx.compose.material.icons.filled.Radar
 import androidx.compose.material3.IconButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
@@ -209,12 +210,23 @@ fun SettingsScreen(
                 height = buttonHeight
             )
 
-            // 10. Analyze Log — visible only on an active USB connection
+            Spacer(modifier = Modifier.height(buttonSpacing))
+
+            // 10. Sensor Settings (proximity-radar thresholds)
+            NumberedButton(
+                number = 10,
+                icon = Icons.Filled.Radar,
+                title = "Sensor Settings",
+                onClick = { navController.navigate("sensor_settings") },
+                height = buttonHeight
+            )
+
+            // 11. Analyze Log — visible only on an active USB connection
             if (usbConnected) {
                 Spacer(modifier = Modifier.height(buttonSpacing))
 
                 NumberedButton(
-                    number = 10,
+                    number = 11,
                     icon = Icons.Filled.Analytics,
                     title = "Analyze Log",
                     onClick = { navController.navigate("analyze_log") },

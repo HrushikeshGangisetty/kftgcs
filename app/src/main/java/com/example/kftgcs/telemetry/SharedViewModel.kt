@@ -17,6 +17,7 @@ import com.divpundir.mavlink.definitions.common.MavResult
 import com.divpundir.mavlink.definitions.common.MissionItemInt
 import com.divpundir.mavlink.definitions.common.Statustext
 import com.example.kftgcs.GCSApplication
+import com.example.kftgcs.usersettings.UserSettingsManager
 import com.example.kftgcs.telemetry.TelemetryState
 //import com.example.aerogcsclone.Telemetry.connections.BluetoothConnectionProvider
 //import com.example.aerogcsclone.Telemetry.connections.MavConnectionProvider
@@ -103,6 +104,13 @@ class SharedViewModel : ViewModel() {
     // Telemetry state - must be declared before init block that uses it
     private val _telemetryState = MutableStateFlow(TelemetryState())
     val telemetryState: StateFlow<TelemetryState> = _telemetryState.asStateFlow()
+
+    // Proximity-radar colour thresholds (metres). Hybrid: seeded from the vehicle's AVOID_DIST_MAX /
+    // AVOID_MARGIN on connect (see seedRadarThresholdsFromVehicle), overridable by the pilot in
+    // SensorSettingsScreen. Initialised from local storage so the UI has values before any connection.
+    private val _radarThresholds = MutableStateFlow(loadRadarThresholdsFromPrefs())
+    val radarThresholds: StateFlow<com.example.kftgcs.telemetry.RadarThresholds> =
+        _radarThresholds.asStateFlow()
 
     // Battery failsafe tracking
     private var lastVoltageAlertLevel1Time = 0L
@@ -1471,6 +1479,70 @@ class SharedViewModel : ViewModel() {
         return null
     }
 
+    // ── Proximity-radar thresholds (hybrid vehicle-seeded / pilot-override) ──────
+
+    private fun loadRadarThresholdsFromPrefs(): RadarThresholds {
+        val context = GCSApplication.getInstance()
+            ?: return RadarThresholds(
+                UserSettingsManager.DEFAULT_RADAR_CAUTION_M,
+                UserSettingsManager.DEFAULT_RADAR_CRITICAL_M
+            )
+        return RadarThresholds(
+            cautionM = UserSettingsManager.loadRadarCautionMeters(context),
+            criticalM = UserSettingsManager.loadRadarCriticalMeters(context)
+        )
+    }
+
+    /** True once the pilot has explicitly overridden the radar thresholds locally. */
+    fun isRadarThresholdsOverridden(): Boolean {
+        val context = GCSApplication.getInstance() ?: return false
+        return UserSettingsManager.isRadarThresholdsOverridden(context)
+    }
+
+    /** Persist a pilot override and publish it immediately. Blocks future vehicle re-seeding. */
+    fun setRadarThresholds(cautionM: Float, criticalM: Float) {
+        val context = GCSApplication.getInstance() ?: return
+        UserSettingsManager.saveRadarThresholdsOverride(context, cautionM, criticalM)
+        _radarThresholds.value = RadarThresholds(cautionM, criticalM)
+    }
+
+    /**
+     * Clear the pilot override and re-seed from the connected vehicle (if any). Called by the
+     * "Reset to vehicle defaults" action in SensorSettingsScreen.
+     */
+    fun resetRadarThresholdsToVehicle() {
+        val context = GCSApplication.getInstance() ?: return
+        UserSettingsManager.clearRadarThresholdsOverride(context)
+        viewModelScope.launch { seedRadarThresholdsFromVehicle() }
+    }
+
+    /**
+     * Read the vehicle's AVOID_DIST_MAX (caution) and AVOID_MARGIN (critical) and seed the local
+     * thresholds — but only when the pilot has NOT set a local override. Both ArduPilot params are
+     * in metres, so they map 1:1. Missing/timed-out reads are left at their current value.
+     */
+    private suspend fun seedRadarThresholdsFromVehicle() {
+        val context = GCSApplication.getInstance() ?: return
+        if (UserSettingsManager.isRadarThresholdsOverridden(context)) {
+            LogUtils.d("SharedVM", "Radar thresholds overridden by pilot — skipping vehicle seed")
+            return
+        }
+        val caution = readParameter("AVOID_DIST_MAX")
+        val critical = readParameter("AVOID_MARGIN")
+        if (caution == null && critical == null) {
+            LogUtils.d("SharedVM", "No radar-threshold params returned from vehicle")
+            return
+        }
+        val current = _radarThresholds.value
+        val seeded = RadarThresholds(
+            cautionM = caution?.takeIf { it > 0f } ?: current.cautionM,
+            criticalM = critical?.takeIf { it > 0f } ?: current.criticalM
+        )
+        UserSettingsManager.saveRadarThresholdsFromVehicle(context, seeded.cautionM, seeded.criticalM)
+        _radarThresholds.value = seeded
+        LogUtils.d("SharedVM", "Seeded radar thresholds from vehicle: $seeded")
+    }
+
     fun connect() {
         viewModelScope.launch {
             try {
@@ -1557,6 +1629,17 @@ class SharedViewModel : ViewModel() {
                     if (state.fcuDetected && state.connected) {
                         newTrackingManager.initialize()
                         return@collect // Only need to initialize once
+                    }
+                }
+            }
+
+            // Seed proximity-radar thresholds from the vehicle once the FCU is detected (unless the
+            // pilot has set a local override). One-shot per connection.
+            connectionJobs += viewModelScope.launch {
+                newRepo.state.collect { state ->
+                    if (state.fcuDetected && state.connected) {
+                        seedRadarThresholdsFromVehicle()
+                        return@collect
                     }
                 }
             }

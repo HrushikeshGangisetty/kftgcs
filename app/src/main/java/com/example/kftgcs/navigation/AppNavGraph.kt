@@ -45,6 +45,7 @@ import com.example.kftgcs.uimain.MainPage
 import com.example.kftgcs.uimain.PlanScreen
 import com.example.kftgcs.uimain.TopNavBar
 import com.example.kftgcs.uimain.SettingsScreen
+import com.example.kftgcs.uimain.SensorSettingsScreen
 import com.example.kftgcs.uimain.SecurityScreen
 import com.example.kftgcs.uimain.CalibrationsScreen
 import com.example.kftgcs.uimain.SprayCalibrationScreen
@@ -104,6 +105,7 @@ sealed class Screen(val route: String) {
     object RemoteController : Screen("remote_controller")
     object Aircraft : Screen("aircraft")
     object RangeFinderSettings : Screen("rangefinder_settings")
+    object SensorSettings : Screen("sensor_settings")
     object AboutApp : Screen("about_app")
     // Spray Calibration routes
     object SprayCalibration : Screen("spray_calibration")
@@ -464,6 +466,10 @@ fun AppNavGraph(
 
             // TopNavBar removed
             PlaceholderScreen("RangeFinder Settings", "RangeFinder configuration coming soon!")
+        }
+
+        composable(Screen.SensorSettings.route) {
+            SensorSettingsScreen(navController = navController, sharedViewModel = sharedViewModel)
         }
 
         composable(Screen.AboutApp.route) {

@@ -166,6 +166,8 @@ fun PlanScreen(
 
     // Waypoint list panel state
     var showWaypointList by remember { mutableStateOf(false) }
+    // Waypoint mission controls panel state (Speed, Altitude, Spray Rate, Auto Spray, Hold Nose Position)
+    var showWaypointControls by remember { mutableStateOf(false) }
 
     // ===== RC MODE STATE (Phone GPS) =====
     // Flag to indicate if we're in RC mode (using phone GPS for boundary points)
@@ -1350,6 +1352,9 @@ fun PlanScreen(
                                      val homeAlt = telemetryState.altitudeMsl ?: 10f
                                      val fcuSystemId = telemetryViewModel.getFcuSystemId()
                                      val fcuComponentId = telemetryViewModel.getFcuComponentId()
+                                     val currentHeading = telemetryState.heading ?: 0f
+                                     // MAV_CMD_DO_SPRAYER (ArduPilot specific): param1: 0=stop, 1=start
+                                     val MAV_CMD_DO_SPRAYER = 216u
 
                                     // ===== OBSTACLE AVOIDANCE FOR WAYPOINT MODE =====
                                     LogUtils.d("ObstacleUpload", "Waypoint upload - Obstacles count: ${obstacles.size}, Original waypoints: ${points.size}")
@@ -1384,7 +1389,7 @@ fun PlanScreen(
                                     // CRITICAL FIX: Correct MAVLink mission structure for ArduPilot
                                     // seq: 0 = HOME position (NAV_WAYPOINT with current=1)
                                     // seq: 1 = TAKEOFF
-                                    // seq: 2+ = Mission waypoints
+                                    // seq: 2+ = optional yaw-hold setup, speed/spray commands, then mission waypoints
 
                                     // Sequence 0: Home position as NAV_WAYPOINT (current=1)
                                     builtMission.add(
@@ -1416,19 +1421,86 @@ fun PlanScreen(
                                             param4 = 0f, // Yaw angle
                                             x = (homeLat * 1E7).toInt(),
                                             y = (homeLon * 1E7).toInt(),
-                                            z = 10f  // Takeoff altitude
+                                            z = surveyAltitude  // Takeoff altitude (user-configured)
                                         )
                                     )
 
-                                    // Sequence 2+: User-defined waypoints (with obstacle avoidance)
+                                    var seqCounter = 2
+
+                                    // Optional: hold nose position throughout the mission (same as Grid Survey)
+                                    if (holdNosePosition) {
+                                        // Clear any ROI that might override yaw control
+                                        builtMission.add(
+                                            MissionItemInt(
+                                                targetSystem = fcuSystemId, targetComponent = fcuComponentId, seq = seqCounter.toUShort(),
+                                                frame = MavEnumValue.of(MavFrame.MISSION),
+                                                command = MavEnumValue.of(MavCmd.DO_SET_ROI_NONE),
+                                                current = 0u, autocontinue = 1u,
+                                                param1 = 0f, param2 = 0f, param3 = 0f, param4 = 0f,
+                                                x = 0, y = 0, z = 0f
+                                            )
+                                        )
+                                        seqCounter++
+
+                                        // Set and hold the current yaw angle
+                                        builtMission.add(
+                                            MissionItemInt(
+                                                targetSystem = fcuSystemId, targetComponent = fcuComponentId, seq = seqCounter.toUShort(),
+                                                frame = MavEnumValue.of(MavFrame.MISSION),
+                                                command = MavEnumValue.of(MavCmd.CONDITION_YAW),
+                                                current = 0u, autocontinue = 1u,
+                                                param1 = currentHeading, // Target yaw angle in degrees
+                                                param2 = 30f, // Yaw speed deg/s
+                                                param3 = 0f, // Direction: shortest path
+                                                param4 = 0f, // Absolute angle
+                                                x = 0, y = 0, z = 0f
+                                            )
+                                        )
+                                        seqCounter++
+                                    }
+
+                                    // Speed command (user-configured, same range/increments as Grid Survey)
+                                    builtMission.add(
+                                        MissionItemInt(
+                                            targetSystem = fcuSystemId, targetComponent = fcuComponentId, seq = seqCounter.toUShort(),
+                                            frame = MavEnumValue.of(MavFrame.GLOBAL_RELATIVE_ALT_INT),
+                                            command = MavEnumValue.of(MavCmd.DO_CHANGE_SPEED),
+                                            current = 0u, autocontinue = 1u,
+                                            param1 = 1f, // Speed type: 1 = Ground Speed (for copter)
+                                            param2 = surveySpeed, // Target speed in m/s
+                                            param3 = -1f, // Throttle (-1 = no change)
+                                            param4 = 0f, // 0 = absolute speed
+                                            x = 0, y = 0, z = 0f
+                                        )
+                                    )
+                                    seqCounter++
+
+                                    // Auto Spray: turn sprayer ON before the mission path begins
+                                    if (autoSpray) {
+                                        builtMission.add(
+                                            MissionItemInt(
+                                                targetSystem = fcuSystemId, targetComponent = fcuComponentId, seq = seqCounter.toUShort(),
+                                                frame = MavEnumValue.of(MavFrame.GLOBAL_RELATIVE_ALT_INT),
+                                                command = MavEnumValue.fromValue(MAV_CMD_DO_SPRAYER),
+                                                current = 0u, autocontinue = 1u,
+                                                param1 = 1f, // 1 = Enable/START spraying
+                                                param2 = 0f, param3 = 0f, param4 = 0f,
+                                                x = 0, y = 0, z = 0f
+                                            )
+                                        )
+                                        seqCounter++
+                                    }
+
+                                    // User-defined waypoints (with obstacle avoidance)
                                     val wpCompletionAction = OptionsViewModel.getMissionCompletionAction(context)
                                     val wpCompletionCommand = when (wpCompletionAction) {
                                         "LAND" -> MavEnumValue.of(MavCmd.NAV_LAND)
                                         "LOITER" -> MavEnumValue.of(MavCmd.NAV_LOITER_UNLIM)
                                         else -> MavEnumValue.of(MavCmd.NAV_RETURN_TO_LAUNCH)
                                     }
+                                    val waypointYaw = if (holdNosePosition) currentHeading else 0f
                                     waypointsToUpload.forEachIndexed { idx, latLng ->
-                                        val seq = idx + 2  // Start from seq=2 (0=home, 1=takeoff)
+                                        val seq = seqCounter + idx
                                         val isLast = idx == waypointsToUpload.lastIndex
                                         builtMission.add(
                                             MissionItemInt(
@@ -1437,10 +1509,27 @@ fun PlanScreen(
                                                 command = if (isLast) wpCompletionCommand else MavEnumValue.of(MavCmd.NAV_WAYPOINT),
                                                 current = 0u, autocontinue = 1u,
                                                 param1 = 0f, // Loiter time (for waypoint)
-                                                param2 = 0f, param3 = 0f, param4 = 0f,
+                                                param2 = 0f, param3 = 0f,
+                                                param4 = waypointYaw, // Yaw angle (0 = maintain current/no hold)
                                                 x = (latLng.latitude * 1E7).toInt(),
                                                 y = (latLng.longitude * 1E7).toInt(),
-                                                z = 10f  // Waypoint altitude
+                                                z = surveyAltitude  // Waypoint altitude (user-configured)
+                                            )
+                                        )
+                                    }
+                                    seqCounter += waypointsToUpload.size
+
+                                    // Auto Spray: safety STOP before completion action (RTL/LAND/LOITER)
+                                    if (autoSpray) {
+                                        builtMission.add(
+                                            MissionItemInt(
+                                                targetSystem = fcuSystemId, targetComponent = fcuComponentId, seq = seqCounter.toUShort(),
+                                                frame = MavEnumValue.of(MavFrame.GLOBAL_RELATIVE_ALT_INT),
+                                                command = MavEnumValue.fromValue(MAV_CMD_DO_SPRAYER),
+                                                current = 0u, autocontinue = 1u,
+                                                param1 = 0f, // 0 = Disable/STOP spraying
+                                                param2 = 0f, param3 = 0f, param4 = 0f,
+                                                x = 0, y = 0, z = 0f
                                             )
                                         )
                                     }
@@ -1450,6 +1539,16 @@ fun PlanScreen(
                                              Toast.makeText(context, AppStrings.missionUploadedSuccess, Toast.LENGTH_SHORT).show()
                                              // Publish planning points to SharedViewModel only after successful upload
                                              telemetryViewModel.setPlanningWaypoints(waypointsToUpload)
+
+                                             // If Hold Nose Position is enabled, set up yaw hold (same as Grid Survey)
+                                             if (holdNosePosition) {
+                                                 coroutineScope.launch {
+                                                     telemetryViewModel.setWpYawBehavior(0)
+                                                     telemetryViewModel.enableYawHold()
+                                                     Toast.makeText(context, "Yaw locked at ${currentHeading.toInt()}°", Toast.LENGTH_SHORT).show()
+                                                 }
+                                             }
+
                                              coroutineScope.launch { telemetryViewModel.readMissionFromFcu() }
                                              navController.navigate(Screen.Main.route) {
                                                  popUpTo(Screen.Plan.route) { inclusive = true }
@@ -1572,6 +1671,21 @@ fun PlanScreen(
                                 Icons.Default.List,
                                 contentDescription = "Waypoint List",
                                 tint = if (showWaypointList) Color.White else MaterialTheme.colorScheme.onSurface
+                            )
+                        }
+                    }
+
+                    // Waypoint Mission Controls button (Speed/Altitude/Spray/Nose Hold) - waypoint mode only
+                    if (!isGridSurveyMode && points.isNotEmpty()) {
+                        FloatingActionButton(
+                            onClick = { showWaypointControls = !showWaypointControls },
+                            containerColor = if (showWaypointControls) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surface,
+                            modifier = Modifier.size(56.dp)
+                        ) {
+                            Icon(
+                                Icons.Default.Tune,
+                                contentDescription = "Mission Controls",
+                                tint = if (showWaypointControls) Color.White else MaterialTheme.colorScheme.onSurface
                             )
                         }
                     }
@@ -2233,6 +2347,251 @@ fun PlanScreen(
                         .fillMaxWidth(0.35f)
                         .fillMaxHeight(0.70f)
                 )
+            }
+
+            // Waypoint Mission Controls - Speed, Altitude, Spray Rate, Auto Spray, Hold Nose Position
+            // Same value ranges/increments as Grid Survey Parameters panel
+            if (showWaypointControls && hasStartedPlanning && !isGridSurveyMode && points.isNotEmpty()) {
+                Surface(
+                    modifier = Modifier
+                        .align(Alignment.TopStart)
+                        .padding(start = 16.dp, top = 96.dp)
+                        .fillMaxWidth(0.40f)
+                        .fillMaxHeight(0.82f)
+                        .widthIn(min = 280.dp)
+                        .heightIn(min = 360.dp),
+                    shape = RoundedCornerShape(12.dp),
+                    color = Color.Black.copy(alpha = 0.92f)
+                ) {
+                    Column(
+                        modifier = Modifier
+                            .padding(16.dp)
+                            .verticalScroll(rememberScrollState()),
+                        verticalArrangement = Arrangement.spacedBy(18.dp)
+                    ) {
+                        // Header with title and close button
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(
+                                "Waypoint Mission Controls",
+                                style = MaterialTheme.typography.titleMedium,
+                                color = Color.White,
+                                fontWeight = FontWeight.Bold,
+                                modifier = Modifier.weight(1f)
+                            )
+
+                            IconButton(
+                                onClick = { showWaypointControls = false },
+                                modifier = Modifier.size(24.dp)
+                            ) {
+                                Icon(
+                                    Icons.Default.Close,
+                                    contentDescription = "Close Panel",
+                                    tint = Color.White,
+                                    modifier = Modifier.size(20.dp)
+                                )
+                            }
+                        }
+
+                        // Speed
+                        Column(modifier = Modifier.padding(vertical = 4.dp)) {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Text("Speed", color = Color.White, modifier = Modifier.weight(1f))
+                                Text("${surveySpeed.toInt()} m/s", color = Color.White, fontWeight = FontWeight.Bold)
+                            }
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                IconButton(
+                                    onClick = { surveySpeed = (surveySpeed - 1f).coerceAtLeast(1f) },
+                                    modifier = Modifier.size(32.dp)
+                                ) {
+                                    Icon(
+                                        Icons.Default.Remove,
+                                        contentDescription = "Decrease",
+                                        tint = Color.White,
+                                        modifier = Modifier.size(18.dp)
+                                    )
+                                }
+                                Slider(
+                                    value = surveySpeed,
+                                    onValueChange = { surveySpeed = it },
+                                    valueRange = 1f..20f,
+                                    steps = 40,
+                                    modifier = Modifier.weight(1f),
+                                    colors = SliderDefaults.colors(
+                                        thumbColor = MaterialTheme.colorScheme.primary,
+                                        activeTrackColor = MaterialTheme.colorScheme.primary,
+                                        inactiveTrackColor = Color.Gray
+                                    )
+                                )
+                                IconButton(
+                                    onClick = { surveySpeed = (surveySpeed + 1f).coerceAtMost(20f) },
+                                    modifier = Modifier.size(32.dp)
+                                ) {
+                                    Icon(
+                                        Icons.Default.Add,
+                                        contentDescription = "Increase",
+                                        tint = Color.White,
+                                        modifier = Modifier.size(18.dp)
+                                    )
+                                }
+                            }
+                        }
+
+                        // Altitude
+                        Column(modifier = Modifier.padding(vertical = 4.dp)) {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Text("Altitude", color = Color.White, modifier = Modifier.weight(1f))
+                                Text("${surveyAltitude.toInt()} m", color = Color.White, fontWeight = FontWeight.Bold)
+                            }
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                IconButton(
+                                    onClick = { surveyAltitude = (surveyAltitude - 1f).coerceAtLeast(1f) },
+                                    modifier = Modifier.size(32.dp)
+                                ) {
+                                    Icon(
+                                        Icons.Default.Remove,
+                                        contentDescription = "Decrease",
+                                        tint = Color.White,
+                                        modifier = Modifier.size(18.dp)
+                                    )
+                                }
+                                Slider(
+                                    value = surveyAltitude,
+                                    onValueChange = { surveyAltitude = it },
+                                    valueRange = 1f..30f,
+                                    steps = 60,
+                                    modifier = Modifier.weight(1f),
+                                    colors = SliderDefaults.colors(
+                                        thumbColor = MaterialTheme.colorScheme.primary,
+                                        activeTrackColor = MaterialTheme.colorScheme.primary,
+                                        inactiveTrackColor = Color.Gray
+                                    )
+                                )
+                                IconButton(
+                                    onClick = { surveyAltitude = (surveyAltitude + 1f).coerceAtMost(30f) },
+                                    modifier = Modifier.size(32.dp)
+                                ) {
+                                    Icon(
+                                        Icons.Default.Add,
+                                        contentDescription = "Increase",
+                                        tint = Color.White,
+                                        modifier = Modifier.size(18.dp)
+                                    )
+                                }
+                            }
+                        }
+
+                        // Spray Rate Slider
+                        // PWM mapping: OFF=1000, 10%=1100, 50%=1500, 100%=2000
+                        Column(modifier = Modifier.padding(vertical = 4.dp)) {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Text("Spray Rate", color = Color.White, modifier = Modifier.weight(1f))
+                                Text("${sprayRate.toInt()} %", color = Color.White, fontWeight = FontWeight.Bold)
+                            }
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                IconButton(
+                                    onClick = {
+                                        val newRate = (sprayRate - 10f).coerceAtLeast(10f)
+                                        telemetryViewModel.setSprayRate(newRate)
+                                    },
+                                    modifier = Modifier.size(32.dp)
+                                ) {
+                                    Icon(
+                                        Icons.Default.Remove,
+                                        contentDescription = "Decrease",
+                                        tint = if (autoSpray) Color.Green else Color.White,
+                                        modifier = Modifier.size(18.dp)
+                                    )
+                                }
+                                Slider(
+                                    value = sprayRate,
+                                    onValueChange = { newRate ->
+                                        // Snap to nearest 10%
+                                        val snappedRate = (Math.round(newRate / 10f) * 10f).coerceIn(10f, 100f)
+                                        telemetryViewModel.setSprayRate(snappedRate)
+                                    },
+                                    valueRange = 10f..100f,
+                                    steps = 8, // 9 positions: 10%, 20%, 30%... 100%
+                                    modifier = Modifier.weight(1f),
+                                    colors = SliderDefaults.colors(
+                                        thumbColor = if (autoSpray) Color.Green else MaterialTheme.colorScheme.primary,
+                                        activeTrackColor = if (autoSpray) Color.Green else MaterialTheme.colorScheme.primary,
+                                        inactiveTrackColor = Color.Gray
+                                    )
+                                )
+                                IconButton(
+                                    onClick = {
+                                        val newRate = (sprayRate + 10f).coerceAtMost(100f)
+                                        telemetryViewModel.setSprayRate(newRate)
+                                    },
+                                    modifier = Modifier.size(32.dp)
+                                ) {
+                                    Icon(
+                                        Icons.Default.Add,
+                                        contentDescription = "Increase",
+                                        tint = if (autoSpray) Color.Green else Color.White,
+                                        modifier = Modifier.size(18.dp)
+                                    )
+                                }
+                            }
+                            Text(
+                                "PWM: ${(1000 + (sprayRate.toInt() / 100f * 1000f)).toInt()} (10-100%)",
+                                color = Color.Gray,
+                                style = MaterialTheme.typography.bodySmall,
+                                modifier = Modifier.padding(top = 2.dp)
+                            )
+                        }
+
+                        // Auto Spray
+                        Column(modifier = Modifier.padding(vertical = 4.dp)) {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Text("Auto Spray", color = Color.White, modifier = Modifier.weight(1f))
+                                Switch(
+                                    checked = autoSpray,
+                                    onCheckedChange = { autoSpray = it },
+                                    colors = SwitchDefaults.colors(
+                                        checkedThumbColor = Color.White,
+                                        checkedTrackColor = Color.Green, // Green when ON
+                                        uncheckedThumbColor = Color.White,
+                                        uncheckedTrackColor = Color.Red // Red when OFF
+                                    )
+                                )
+                            }
+                            Text(
+                                "Sprayer will turn ON along the mission path",
+                                color = Color.Gray,
+                                style = MaterialTheme.typography.bodySmall,
+                                modifier = Modifier.padding(top = 4.dp)
+                            )
+                        }
+
+                        // Hold Nose Position
+                        Column(modifier = Modifier.padding(vertical = 4.dp)) {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Text("Hold Nose Position", color = Color.White, modifier = Modifier.weight(1f))
+                                Switch(
+                                    checked = holdNosePosition,
+                                    onCheckedChange = { holdNosePosition = it },
+                                    colors = SwitchDefaults.colors(
+                                        checkedThumbColor = Color.White,
+                                        checkedTrackColor = Color.Green, // Green when ON
+                                        uncheckedThumbColor = Color.White,
+                                        uncheckedTrackColor = Color.Red // Red when OFF
+                                    )
+                                )
+                            }
+                            Text(
+                                "Nose will hold current heading during the mission",
+                                color = Color.Gray,
+                                style = MaterialTheme.typography.bodySmall,
+                                modifier = Modifier.padding(top = 4.dp)
+                            )
+                        }
+                    }
+                }
             }
 
             // ===== SPLIT PLAN UI PANEL =====

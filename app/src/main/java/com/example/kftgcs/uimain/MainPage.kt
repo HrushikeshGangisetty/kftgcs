@@ -243,6 +243,17 @@ fun MainPage(
                 }
             )
 
+            // Obstacle-avoidance / terrain overlay: toggle buttons + floating widgets (top-start).
+            val radarThresholds by telemetryViewModel.radarThresholds.collectAsState()
+            ProximityMapOverlay(
+                modifier = Modifier
+                    .align(Alignment.TopStart)
+                    .padding(12.dp),
+                terrain = telemetryState.terrainData,
+                proximity = telemetryState.proximityData,
+                thresholds = radarThresholds
+            )
+
             if (isNotificationPanelVisible) {
                 Box(modifier = Modifier.align(Alignment.CenterEnd)) {
                     NotificationPanel(notifications = notifications)
