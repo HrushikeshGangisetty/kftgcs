@@ -37,7 +37,9 @@ fun WaypointListPanel(
     onReorder: (fromIndex: Int, toIndex: Int) -> Unit,
     onWaypointClick: (Int) -> Unit,
     onClose: () -> Unit,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    // Per-waypoint altitude (m), aligned to `waypoints`. Shown in each row.
+    altitudes: List<Float> = emptyList()
 ) {
     var draggedIndex by remember { mutableStateOf<Int?>(null) }
     var targetIndex by remember { mutableStateOf<Int?>(null) }
@@ -98,6 +100,7 @@ fun WaypointListPanel(
                     WaypointRow(
                         index = index,
                         latLng = latLng,
+                        altitude = altitudes.getOrNull(index),
                         isDragging = isDragging,
                         elevation = elevation,
                         onWaypointClick = { onWaypointClick(index) },
@@ -135,6 +138,7 @@ fun WaypointListPanel(
 private fun WaypointRow(
     index: Int,
     latLng: LatLng,
+    altitude: Float?,
     isDragging: Boolean,
     elevation: androidx.compose.ui.unit.Dp,
     onWaypointClick: () -> Unit,
@@ -168,12 +172,23 @@ private fun WaypointRow(
         ) {
             // Left side: Waypoint info
             Column(modifier = Modifier.weight(1f)) {
-                Text(
-                    text = "WP${index + 1}",
-                    style = MaterialTheme.typography.titleSmall,
-                    color = Color.White,
-                    fontWeight = FontWeight.Bold
-                )
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        text = "WP${index + 1}",
+                        style = MaterialTheme.typography.titleSmall,
+                        color = Color.White,
+                        fontWeight = FontWeight.Bold
+                    )
+                    if (altitude != null) {
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text(
+                            text = "▲ ${altitude.toInt()} m",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = Color(0xFF64B5F6),
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
+                }
                 Text(
                     text = "Lat: ${String.format("%.6f", latLng.latitude)}",
                     style = MaterialTheme.typography.bodySmall,

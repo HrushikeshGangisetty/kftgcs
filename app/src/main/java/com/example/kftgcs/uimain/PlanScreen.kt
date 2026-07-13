@@ -14,6 +14,8 @@ import com.google.android.gms.location.LocationResult
 import com.google.android.gms.location.LocationServices
 import com.google.android.gms.location.Priority
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
@@ -121,6 +123,15 @@ fun PlanScreen(
     val points = remember { mutableStateListOf<LatLng>() }
     val waypoints = remember { mutableStateListOf<MissionItemInt>() }
     val coroutineScope = rememberCoroutineScope()
+
+    // Per-waypoint altitude support (MissionPlanner-style):
+    // The waypoint altitude is stored in each MissionItemInt.z. This parallel list
+    // tracks which waypoints have a user-set (custom) altitude. Waypoints that are NOT
+    // customized follow the default altitude slider (surveyAltitude) live; customized
+    // ones keep their individually-set altitude.
+    val waypointAltCustomized = remember { mutableStateListOf<Boolean>() }
+    // Controls the per-waypoint altitude editor dialog (opened by tapping a waypoint marker)
+    var showWaypointAltitudeDialog by remember { mutableStateOf(false) }
 
     // Selected waypoint tracking for deletion
     var selectedWaypointIndex by remember { mutableStateOf<Int?>(null) }
@@ -481,6 +492,7 @@ fun PlanScreen(
             // Load template data into current state
             points.clear()
             waypoints.clear()
+            waypointAltCustomized.clear()
 
             // Set current mission names from the loaded template
             telemetryViewModel.setCurrentMissionNames(template.projectName, template.plotName)
@@ -512,6 +524,8 @@ fun PlanScreen(
                 isPlotDefinitionMode = false
                 points.addAll(template.waypointPositions)
                 waypoints.addAll(template.waypoints)
+                // Preserve each saved waypoint's altitude by marking them as customized
+                repeat(template.waypoints.size) { waypointAltCustomized.add(true) }
             }
 
             // Center map on first waypoint if available
@@ -572,6 +586,19 @@ fun PlanScreen(
         }
     }
 
+    // Keep non-customized waypoints in sync with the default altitude slider (waypoint mode).
+    // Waypoints the user explicitly edited (waypointAltCustomized[i] == true) are left untouched.
+    LaunchedEffect(surveyAltitude, isGridSurveyMode) {
+        if (!isGridSurveyMode) {
+            for (i in waypoints.indices) {
+                val isCustom = waypointAltCustomized.getOrElse(i) { false }
+                if (!isCustom && waypoints[i].z != surveyAltitude) {
+                    waypoints[i] = waypoints[i].copy(z = surveyAltitude)
+                }
+            }
+        }
+    }
+
     // Update split grid when sliders change (Split Plan mode)
     LaunchedEffect(isSplitPlanMode, splitStartPercent, splitEndPercent, originalGridResult) {
         if (isSplitPlanMode && originalGridResult != null) {
@@ -620,6 +647,7 @@ fun PlanScreen(
                                     if (index in waypoints.indices) {
                                         waypoints.removeAt(index)
                                         points.removeAt(index)
+                                        if (index in waypointAltCustomized.indices) waypointAltCustomized.removeAt(index)
                                         selectedWaypointIndex = null // Clear selection after deletion
                                         // update local geofence after deleting a point
                                         if (geofenceEnabled) {
@@ -649,6 +677,7 @@ fun PlanScreen(
             GcsMap(
                 telemetryState = telemetryState,
                 points = if (isGridSurveyMode) emptyList() else points,
+                waypointAltitudes = if (isGridSurveyMode) emptyList() else waypoints.map { it.z },
                 onMapClick = onMapClick,
                 cameraPositionState = cameraPositionState,
                 mapType = mapType,
@@ -693,6 +722,11 @@ fun PlanScreen(
                 onWaypointClick = { index ->
                     selectedWaypointIndex = index
                     selectedPolygonPointIndex = null // Clear polygon selection
+                    // Tapping a waypoint marker opens the per-waypoint altitude editor
+                    // (MissionPlanner-style). Only while the plan is editable.
+                    if (!isGridSurveyMode && !isPlanSaved) {
+                        showWaypointAltitudeDialog = true
+                    }
                 },
                 // Handle polygon point dragging (disabled when plan is saved)
                 onPolygonPointDrag = { index, newPosition ->
@@ -1058,9 +1092,12 @@ fun PlanScreen(
                                     if (isGridGenerated && surveyPolygon.size >= 3) regenerateGrid()
                                 } else {
                                     val seq = waypoints.size
-                                    val item = buildMissionItemFromLatLng(pointToAdd, seq, seq == 0)
+                                    // New waypoints start at the current default altitude and
+                                    // follow the default slider until individually customized.
+                                    val item = buildMissionItemFromLatLng(pointToAdd, seq, seq == 0, surveyAltitude)
                                     points.add(pointToAdd)
                                     waypoints.add(item)
+                                    waypointAltCustomized.add(false)
                                 }
                             },
                             colors = ButtonDefaults.elevatedButtonColors(
@@ -1386,6 +1423,23 @@ fun PlanScreen(
                                         points.toList()
                                     }
 
+                                    // Per-waypoint altitudes aligned to waypointsToUpload.
+                                    // Original waypoints keep their individually-set altitude (MissionItemInt.z);
+                                    // obstacle-avoidance detour points inherit the altitude of the segment they
+                                    // were inserted on (last matched waypoint), falling back to the default.
+                                    val originalPositions = points.toList()
+                                    val originalAltitudes = waypoints.map { it.z }
+                                    var lastKnownAlt = surveyAltitude
+                                    val altitudesToUpload: List<Float> = waypointsToUpload.map { wp ->
+                                        val matchIdx = originalPositions.indexOfFirst {
+                                            it.latitude == wp.latitude && it.longitude == wp.longitude
+                                        }
+                                        if (matchIdx in originalAltitudes.indices) {
+                                            lastKnownAlt = originalAltitudes[matchIdx]
+                                        }
+                                        lastKnownAlt
+                                    }
+
                                     // CRITICAL FIX: Correct MAVLink mission structure for ArduPilot
                                     // seq: 0 = HOME position (NAV_WAYPOINT with current=1)
                                     // seq: 1 = TAKEOFF
@@ -1513,7 +1567,7 @@ fun PlanScreen(
                                                 param4 = waypointYaw, // Yaw angle (0 = maintain current/no hold)
                                                 x = (latLng.latitude * 1E7).toInt(),
                                                 y = (latLng.longitude * 1E7).toInt(),
-                                                z = surveyAltitude  // Waypoint altitude (user-configured)
+                                                z = altitudesToUpload.getOrElse(idx) { surveyAltitude }  // Per-waypoint altitude
                                             )
                                         )
                                     }
@@ -2314,6 +2368,7 @@ fun PlanScreen(
             if (showWaypointList && hasStartedPlanning && !isGridSurveyMode && points.isNotEmpty()) {
                 WaypointListPanel(
                     waypoints = points.toList(),
+                    altitudes = waypoints.map { it.z },
                     onReorder = { fromIndex, toIndex ->
                         // Reorder both points and waypoints lists
                         if (fromIndex in points.indices && toIndex in points.indices) {
@@ -2322,6 +2377,12 @@ fun PlanScreen(
 
                             val movedWaypoint = waypoints.removeAt(fromIndex)
                             waypoints.add(toIndex, movedWaypoint)
+
+                            // Keep per-waypoint altitude customization flags aligned during reorder
+                            if (fromIndex in waypointAltCustomized.indices) {
+                                val movedFlag = waypointAltCustomized.removeAt(fromIndex)
+                                waypointAltCustomized.add(toIndex.coerceIn(0, waypointAltCustomized.size), movedFlag)
+                            }
 
                             // Renumber waypoints automatically (seq numbers)
                             waypoints.forEachIndexed { index, waypoint ->
@@ -2338,6 +2399,10 @@ fun PlanScreen(
                             cameraPositionState.move(
                                 CameraUpdateFactory.newLatLngZoom(points[index], 18f)
                             )
+                        }
+                        // Open the per-waypoint altitude editor when editable
+                        if (!isPlanSaved) {
+                            showWaypointAltitudeDialog = true
                         }
                     },
                     onClose = { showWaypointList = false },
@@ -2440,12 +2505,17 @@ fun PlanScreen(
                             }
                         }
 
-                        // Altitude
+                        // Default Altitude (applies to all waypoints not individually customized)
                         Column(modifier = Modifier.padding(vertical = 4.dp)) {
                             Row(verticalAlignment = Alignment.CenterVertically) {
-                                Text("Altitude", color = Color.White, modifier = Modifier.weight(1f))
+                                Text("Default Altitude", color = Color.White, modifier = Modifier.weight(1f))
                                 Text("${surveyAltitude.toInt()} m", color = Color.White, fontWeight = FontWeight.Bold)
                             }
+                            Text(
+                                "Tap a waypoint on the map to set its own altitude",
+                                color = Color.Gray,
+                                style = MaterialTheme.typography.bodySmall
+                            )
                             Row(verticalAlignment = Alignment.CenterVertically) {
                                 IconButton(
                                     onClick = { surveyAltitude = (surveyAltitude - 1f).coerceAtLeast(1f) },
@@ -2933,6 +3003,82 @@ fun PlanScreen(
                     },
                     isLoading = missionTemplateUiState.isLoading
                 )
+            }
+
+            // ===== PER-WAYPOINT ALTITUDE EDITOR (MissionPlanner-style) =====
+            // Opened by tapping a waypoint marker (or a row in the waypoint list).
+            // Lets the user set an individual altitude for the selected waypoint, or
+            // revert it to follow the default altitude slider.
+            if (showWaypointAltitudeDialog && !isGridSurveyMode) {
+                val wpIndex = selectedWaypointIndex
+                if (wpIndex != null && wpIndex in waypoints.indices) {
+                    var altInput by remember(wpIndex, showWaypointAltitudeDialog) {
+                        mutableStateOf(waypoints[wpIndex].z.toInt().toString())
+                    }
+                    val isCustom = waypointAltCustomized.getOrElse(wpIndex) { false }
+                    AlertDialog(
+                        onDismissRequest = { showWaypointAltitudeDialog = false },
+                        title = { Text("Waypoint ${wpIndex + 1} Altitude") },
+                        text = {
+                            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                                OutlinedTextField(
+                                    value = altInput,
+                                    onValueChange = { new ->
+                                        // Allow digits and a single decimal point only
+                                        altInput = new.filter { it.isDigit() || it == '.' }
+                                    },
+                                    label = { Text("Altitude (m)") },
+                                    singleLine = true,
+                                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                                    modifier = Modifier.fillMaxWidth()
+                                )
+                                Text(
+                                    text = if (isCustom) "Custom altitude set for this waypoint."
+                                    else "Currently following default (${surveyAltitude.toInt()} m).",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                                Text(
+                                    text = "Range: 1–120 m",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                        },
+                        confirmButton = {
+                            TextButton(onClick = {
+                                val alt = altInput.toFloatOrNull()
+                                if (alt != null) {
+                                    val clamped = alt.coerceIn(1f, 120f)
+                                    waypoints[wpIndex] = waypoints[wpIndex].copy(z = clamped)
+                                    if (wpIndex in waypointAltCustomized.indices) {
+                                        waypointAltCustomized[wpIndex] = true
+                                    }
+                                    showWaypointAltitudeDialog = false
+                                } else {
+                                    Toast.makeText(context, "Enter a valid altitude", Toast.LENGTH_SHORT).show()
+                                }
+                            }) { Text("Set") }
+                        },
+                        dismissButton = {
+                            Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                                // Revert this waypoint to follow the default altitude slider
+                                if (isCustom) {
+                                    TextButton(onClick = {
+                                        waypoints[wpIndex] = waypoints[wpIndex].copy(z = surveyAltitude)
+                                        if (wpIndex in waypointAltCustomized.indices) {
+                                            waypointAltCustomized[wpIndex] = false
+                                        }
+                                        showWaypointAltitudeDialog = false
+                                    }) { Text("Use Default") }
+                                }
+                                TextButton(onClick = { showWaypointAltitudeDialog = false }) {
+                                    Text("Cancel")
+                                }
+                            }
+                        }
+                    )
+                }
             }
 
             if (showSaveMissionDialog) {

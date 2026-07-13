@@ -99,7 +99,11 @@ private fun createLemonYellowMarker(): BitmapDescriptor {
 }
 
 // Helper function to create larger markers with text labels for better interaction
-private fun createMarkerWithText(text: String, backgroundColor: Int): BitmapDescriptor {
+private fun createMarkerWithText(
+    text: String,
+    backgroundColor: Int,
+    textColor: Int = android.graphics.Color.WHITE
+): BitmapDescriptor {
     val size = 100 // Larger size for better touch targets and visibility
     val bitmap = Bitmap.createBitmap(size, size, Bitmap.Config.ARGB_8888)
     val canvas = Canvas(bitmap)
@@ -130,11 +134,16 @@ private fun createMarkerWithText(text: String, backgroundColor: Int): BitmapDesc
     }
     canvas.drawCircle(size / 2f, size / 2f, size / 2f - 1, outlinePaint)
 
-    // Draw the text - larger and bolder
+    // Draw the text - larger and bolder. Scale down for longer labels (e.g. "120")
+    // so multi-digit altitudes still fit inside the circle.
     val textPaint = android.graphics.Paint().apply {
         isAntiAlias = true
-        color = android.graphics.Color.WHITE
-        textSize = 56f
+        color = textColor
+        textSize = when {
+            text.length <= 2 -> 56f
+            text.length == 3 -> 42f
+            else -> 34f
+        }
         typeface = android.graphics.Typeface.create(android.graphics.Typeface.DEFAULT, android.graphics.Typeface.BOLD)
         textAlign = android.graphics.Paint.Align.CENTER
     }
@@ -387,6 +396,8 @@ private fun createDroneIconWithArrow(context: android.content.Context): BitmapDe
 fun GcsMap(
     telemetryState: TelemetryState,
     points: List<LatLng> = emptyList(),
+    // Per-waypoint altitude (m), aligned to `points`. Shown on each waypoint marker.
+    waypointAltitudes: List<Float> = emptyList(),
     onMapClick: (LatLng) -> Unit = {},
     cameraPositionState: CameraPositionState? = null,
     mapType: MapType = MapType.NORMAL,
@@ -499,7 +510,7 @@ fun GcsMap(
     }
 
     // Create medium-sized marker icons for waypoints (50% of default size)
-    val mediumBlueMarker = remember { createMediumMarker(BitmapDescriptorFactory.HUE_AZURE) }
+    // (Waypoint markers now render an altitude label via createMarkerWithText.)
     val mediumVioletMarker = remember { createMediumMarker(BitmapDescriptorFactory.HUE_VIOLET) }
     val mediumOrangeMarker = remember { createMediumMarker(BitmapDescriptorFactory.HUE_ORANGE) }
     val mediumYellowMarker = remember { createLemonYellowMarker() } // For selected waypoint - Lemon yellow (255, 244, 79)
@@ -915,16 +926,26 @@ fun GcsMap(
                         }
                     }
 
-                    // Determine the marker icon based on selection state
-                    val markerIcon = if (selectedWaypointIndex == index) {
-                        mediumYellowMarker // Selected waypoint - Yellow
-                    } else {
-                        mediumBlueMarker // Default - Blue
+                    // Determine selection state and this waypoint's altitude label
+                    val isSelected = selectedWaypointIndex == index
+                    val altValue = waypointAltitudes.getOrNull(index)
+                    val altLabel = altValue?.let { "${it.toInt()}" } ?: "${index + 1}"
+
+                    // Marker shows the per-waypoint altitude number (MissionPlanner-style).
+                    // Selected waypoint = yellow with dark text; default = blue with white text.
+                    val markerIcon = remember(altLabel, isSelected) {
+                        createMarkerWithText(
+                            altLabel,
+                            if (isSelected) android.graphics.Color.rgb(255, 244, 79) // Lemon yellow
+                            else android.graphics.Color.rgb(33, 150, 243), // Blue
+                            if (isSelected) android.graphics.Color.BLACK else android.graphics.Color.WHITE
+                        )
                     }
 
                     Marker(
                         state = markerState,
                         title = "WP ${index + 1}",
+                        snippet = altValue?.let { "Altitude: ${it.toInt()} m (tap to edit)" },
                         icon = markerIcon,
                         anchor = Offset(0.5f, 0.5f),
                         draggable = true,  // Enable dragging
