@@ -383,9 +383,15 @@ private fun createDroneIconWithArrow(context: android.content.Context): BitmapDe
         val resultBitmap = Bitmap.createBitmap(sizePx, sizePx, Bitmap.Config.ARGB_8888)
         val canvas = Canvas(resultBitmap)
 
-        // Scale and draw the drone image centered
+        // Scale and draw the drone image centered, tinted red
         val scaledDrone = Bitmap.createScaledBitmap(droneBmp, sizePx, sizePx, true)
-        canvas.drawBitmap(scaledDrone, 0f, 0f, null)
+        val paint = android.graphics.Paint().apply {
+            colorFilter = android.graphics.PorterDuffColorFilter(
+                android.graphics.Color.RED,
+                android.graphics.PorterDuff.Mode.SRC_IN
+            )
+        }
+        canvas.drawBitmap(scaledDrone, 0f, 0f, paint)
 
         // No arrow - just return the drone icon
         BitmapDescriptorFactory.fromBitmap(resultBitmap)
@@ -901,7 +907,7 @@ fun GcsMap(
                 Marker(
                     state = droneMarkerState,
                     title = "Drone",
-                    icon = droneIcon ?: BitmapDescriptorFactory.defaultMarker(BitmapDescriptorFactory.HUE_AZURE),
+                    icon = droneIcon ?: BitmapDescriptorFactory.defaultMarker(BitmapDescriptorFactory.HUE_RED),
                     anchor = Offset(0.5f, 0.5f),
                     rotation = heading ?: 0f,
                     flat = true  // Make the marker flat on the map so rotation works correctly

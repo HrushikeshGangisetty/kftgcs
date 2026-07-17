@@ -252,7 +252,9 @@ data class TelemetryState(
     val boardVersion: Int? = null, // Hardware/board version
 
     // Obstacle-avoidance / terrain telemetry relayed from the CAN hub as standard MAVLink messages.
-    // terrainData <- DISTANCE_SENSOR (132, downward rangefinder); proximityData <- OBSTACLE_DISTANCE (330).
+    // Both come from DISTANCE_SENSOR (132), split by orientation:
+    //   terrainData   <- orientation 25 (PITCH_270, downward rangefinder -> distance to ground)
+    //   proximityData <- orientation  0 (NONE, forward rangefinder -> obstacle distance)
     val terrainData: TerrainData? = null,
     val proximityData: ProximityData? = null,
 

@@ -30,24 +30,25 @@ data class TerrainData(
 }
 
 /**
- * Wraps MAVLink `OBSTACLE_DISTANCE` (ID 330) — a horizontal proximity scan split into angular
- * sectors. Raw MAVLink distances are centimetres; [distancesM] holds metres, with sectors that are
- * unknown (UINT16_MAX) or "no obstacle" (max_distance + 1) collapsed to [Float.NaN].
+ * Wraps MAVLink `DISTANCE_SENSOR` (ID 132) reported by the FORWARD-facing rangefinder
+ * (orientation MAV_SENSOR_ROTATION_NONE / 0). The obstacle-avoidance hardware sends a single
+ * forward distance on this message rather than the 360° sector scan of `OBSTACLE_DISTANCE` (330),
+ * so this model wraps one reading. Raw MAVLink distances are centimetres; all fields here are metres.
  */
 data class ProximityData(
-    val distancesM: List<Float>,
-    /** Angular width of each sector in degrees (uses increment_f when non-zero). */
-    val incrementDeg: Float,
-    /** Angle of the 0-index sector relative to forward, degrees, clockwise-positive. */
-    val angleOffsetDeg: Float,
+    val currentDistanceM: Float,
     val minDistanceM: Float,
-    val maxDistanceM: Float
+    val maxDistanceM: Float,
+    /** Sensor signal quality 1..100, or null when unknown/unset (raw 0). */
+    val signalQuality: Int? = null
 ) {
-    /** Closest valid obstacle distance across all sectors, or null when nothing is detected. */
-    val closestM: Float?
-        get() = distancesM.asSequence()
-            .filter { !it.isNaN() && it in minDistanceM..maxDistanceM }
-            .minOrNull()
+    /** True when [currentDistanceM] is a usable reading inside the sensor's valid range. */
+    val hasValidReading: Boolean
+        get() = maxDistanceM > minDistanceM && currentDistanceM in minDistanceM..maxDistanceM
+
+    /** Forward obstacle distance in metres when the reading is valid, else null. */
+    val forwardDistanceM: Float?
+        get() = if (hasValidReading) currentDistanceM else null
 }
 
 /**

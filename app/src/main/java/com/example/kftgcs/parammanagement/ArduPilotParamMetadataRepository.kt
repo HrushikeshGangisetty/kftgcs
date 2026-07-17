@@ -389,7 +389,7 @@ object ArduPilotParamMetadataRepository {
 
 internal val FALLBACK_PARAM_METADATA: Map<String, ParamMeta> by lazy {
     mapOf(
-        "ARMING_CHECK" to ParamMeta("Checks before arming", "1", mapOf(0 to "Disabled", 1 to "All")),
+        "ARMING_CHECK" to ParamMeta("Checks before arming", "1", mapOf(0 to "Disabled", 1 to "All", 4390 to "Recommended (4390)")),
         "ARMING_REQUIRE" to ParamMeta("Arming requirements", "1", mapOf(0 to "Disabled", 1 to "Throttle Down", 2 to "RC Pattern")),
         "FRAME_CLASS" to ParamMeta("Frame class", "0", mapOf(0 to "Undefined", 1 to "Quad", 2 to "Hexa", 3 to "Octo", 4 to "OctoQuad", 5 to "Y6", 6 to "Heli", 7 to "Tri")),
         "FRAME_TYPE" to ParamMeta("Frame type", "1", mapOf(0 to "Plus", 1 to "X", 2 to "V", 3 to "H", 4 to "V-Tail", 5 to "A-Tail", 12 to "BetaFlightX", 13 to "DJI X")),

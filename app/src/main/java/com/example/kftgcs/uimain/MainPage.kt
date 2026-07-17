@@ -793,19 +793,15 @@ fun StatusPanel(
                 horizontalArrangement = Arrangement.SpaceBetween,
                 modifier = Modifier.fillMaxWidth()
             ) {
-                // Show waypoint info - display pause state or current waypoint
-                val waypointText = if (telemetryState.missionPaused) {
-                    "⏸ ${AppStrings.wp} ${telemetryState.pausedAtWaypoint ?: "?"}"
-                } else if (telemetryState.currentWaypoint != null) {
-                    "${AppStrings.wp}: ${telemetryState.currentWaypoint}"
-                } else {
-                    "${AppStrings.wp}: N/A"
-                }
+                // Distance to ground from the downward terrain rangefinder (DISTANCE_SENSOR 132).
+                val obsAltStr = telemetryState.terrainData
+                    ?.takeIf { it.hasValidReading }
+                    ?.let { "%.1f m".format(it.currentDistanceM) }
+                    ?: "N/A"
                 Text(
-                    waypointText,
-                    color = if (telemetryState.missionPaused) Color.Yellow else Color.White,
+                    "obs-alt: $obsAltStr",
+                    color = Color.White,
                     fontSize = 11.sp,
-                    fontWeight = if (telemetryState.missionPaused) FontWeight.Bold else FontWeight.Normal,
                     modifier = Modifier.weight(1f),
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis
