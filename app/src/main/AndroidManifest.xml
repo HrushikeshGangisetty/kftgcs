@@ -57,7 +57,7 @@
         android:roundIcon="@mipmap/ic_launcher_round"
         android:supportsRtl="true"
         android:theme="@style/Theme.Aerogcsclone"
-        tools:targetApi="31">
+        tools:targetApi="36">
         <!-- Google Maps API Key - injected from local.properties via build.gradle.kts -->
         <meta-data
             android:name="com.google.android.geo.API_KEY"

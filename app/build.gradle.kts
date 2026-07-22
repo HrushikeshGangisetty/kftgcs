@@ -22,7 +22,7 @@ android {
     defaultConfig {
         applicationId = "com.kft.gcs"
         minSdk = 26
-        targetSdk = 35
+        targetSdk = 36
         versionCode = 27
         versionName = "1.3.3"
 
