@@ -177,6 +177,30 @@ object GridUtils {
         return String.format(Locale.US, "%.2f acres", areaInAcres)
     }
 
+    /** Exact square metres in one acre (1 acre = 4046.856 m²). Single source of truth. */
+    const val SQ_METERS_PER_ACRE = 4046.856
+
+    /**
+     * Geodesic area of a plot polygon in acres. Numeric counterpart of
+     * [calculateAndFormatPolygonArea], for use in flight/telemetry math.
+     * @return acres, or 0.0 for a degenerate polygon (< 3 points).
+     */
+    fun polygonAreaAcres(polygon: List<LatLng>): Double {
+        if (polygon.size < 3) return 0.0
+        return SphericalUtil.computeArea(polygon) / SQ_METERS_PER_ACRE
+    }
+
+    /**
+     * Swept-path area in acres: the strip covered by travelling [distanceMeters]
+     * with an effective swath of [swathMeters]. Used for "sprayed acres".
+     * Using the mission line spacing as the swath keeps adjacent lanes non-overlapping,
+     * which avoids double-counting coverage.
+     */
+    fun sweptAcres(distanceMeters: Double, swathMeters: Double): Double {
+        if (distanceMeters <= 0.0 || swathMeters <= 0.0) return 0.0
+        return distanceMeters * swathMeters / SQ_METERS_PER_ACRE
+    }
+
     /**
      * Shrink a polygon inward by a specified distance (indentation/padding)
      * This creates a safe zone by moving all edges inward

@@ -507,8 +507,8 @@ fun TopNavBar(
                         HorizontalDivider(color = Color.White.copy(alpha = 0.3f))
 
                         // Spray Rate Slider
-                        // PWM mapping: 10%=1051, 50%=1501, 100%=1951
-                        // Slider is always functional regardless of RC7 status
+                        // Sets SPRAY_PUMP_RATE (mapped for AC_Sprayer's speed-proportional model).
+                        // Slider is always functional regardless of RC7 status.
                         Column(modifier = Modifier.padding(vertical = 4.dp)) {
                             Row(verticalAlignment = Alignment.CenterVertically) {
                                 Text(AppStrings.sprayRate, color = Color.White, modifier = Modifier.weight(1f))
@@ -535,14 +535,6 @@ fun TopNavBar(
                             Text(
                                 AppStrings.adjustSprayIntensity,
                                 color = Color.Gray,
-                                style = MaterialTheme.typography.bodySmall,
-                                modifier = Modifier.padding(top = 2.dp)
-                            )
-                            // PWM info text (1051-1951 range)
-                            val pwmValue = (1051 + (sprayRate / 100f * 900f)).toInt()
-                            Text(
-                                "PWM: $pwmValue",
-                                color = Color.Gray.copy(alpha = 0.7f),
                                 style = MaterialTheme.typography.bodySmall,
                                 modifier = Modifier.padding(top = 2.dp)
                             )

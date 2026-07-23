@@ -18,6 +18,7 @@ import com.example.kftgcs.telemetry.connections.MavConnectionProvider
 import com.example.kftgcs.fence.FenceConfiguration
 import com.example.kftgcs.fence.FenceStatus
 import com.example.kftgcs.fence.FenceZone
+import com.example.kftgcs.grid.GridUtils
 import com.google.android.gms.maps.model.LatLng
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
@@ -1199,14 +1200,26 @@ class MavlinkTelemetryRepository(
                             }
                         }
 
+                        // ═══ Transition-aware suppression ═══
+                        // Missions embed DO_SPRAYER(0) at each line-end and DO_SPRAYER(1) at each
+                        // line-start, so spray is intentionally OFF while flying the horizontal
+                        // connector between lines. During those transitions flow legitimately drops
+                        // to ~0 — which must NOT be read as "tank empty". Ask the mission whether spray
+                        // is commanded ON at the current sequence; when it is commanded OFF (a
+                        // transition), sprayerIsOn goes false → state machine returns to IDLE → no
+                        // false tank-empty. Unknown/manual missions return true (behavior unchanged).
+                        val missionCommandsSprayOn = if (isInAutoMode) {
+                            sharedViewModel.isSprayCommandedActiveAt(state.value.currentWaypoint ?: -1)
+                        } else true
+
                         // In AUTO mode, spraying is done via mission commands (DO_SET_SERVO/DO_SPRAYER),
                         // NOT via RC7. So we also check autoModeSprayDetected to know spray is active.
                         // Also skip if missionEndPhaseActive — the mission has intentionally stopped spraying.
-                        val sprayerIsOn = (currentSprayEnabledForEmpty || (isInAutoMode && autoModeSprayDetected)) && !isInNonSprayMode && !missionEndPhaseActive
+                        val sprayerIsOn = (currentSprayEnabledForEmpty || (isInAutoMode && autoModeSprayDetected && missionCommandsSprayOn)) && !isInNonSprayMode && !missionEndPhaseActive
 
                         // ═══ TANK EMPTY DEBUG LOGS ═══
                         LogUtils.d("TankEmpty", "━━━ Tank Empty Check ━━━ mode=$currentMode | rawCA=${b.currentBattery} | flowRate=$flowRateLiterPerMin L/min | gap=${batt2GapMs}ms (~${"%.1f".format(batt2Hz)}Hz) | flowIsLow=$flowIsLow | flowIsHealthy=$flowIsHealthy | lowThreshold=$LOW_FLOW_THRESHOLD_LPM L/min | configValid=$configValid")
-                        LogUtils.d("TankEmpty", "  sprayEnabled=$currentSprayEnabledForEmpty | autoSprayDetected=$autoModeSprayDetected | isAutoMode=$isInAutoMode | isInNonSprayMode=$isInNonSprayMode | missionEnd=$missionEndPhaseActive | sprayerIsOn=$sprayerIsOn")
+                        LogUtils.d("TankEmpty", "  sprayEnabled=$currentSprayEnabledForEmpty | autoSprayDetected=$autoModeSprayDetected | isAutoMode=$isInAutoMode | missionSprayOn=$missionCommandsSprayOn | isInNonSprayMode=$isInNonSprayMode | missionEnd=$missionEndPhaseActive | sprayerIsOn=$sprayerIsOn")
                         LogUtils.d("TankEmpty", "  sprayerState=$sprayerState | timeInState=${System.currentTimeMillis() - stateEntryTime}ms | lastPositiveFlow=$lastPositiveFlowTime")
 
                         // ── Evaluate the sprayer state machine on this telemetry tick ──
@@ -1600,10 +1613,14 @@ class MavlinkTelemetryRepository(
                                             val avgSpeed = if (flyingTimeMinutes > 0) (totalDistance / 1000.0) / (flyingTimeMinutes / 60.0) else 0.0 // km/h
                                             val totalSprayUsed = currentState.sprayTelemetry.consumedLiters?.toDouble() ?: 0.0
 
-                                            // Calculate total acres from distance and spray width
-                                            val sprayWidthMeters = 5.0 // Default spray width, should come from settings
-                                            val totalAreaSqMeters = totalDistance * sprayWidthMeters
-                                            val totalAcres = totalAreaSqMeters / 4046.86 // Convert square meters to acres
+                                            // Total ("normal") acres = geodesic plot/field area when known,
+                                            // else a swept-path estimate. Sprayed acres = sprayed distance × swath.
+                                            val swath = sharedViewModel.currentSwathMeters
+                                            val totalAcres = sharedViewModel.currentFieldAreaAcres
+                                                ?: GridUtils.sweptAcres(totalDistance.toDouble(), swath)
+                                            val totalSprayedAcres = GridUtils.sweptAcres(
+                                                (currentState.totalSprayedDistanceMeters ?: 0f).toDouble(), swath
+                                            )
 
                                             wsManager.sendMissionSummary(
                                                 totalAcres = totalAcres,
@@ -1611,7 +1628,8 @@ class MavlinkTelemetryRepository(
                                                 flyingTimeMinutes = flyingTimeMinutes,
                                                 averageSpeed = avgSpeed,
                                                 alertsCount = wsManager.missionAlertsCount,
-                                                status = "COMPLETED"
+                                                status = "COMPLETED",
+                                                totalSprayedAcres = totalSprayedAcres
                                             )
                                         } catch (e: Exception) {
                                         }
@@ -1673,9 +1691,12 @@ class MavlinkTelemetryRepository(
                                     val flyingTimeMinutes = (lastElapsed ?: 0L) / 60.0
                                     val avgSpeed = if (flyingTimeMinutes > 0) (totalDistance / 1000.0) / (flyingTimeMinutes / 60.0) else 0.0
                                     val totalSprayUsed = currentState.sprayTelemetry.consumedLiters?.toDouble() ?: 0.0
-                                    val sprayWidthMeters = 5.0
-                                    val totalAreaSqMeters = totalDistance * sprayWidthMeters
-                                    val totalAcres = totalAreaSqMeters / 4046.86
+                                    val swath = sharedViewModel.currentSwathMeters
+                                    val totalAcres = sharedViewModel.currentFieldAreaAcres
+                                        ?: GridUtils.sweptAcres(totalDistance.toDouble(), swath)
+                                    val totalSprayedAcres = GridUtils.sweptAcres(
+                                        (currentState.totalSprayedDistanceMeters ?: 0f).toDouble(), swath
+                                    )
 
                                     wsManager.sendMissionSummary(
                                         totalAcres = totalAcres,
@@ -1683,7 +1704,8 @@ class MavlinkTelemetryRepository(
                                         flyingTimeMinutes = flyingTimeMinutes,
                                         averageSpeed = avgSpeed,
                                         alertsCount = wsManager.missionAlertsCount,
-                                        status = "COMPLETED"
+                                        status = "COMPLETED",
+                                        totalSprayedAcres = totalSprayedAcres
                                     )
                                 } catch (e: Exception) {
                                     // Ignore WebSocket errors

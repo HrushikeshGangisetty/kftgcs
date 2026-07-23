@@ -1362,6 +1362,15 @@ fun PlanScreen(
                                             val publishedPoints = processedGridResult.waypoints.map { it.position }
                                             telemetryViewModel.setPlanningWaypoints(publishedPoints)
                                             telemetryViewModel.setSurveyPolygon(surveyPolygon)
+                                            // Record area params for acres accounting: swath = line spacing
+                                            // (adjacent lanes are exactly this far apart → non-overlapping coverage),
+                                            // field area = geodesic plot polygon area, nominal speed = planned survey speed.
+                                            val fieldAcres = if (surveyPolygon.size >= 3) GridUtils.polygonAreaAcres(surveyPolygon) else null
+                                            telemetryViewModel.setCurrentSprayMissionParams(
+                                                swathMeters = lineSpacing.toDouble(),
+                                                fieldAreaAcres = fieldAcres,
+                                                nominalSpeedMs = surveySpeed.toDouble()
+                                            )
                                             telemetryViewModel.setGridWaypoints(processedGridResult.waypoints.map { it.position })
                                             telemetryViewModel.setGridLines(processedGridResult.gridLines)
                                             // Save obstacles to SharedViewModel for display on main map
@@ -1593,6 +1602,14 @@ fun PlanScreen(
                                              Toast.makeText(context, AppStrings.missionUploadedSuccess, Toast.LENGTH_SHORT).show()
                                              // Publish planning points to SharedViewModel only after successful upload
                                              telemetryViewModel.setPlanningWaypoints(waypointsToUpload)
+                                             // User-defined waypoint mission: no lane spacing → default swath,
+                                             // no plot polygon → "total acres" falls back to a swept-path estimate.
+                                             telemetryViewModel.resetCurrentSprayMissionParams()
+                                             telemetryViewModel.setCurrentSprayMissionParams(
+                                                 swathMeters = null,
+                                                 fieldAreaAcres = null,
+                                                 nominalSpeedMs = surveySpeed.toDouble()
+                                             )
 
                                              // If Hold Nose Position is enabled, set up yaw hold (same as Grid Survey)
                                              if (holdNosePosition) {
@@ -1906,8 +1923,8 @@ fun PlanScreen(
                                     value = lineSpacing,
                                     onValueChange = { if (!isPlanSaved) lineSpacing = it },
                                     enabled = !isPlanSaved,
-                                    valueRange = 2f..5f,
-                                    steps = 21,
+                                    valueRange = 2f..15f,
+                                    steps = 129,
                                     modifier = Modifier.weight(1f),
                                     colors = SliderDefaults.colors(
                                         thumbColor = if (isPlanSaved) Color.Gray else MaterialTheme.colorScheme.primary,
@@ -1918,7 +1935,7 @@ fun PlanScreen(
                                     )
                                 )
                                 IconButton(
-                                    onClick = { if (!isPlanSaved) lineSpacing = (lineSpacing + 0.1f).coerceAtMost(5f) },
+                                    onClick = { if (!isPlanSaved) lineSpacing = (lineSpacing + 0.1f).coerceAtMost(15f) },
                                     enabled = !isPlanSaved,
                                     modifier = Modifier.size(32.dp)
                                 ) {
@@ -2172,8 +2189,8 @@ fun PlanScreen(
                         }
 
                         // Spray Rate Slider (moved above Auto Spray)
-                        // PWM mapping: OFF=1000, 10%=1100, 50%=1500, 100%=2000
-                        // Uses DO_SET_SERVO (SERVO7) by default
+                        // Sets SPRAY_PUMP_RATE via setSprayRate() (mapped for AC_Sprayer's
+                        // speed-proportional model). Applied to the FC immediately, even mid-mission.
                         Column(modifier = Modifier.padding(vertical = 4.dp)) {
                             Row(verticalAlignment = Alignment.CenterVertically) {
                                 Text("Spray Rate", color = Color.White, modifier = Modifier.weight(1f))

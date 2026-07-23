@@ -126,10 +126,10 @@ fun MissionCompletionDialog(
                                     color = MaterialTheme.colorScheme.onSurface
                                 )
                             }
-                            // Total Acres (flown distance)
+                            // Field Acres (geodesic plot/field area; swept-path estimate for manual flights)
                             Column(modifier = Modifier.weight(1f)) {
                                 Text(
-                                    text = "Total Acres",
+                                    text = "Field Acres",
                                     style = MaterialTheme.typography.bodySmall,
                                     color = MaterialTheme.colorScheme.onSurfaceVariant
                                 )

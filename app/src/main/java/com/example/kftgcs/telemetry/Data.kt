@@ -223,7 +223,8 @@ data class TelemetryState(
 
     // Sprayed distance tracking (distance traveled while pump ON and flow > 0)
     val totalSprayedDistanceMeters: Float? = null,
-    // Sprayed acres calculated from sprayed distance: (distance * spray_width) / 4046.86
+    // Sprayed acres = sprayed distance × effective swath / 4046.856 (see GridUtils.sweptAcres).
+    // Swath = active mission line spacing (auto) or configured default (manual).
     val totalSprayedAcres: Float? = null,
 
     // Crop type for agricultural missions

@@ -6,6 +6,7 @@ import com.example.kftgcs.telemetry.TelemetryState
 import com.example.kftgcs.api.SessionManager
 import com.example.kftgcs.database.tlog.EventType
 import com.example.kftgcs.database.tlog.EventSeverity
+import com.example.kftgcs.grid.GridUtils
 import com.example.kftgcs.service.FlightLoggingService
 import com.example.kftgcs.telemetry.Notification
 import com.example.kftgcs.telemetry.NotificationType
@@ -438,9 +439,14 @@ class UnifiedFlightTracker(
                 description = "Manual flight ended - $reason"
             )
 
-            // Convert distance to acres (approximate: 1 acre = 4047 m²)
-            val totalAcres = totalDistance / 4047.0
-            val sprayedAcres = sprayedDistance / 4047.0
+            // Sprayed acres = swept path (sprayed distance × effective swath). Total acres =
+            // plot field area when known (planned mission), else a swept estimate of the full path.
+            // NOTE: previously this divided distance by 4047 WITHOUT the swath multiply, making the
+            // backend value ~5× smaller than the on-screen dialog — fixed here to match.
+            val swath = sharedViewModel.currentSwathMeters
+            val sprayedAcres = GridUtils.sweptAcres(sprayedDistance.toDouble(), swath)
+            val totalAcres = sharedViewModel.currentFieldAreaAcres
+                ?: GridUtils.sweptAcres(totalDistance.toDouble(), swath)
 
             // Send mission summary — will enqueue offline if disconnected
             val flyingTimeMinutes = flightTime / 60.0
@@ -660,7 +666,7 @@ class UnifiedFlightTracker(
         // Show completion notification with preserved values
         sharedViewModel.addNotification(
             Notification(
-                "Flight completed! Time: ${formatTime(finalTime)}, Area: ${formatAcres(finalDistance)}",
+                "Flight completed! Time: ${formatTime(finalTime)}, Area: ${formatTotalAcres(finalDistance)}",
                 NotificationType.SUCCESS
             )
         )
@@ -671,8 +677,8 @@ class UnifiedFlightTracker(
 
         sharedViewModel.showMissionCompletionDialog(
             totalTime = formatTime(finalTime),
-            totalAcres = formatAcres(finalDistance),
-            sprayedAcres = formatAcres(finalSprayedDistance),
+            totalAcres = formatTotalAcres(finalDistance),
+            sprayedAcres = formatSprayedAcres(finalSprayedDistance),
             consumedLitres = consumedLitresStr
         )
 
@@ -749,14 +755,21 @@ class UnifiedFlightTracker(
     }
 
     /**
-     * Convert distance traveled to acres covered
-     * Formula: distance (m) * spray width (m) / 4046.86 (sq meters per acre)
-     * Using default spray width of 5 meters
+     * Sprayed acres = swept path: sprayed distance (m) × effective swath (m) / 4046.856.
+     * Swath comes from the active mission (auto = line spacing, manual = configured default).
      */
-    private fun formatAcres(distanceMeters: Float): String {
-        val sprayWidthMeters = 5.0f  // Default spray width
-        val areaSqMeters = distanceMeters * sprayWidthMeters
-        val acres = areaSqMeters / 4046.86f
+    private fun formatSprayedAcres(distanceMeters: Float): String {
+        val acres = GridUtils.sweptAcres(distanceMeters.toDouble(), sharedViewModel.currentSwathMeters)
+        return String.format("%.2f acres", acres)
+    }
+
+    /**
+     * Total ("normal") acres = the geodesic plot/field area when a planned mission is active;
+     * otherwise a swept-path estimate of the full flight distance (manual flights / no plot).
+     */
+    private fun formatTotalAcres(fallbackDistanceMeters: Float): String {
+        val acres = sharedViewModel.currentFieldAreaAcres
+            ?: GridUtils.sweptAcres(fallbackDistanceMeters.toDouble(), sharedViewModel.currentSwathMeters)
         return String.format("%.2f acres", acres)
     }
 

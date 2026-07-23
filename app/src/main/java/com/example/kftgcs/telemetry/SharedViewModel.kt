@@ -1158,11 +1158,9 @@ class SharedViewModel : ViewModel() {
         sprayedDistanceMeters: Float = 0f,
         completed: Boolean = false
     ) {
-        // Calculate sprayed acres from sprayed distance
-        // Formula: (sprayed_distance_m * spray_width_m) / 4046.86 (sq meters per acre)
-        val sprayWidthMeters = 5.0f  // Default spray width
-        val sprayedAreaSqMeters = sprayedDistanceMeters * sprayWidthMeters
-        val sprayedAcres = sprayedAreaSqMeters / 4046.86f
+        // Calculate sprayed acres from sprayed distance using the active mission's effective
+        // swath (auto = line spacing, manual = configured default). Single source of truth in GridUtils.
+        val sprayedAcres = GridUtils.sweptAcres(sprayedDistanceMeters.toDouble(), currentSwathMeters).toFloat()
 
         _telemetryState.value = _telemetryState.value.copy(
             isMissionActive = isActive,
@@ -1771,12 +1769,82 @@ class SharedViewModel : ViewModel() {
         }
     }
 
+    /**
+     * Whether the mission has spray COMMANDED ON at the given (current) sequence.
+     *
+     * Missions embed DO_SPRAYER(1) after each line-start and DO_SPRAYER(0) after each
+     * line-end, so spray is intentionally OFF while the drone flies the horizontal
+     * connector between lines. Tank-empty detection must NOT fire during those
+     * transitions (flow legitimately drops to ~0). ArduPilot executes DO_ commands the
+     * instant they are reached and advances the reported "current" sequence to the next
+     * NAV item, so we key off the most recent DO_SPRAYER with seq STRICTLY LESS than the
+     * current sequence (i.e. already executed) rather than expecting current to land on
+     * the DO_SPRAYER item itself.
+     *
+     * Returns true (spray assumed on / behavior unchanged) when the mission is unknown or
+     * contains no DO_SPRAYER commands (e.g. uploaded from another GCS, or manual spray),
+     * so this only ever suppresses tank-empty during a genuine commanded-off transition.
+     */
+    fun isSprayCommandedActiveAt(seq: Int): Boolean {
+        val items = lastUploadedMissionItems
+        if (items.isEmpty()) return true            // unknown mission → don't change behavior
+        val lastSprayer = items
+            .filter { it.command.value == MAV_CMD_DO_SPRAYER_ID && it.seq.toInt() < seq }
+            .maxByOrNull { it.seq.toInt() }
+            ?: return true                          // no sprayer cmd executed yet → assume on
+        return lastSprayer.param1 == 1f
+    }
+
     // --- Current Mission Names (for tracking which template/mission is active) ---
     private val _currentProjectName = MutableStateFlow("")
     val currentProjectName: StateFlow<String> = _currentProjectName.asStateFlow()
 
     private val _currentPlotName = MutableStateFlow("")
     val currentPlotName: StateFlow<String> = _currentPlotName.asStateFlow()
+
+    // --- Active spray-mission area parameters (for acres accounting) ---
+    // Effective swath width (m) used for sprayed-area accounting. For auto missions this is
+    // the planned line spacing — adjacent lanes are exactly this far apart, so
+    // lane_width × length gives non-overlapping coverage (no double counting). Manual flights
+    // use DEFAULT_SWATH_METERS. Read synchronously by UnifiedFlightTracker / TelemetryRepository.
+    @Volatile
+    var currentSwathMeters: Double = DEFAULT_SWATH_METERS
+        private set
+
+    // Geodesic area of the active plot polygon in acres. null for manual flights / no plot,
+    // in which case "Total acres" falls back to a swept-path estimate.
+    @Volatile
+    var currentFieldAreaAcres: Double? = null
+        private set
+
+    // Planned spray ground speed (m/s) for the active mission; drives the spray-rate mapping.
+    @Volatile
+    var currentNominalSpeedMs: Double = DEFAULT_NOMINAL_SPEED_MS
+        private set
+
+    /**
+     * Record the active spray-mission's area parameters when a plan is created/loaded/uploaded.
+     * @param swathMeters effective swath (auto mission line spacing). Ignored if <= 0.
+     * @param fieldAreaAcres geodesic plot area in acres, or null if unknown (manual/no polygon).
+     * @param nominalSpeedMs planned spray ground speed in m/s. Ignored if <= 0.
+     */
+    fun setCurrentSprayMissionParams(
+        swathMeters: Double?,
+        fieldAreaAcres: Double?,
+        nominalSpeedMs: Double?
+    ) {
+        if (swathMeters != null && swathMeters > 0.0) currentSwathMeters = swathMeters
+        currentFieldAreaAcres = fieldAreaAcres
+        if (nominalSpeedMs != null && nominalSpeedMs > 0.0) currentNominalSpeedMs = nominalSpeedMs
+        LogUtils.i("SharedVM", "Spray mission params set - swath=${currentSwathMeters}m, fieldAcres=${currentFieldAreaAcres}, nominalSpeed=${currentNominalSpeedMs}m/s")
+    }
+
+    /** Reset spray-mission area params to defaults (new mission / manual flight). */
+    fun resetCurrentSprayMissionParams() {
+        currentSwathMeters = DEFAULT_SWATH_METERS
+        currentFieldAreaAcres = null
+        currentNominalSpeedMs = DEFAULT_NOMINAL_SPEED_MS
+    }
 
     // --- Mission Completion Dialog State ---
     private val _showMissionCompletionDialog = MutableStateFlow(false)
@@ -4094,57 +4162,81 @@ class SharedViewModel : ViewModel() {
     // ArduPilot Sprayer library integration:
     // - SERVO9_FUNCTION = 22 (SprayerPump) - ArduPilot's Sprayer library controls the pump
     // - Uses MAV_CMD_DO_SPRAYER (216) to enable/disable spraying
-    // - Uses SPRAY_PUMP_RATE parameter (0-100%) to control pump duty cycle
-    // - PWM range is controlled by SERVO9_MIN (1051) and SERVO9_MAX (1951) on the FC
+    // - Uses SPRAY_PUMP_RATE parameter to control the application rate
+    //
+    // IMPORTANT — AC_Sprayer semantics (why the slider must be mapped, not sent 1:1):
+    // SPRAY_PUMP_RATE is the pump output PERCENTAGE PER 1 m/s of ground speed. The library
+    // computes pump output% ≈ ground_speed_ms × SPRAY_PUMP_RATE, floored at SPRAY_PUMP_MIN and
+    // capped at 100%. So sending the raw slider % (10–100) 1:1 saturates at 100% for almost the
+    // whole range in flight, and collapses to the SPRAY_PUMP_MIN floor at rest — which is why
+    // every slider value produced the same spray. We instead:
+    //   1. force SPRAY_PUMP_MIN = 0 (remove the floor so low values aren't clamped up), and
+    //   2. map slider% → SPRAY_PUMP_RATE = slider% / nominalSpeed, so that AT the nominal spray
+    //      speed the pump output% ≈ slider% and the full 10–100% range is usable/monotonic.
+    // NOTE: output stays speed-proportional (agriculturally correct: constant L per area), so on
+    // the ground (speed ≈ 0) all rates spray ≈ 0 — rate differences are only visible in flight.
     private val MAV_CMD_DO_SPRAYER = 216u
+
+    // Valid clamp for the SPRAY_PUMP_RATE parameter we push to the FC.
+    private val SPRAY_PUMP_RATE_MIN = 0.5f
+    private val SPRAY_PUMP_RATE_MAX = 100f
+
+    // SPRAY_PUMP_MIN is forced to 0 once per session so the slider mapping is monotonic.
+    @Volatile
+    private var sprayPumpMinZeroed = false
+
+    /**
+     * Push the current slider rate to the FC as SPRAY_PUMP_RATE, mapped for AC_Sprayer's
+     * speed-proportional model (see the block comment above). Also ensures SPRAY_PUMP_MIN = 0
+     * once per session so low slider values are not floored. Safe to call whether or not the
+     * sprayer is currently enabled — SPRAY_PUMP_RATE takes effect immediately for an ongoing
+     * mission's DO_SPRAYER, which is what makes mid-mission slider changes work.
+     */
+    private suspend fun applySprayRateToFc() {
+        if (repo == null) {
+            LogUtils.e("SprayControl", "✗ Cannot set spray rate - not connected to drone")
+            return
+        }
+        val slider = _sprayRate.value.coerceIn(10f, 100f)
+        val nominalSpeed = currentNominalSpeedMs.coerceAtLeast(0.5).toFloat()
+        val pumpRate = (slider / nominalSpeed).coerceIn(SPRAY_PUMP_RATE_MIN, SPRAY_PUMP_RATE_MAX)
+
+        try {
+            // One-time: remove the pump floor so the slider is monotonic across its whole range.
+            if (!sprayPumpMinZeroed) {
+                val minAck = setParameter("SPRAY_PUMP_MIN", 0f)
+                if (minAck != null) {
+                    sprayPumpMinZeroed = true
+                    LogUtils.i("SprayControl", "✓ SPRAY_PUMP_MIN set to 0 (monotonic slider)")
+                } else {
+                    LogUtils.w("SprayControl", "⚠ SPRAY_PUMP_MIN=0 not confirmed (will retry next change)")
+                }
+            }
+
+            val rateAck = setParameter("SPRAY_PUMP_RATE", pumpRate)
+            LogUtils.i("SprayControl",
+                "🚿 Spray rate slider=${slider.toInt()}% @ nominal=${nominalSpeed}m/s → SPRAY_PUMP_RATE=$pumpRate " +
+                (if (rateAck != null) "(confirmed)" else "(no confirmation)"))
+        } catch (e: Exception) {
+            LogUtils.e("SprayControl", "✗ Failed to set spray rate: ${e.message}", e)
+        }
+    }
 
     /**
      * Control spray system using ArduPilot's Sprayer library.
      *
-     * Since SERVO9_FUNCTION = 22 (SprayerPump), the ArduPilot Sprayer library owns the servo output.
-     * Direct DO_SET_SERVO commands won't work because the library overrides them.
-     *
-     * This implementation uses:
-     * 1. SPRAY_PUMP_RATE parameter (0-100%) - Controls the maximum pump duty cycle
-     * 2. MAV_CMD_DO_SPRAYER (216) - Enables/disables the sprayer
-     *
-     * The Sprayer library then calculates actual PWM output based on:
-     * - SPRAY_PUMP_RATE: The maximum pump rate percentage
-     * - Ground speed (when SPRAY_SPEED_MIN > 0)
-     * - Target coverage rate
-     *
-     * Hardware notes (Hobbywing 5L Pump):
-     * - PWM 1051 µs = minimum throttle (0%)
-     * - PWM 1951 µs = maximum throttle (100% = 5 L/min)
-     * - Linear interpolation between min and max
+     * SERVO9_FUNCTION = 22 (SprayerPump) means the Sprayer library owns the pump servo output,
+     * so the rate is set via the SPRAY_PUMP_RATE parameter (mapped in [applySprayRateToFc]) and
+     * on/off via MAV_CMD_DO_SPRAYER (216).
      *
      * @param enable true to enable spray at current rate, false to disable
      */
     fun controlSpray(enable: Boolean) {
         viewModelScope.launch {
-            val rate = _sprayRate.value.coerceIn(10f, 100f)
-            // PWM calculation: 1051 (10%) to 1951 (100%)
-            // PWM = 1051 + (rate/100) * 900
-            val expectedPwm = (1051 + (rate / 100f * 900f)).toInt()
-
-            LogUtils.i("SprayControl", "═══════════════════════════════════════")
-            LogUtils.i("SprayControl", "🚿 SPRAY COMMAND (Sprayer Library Mode)")
-            LogUtils.i("SprayControl", "   State: ${if (enable) "ON" else "OFF"}")
-            LogUtils.i("SprayControl", "   SPRAY_PUMP_RATE: ${rate.toInt()}%")
-            LogUtils.i("SprayControl", "   Expected PWM: $expectedPwm µs (range 1051-1951)")
-            LogUtils.i("SprayControl", "   Method: MAV_CMD_DO_SPRAYER + SPRAY_PUMP_RATE param")
-            LogUtils.i("SprayControl", "═══════════════════════════════════════")
-
             repo?.let { repository ->
                 try {
-                    // Step 1: Set the SPRAY_PUMP_RATE parameter to control duty cycle
-                    // This parameter controls the maximum pump output (0-100%)
-                    val paramResult = setParameter("SPRAY_PUMP_RATE", rate)
-                    if (paramResult != null) {
-                        LogUtils.i("SprayControl", "✓ SPRAY_PUMP_RATE set to ${rate.toInt()}%")
-                    } else {
-                        LogUtils.w("SprayControl", "⚠ SPRAY_PUMP_RATE set (no confirmation received)")
-                    }
+                    // Step 1: Push the mapped SPRAY_PUMP_RATE (and ensure SPRAY_PUMP_MIN=0).
+                    applySprayRateToFc()
 
                     // Step 2: Send DO_SPRAYER command to enable/disable
                     // MAV_CMD_DO_SPRAYER (216): param1 = 1 (enable) or 0 (disable)
@@ -4153,7 +4245,6 @@ class SharedViewModel : ViewModel() {
                         param1 = if (enable) 1f else 0f
                     )
                     LogUtils.i("SprayControl", "✓ DO_SPRAYER command sent: ${if (enable) "ENABLE" else "DISABLE"}")
-                    LogUtils.i("SprayControl", "✓ Command sent successfully")
                 } catch (e: Exception) {
                     LogUtils.e("SprayControl", "✗ Failed to send spray command: ${e.message}", e)
                 }
@@ -4221,17 +4312,18 @@ class SharedViewModel : ViewModel() {
         val newRate = rate.coerceIn(10f, 100f)
         _sprayRate.value = newRate
 
-        // Debounce the actual command send to avoid flooding FC when slider moves rapidly
+        // Debounce the actual command send to avoid flooding FC when slider moves rapidly.
+        // Always push SPRAY_PUMP_RATE to the FC (regardless of RC7 / flight mode): the parameter
+        // takes effect immediately for the ongoing mission's DO_SPRAYER, so this is what makes
+        // changing the slider mid-mission actually change the spray. We do NOT toggle DO_SPRAYER
+        // here — enabling/disabling the pump stays with controlSpray()/RC7/the mission.
         sprayRateDebounceJob?.cancel()
         sprayRateDebounceJob = viewModelScope.launch {
             delay(SPRAY_RATE_DEBOUNCE_MS)
-            // Check if RC7 is enabled (spray enabled from RC transmitter)
-            val rc7Enabled = _telemetryState.value.sprayTelemetry.sprayEnabled
-            if (rc7Enabled) {
-                LogUtils.i("SprayControl", "🚿 Rate changed to ${newRate.toInt()}% - updating SPRAY_PUMP_RATE parameter (RC7 enabled)")
-                controlSpray(true) // Re-send with new rate
+            if (repo != null) {
+                applySprayRateToFc()
             } else {
-                LogUtils.d("SprayControl", "Rate set to ${newRate.toInt()}% (RC7 disabled, SPRAY_PUMP_RATE will be set when RC7 enabled)")
+                LogUtils.d("SprayControl", "Rate set to ${newRate.toInt()}% (not connected; will apply when connected)")
             }
         }
     }
@@ -4736,6 +4828,13 @@ class SharedViewModel : ViewModel() {
             "pavamantesting@gmail.com"
         )
         private const val ARMING_CHECK_REQUIRED_VALUE = 4390f
+
+        // Fallback effective spray swath (m) used for area accounting when no auto-mission
+        // line spacing is available (e.g. manual flights). Approximate boom/spray width.
+        const val DEFAULT_SWATH_METERS = 5.0
+        // Fallback nominal spray ground speed (m/s) when no mission speed is planned.
+        // Drives the spray-rate → SPRAY_PUMP_RATE mapping so the slider is not saturated.
+        const val DEFAULT_NOMINAL_SPEED_MS = 5.0
     }
 
     // Current fence configuration uploaded to FC
