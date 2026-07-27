@@ -66,6 +66,12 @@ class UnifiedFlightTracker(
     private var hasTakenOff: Boolean = false
     private val MIN_TAKEOFF_ALTITUDE = 1.5f  // Must reach this altitude to be considered "taken off"
 
+    // One-shot guard so the backend session (session_start → Mission) is opened at most once per
+    // flight, and only AFTER takeoff — a ground arm→disarm cycle never opens a session. NOTE: this
+    // reflects "we attempted to open", not "a backend session exists"; end/summary guards use
+    // WebSocketManager.sessionOpenedForFlight (set only when connect() actually ran) instead.
+    private var sessionOpened: Boolean = false
+
     // Telemetry logging
     private var loggingService: FlightLoggingService? = null
 
@@ -274,12 +280,10 @@ class UnifiedFlightTracker(
         lastLat = telemetry.latitude
         lastLon = telemetry.longitude
 
-        // 🔥 Connect WebSocket for MANUAL mode flights
-        // For AUTO mode, WebSocket is connected in SharedViewModel.startMission()
-        // For MANUAL mode, we connect here when the drone is armed
-        if (missionMode == MissionMode.MANUAL) {
-            connectWebSocketForManualFlight()
-        }
+        // NOTE: the backend session (session_start → Mission) is intentionally NOT opened here
+        // on arm. It is deferred to the takeoff gate in updateFlightData() → openBackendSession()
+        // so a ground arm→disarm cycle never creates a phantom mission. Local tlog logging below
+        // still starts on arm.
 
         // Start database logging
         try {
@@ -313,97 +317,74 @@ class UnifiedFlightTracker(
     }
 
     /**
-     * Connect WebSocket for MANUAL mode flights
-     * This ensures telemetry is sent to backend even for manual flights
+     * Opens the backend WebSocket session (session_start → Mission) for the CURRENT flight.
      *
-     * Note: Only connects WebSocket if user selected MANUAL mode in UI
-     * For AUTOMATIC mode users, WebSocket is connected via SharedViewModel.startMission()
+     * This is the SINGLE authority that fires session_start, and it is called exactly once per
+     * flight — only from the takeoff gate in [updateFlightData], after the drone has genuinely
+     * climbed above [MIN_TAKEOFF_ALTITUDE]. As a result a drone that arms and disarms on the
+     * ground without taking off never creates a phantom Mission. The AUTO paths in
+     * SharedViewModel (startMission / onMissionBecameActive) no longer open the session.
+     *
+     * Handles both MANUAL and AUTO missionModes (flight_mode + STARTED event differ per mode).
      */
-    private suspend fun connectWebSocketForManualFlight() {
+    private suspend fun openBackendSession() {
         try {
-            // Check if user selected MANUAL mode in the UI
-            // If user selected AUTOMATIC, they will use startMission() which handles WebSocket
-            val userSelectedManual = sharedViewModel.userSelectedFlightMode.value == SharedViewModel.UserFlightMode.MANUAL
-            if (!userSelectedManual) {
-                LogUtils.i("UnifiedFlightTracker", "ℹ️ User selected AUTOMATIC mode - skipping manual WebSocket connection")
-                LogUtils.i("UnifiedFlightTracker", "ℹ️ WebSocket will be connected via startMission() for AUTO flights")
+            val mode = missionMode ?: MissionMode.MANUAL
+            val wsManager = WebSocketManager.getInstance()
+            if (wsManager.isConnected) {
+                LogUtils.i("UnifiedFlightTracker", "✅ WebSocket already connected — session already open")
                 return
             }
 
-            val wsManager = WebSocketManager.getInstance()
-            if (!wsManager.isConnected) {
-                LogUtils.i("UnifiedFlightTracker", "🔌 Opening WebSocket connection for MANUAL flight...")
+            LogUtils.i("UnifiedFlightTracker", "🔌 Takeoff detected — opening backend session (mode=$mode)...")
 
-                // Get pilotId and adminId from SessionManager
-                GCSApplication.getInstance()?.let { app ->
-                    val pilotId = SessionManager.getPilotId(app)
-                    val adminId = SessionManager.getAdminId(app)
-                    val superAdminId = SessionManager.getSuperAdminId(app)
-                    wsManager.pilotId = pilotId
-                    wsManager.adminId = adminId
-                    wsManager.superAdminId = superAdminId
-                    LogUtils.i("UnifiedFlightTracker", "📋 Updated WebSocket credentials: pilotId=$pilotId, adminId=$adminId, superAdminId=$superAdminId")
-
-                    // Warn if pilot is not logged in
-                    if (pilotId <= 0) {
-                        LogUtils.e("UnifiedFlightTracker", "⚠️ WARNING: pilotId=$pilotId - User may not be logged in! Telemetry will not be saved.")
-                        return
-                    }
+            // Credentials from SessionManager (latest, in case the pilot logged in after startup)
+            val app = GCSApplication.getInstance()
+            if (app != null) {
+                val pilotId = SessionManager.getPilotId(app)
+                val adminId = SessionManager.getAdminId(app)
+                val superAdminId = SessionManager.getSuperAdminId(app)
+                wsManager.pilotId = pilotId
+                wsManager.adminId = adminId
+                wsManager.superAdminId = superAdminId
+                LogUtils.i("UnifiedFlightTracker", "📋 WebSocket credentials: pilotId=$pilotId, adminId=$adminId, superAdminId=$superAdminId")
+                if (pilotId <= 0) {
+                    LogUtils.e("UnifiedFlightTracker", "⚠️ pilotId=$pilotId — user not logged in; backend session not opened")
+                    return
                 }
-
-                // Get plot name from SharedViewModel if available
-                val plotName = sharedViewModel.currentPlotName.value
-                wsManager.selectedPlotName = plotName
-                LogUtils.i("UnifiedFlightTracker", "📋 Plot name set for WebSocket: $plotName")
-
-                // Set flight mode to MANUAL (this is from UnifiedFlightTracker detection)
-                wsManager.selectedFlightMode = "MANUAL"
-                LogUtils.i("UnifiedFlightTracker", "📋 Flight mode set for WebSocket: MANUAL")
-
-                // Set mission type from SharedViewModel if available, otherwise NONE
-                val missionType = sharedViewModel.selectedMissionType.value.name
-                wsManager.selectedMissionType = missionType
-                LogUtils.i("UnifiedFlightTracker", "📋 Mission type set for WebSocket: $missionType")
-
-                // Set grid setup source from SharedViewModel if available, otherwise NONE
-                val gridSource = sharedViewModel.gridSetupSource.value.name
-                wsManager.gridSetupSource = gridSource
-                LogUtils.i("UnifiedFlightTracker", "📋 Grid setup source set for WebSocket: $gridSource")
-
-                // Connect WebSocket
-                wsManager.connect()
-
-                // Wait for WebSocket to connect and receive session_ack
-                var waitTime = 0
-                while (!wsManager.isConnected && waitTime < 5000) {
-                    delay(100)
-                    waitTime += 100
-                }
-
-                // Additional wait for session_ack and mission_created
-                if (wsManager.isConnected) {
-                    delay(500) // Give time for session_ack and mission_created
-                    LogUtils.i("UnifiedFlightTracker", "✅ WebSocket ready after ${waitTime}ms")
-                }
-
-                // Send mission status STARTED unconditionally.
-                // sendMissionStatus / sendMissionEvent handle offline enqueue
-                // internally if missionId is null or connection is down.
-                wsManager.sendMissionStatus(WebSocketManager.MISSION_STATUS_STARTED)
-                wsManager.sendMissionEvent(
-                    eventType = "MANUAL_FLIGHT_STARTED",
-                    eventStatus = "INFO",
-                    description = "Manual flight started"
-                )
-                LogUtils.i("UnifiedFlightTracker",
-                    "✅ Mission status STARTED sent/queued for manual flight " +
-                    "(connected=${wsManager.isConnected}, missionId=${wsManager.missionId})"
-                )
-            } else {
-                LogUtils.i("UnifiedFlightTracker", "✅ WebSocket already connected for manual flight")
             }
+
+            // Mission metadata (read at open time so it reflects the active mission)
+            wsManager.selectedPlotName = sharedViewModel.currentPlotName.value
+            wsManager.selectedFlightMode = if (mode == MissionMode.AUTO) "AUTOMATIC" else "MANUAL"
+            wsManager.selectedMissionType = sharedViewModel.selectedMissionType.value.name
+            wsManager.gridSetupSource = sharedViewModel.gridSetupSource.value.name
+
+            wsManager.connect()
+
+            // Wait for the socket to come up (mission_created arrives asynchronously afterwards)
+            var waitTime = 0
+            while (!wsManager.isConnected && waitTime < 5000) {
+                delay(100)
+                waitTime += 100
+            }
+            if (wsManager.isConnected) {
+                delay(500) // Give time for session_ack / mission_created
+                LogUtils.i("UnifiedFlightTracker", "✅ WebSocket ready after ${waitTime}ms")
+            }
+
+            // STARTED status + event — sendMission* enqueue offline internally if not yet ready.
+            wsManager.sendMissionStatus(WebSocketManager.MISSION_STATUS_STARTED)
+            wsManager.sendMissionEvent(
+                eventType = if (mode == MissionMode.AUTO) "MISSION_STARTED" else "MANUAL_FLIGHT_STARTED",
+                eventStatus = "INFO",
+                description = if (mode == MissionMode.AUTO) "Auto mission started (takeoff detected)"
+                              else "Manual flight started (takeoff detected)"
+            )
+            LogUtils.i("UnifiedFlightTracker",
+                "✅ Backend session opened (mode=$mode, connected=${wsManager.isConnected}, missionId=${wsManager.missionId})")
         } catch (e: Exception) {
-            LogUtils.e("UnifiedFlightTracker", "❌ Failed to connect WebSocket for manual flight: ${e.message}")
+            LogUtils.e("UnifiedFlightTracker", "❌ Failed to open backend session: ${e.message}")
         }
     }
 
@@ -484,6 +465,15 @@ class UnifiedFlightTracker(
         val altitude = telemetry.altitudeRelative ?: 0f
         if (!hasTakenOff && altitude > groundLevelAltitude + MIN_TAKEOFF_ALTITUDE) {
             hasTakenOff = true
+
+            // TAKEOFF GATE: open the backend session exactly once, now that the drone is genuinely
+            // airborne. Set the one-shot flag synchronously (before the async launch) so repeated
+            // telemetry ticks can't double-open, and launch off the collector so the ~5 s connect
+            // wait doesn't stall telemetry / stop-condition processing.
+            if (!sessionOpened) {
+                sessionOpened = true
+                CoroutineScope(Dispatchers.Main).launch { openBackendSession() }
+            }
         }
 
         // Update distance (if GPS is valid)
@@ -637,9 +627,12 @@ class UnifiedFlightTracker(
         // Capture consumed litres from spray telemetry
         val finalConsumedLitres = sharedViewModel.telemetryState.value.sprayTelemetry.consumedLiters
 
-        // 🔥 Send mission end status for MANUAL flights
-        // For AUTO missions, this is handled in TelemetryRepository or SharedViewModel
-        if (missionMode == MissionMode.MANUAL) {
+        // 🔥 Send mission end status for MANUAL flights (AUTO end is owned by TelemetryRepository).
+        // Gate on the WebSocketManager's own "session opened" flag (set only when connect() actually
+        // ran) rather than the tracker's optimistic takeoff one-shot: if the drone never took off, or
+        // took off but the pilot wasn't logged in (no connect), no backend session exists — skip
+        // entirely so we don't enqueue an orphan end/summary that a later real mission would inherit.
+        if (missionMode == MissionMode.MANUAL && WebSocketManager.getInstance().sessionOpenedForFlight) {
             sendMissionEndForManualFlight(reason, finalTime, finalDistance, finalSprayedDistance, finalConsumedLitres)
         }
 
@@ -713,6 +706,7 @@ class UnifiedFlightTracker(
         lastLat = null
         lastLon = null
         hasTakenOff = false  // Reset takeoff tracking
+        sessionOpened = false  // Next flight must re-open its own backend session after takeoff
     }
 
     // ==================== EDGE CASES ====================

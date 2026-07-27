@@ -313,76 +313,12 @@ class SharedViewModel : ViewModel() {
      * This ensures WebSocket telemetry logging starts regardless of how the mission was initiated.
      */
     private fun onMissionBecameActive() {
-        LogUtils.i("SharedVM", "🚀 Mission became active - checking WebSocket connection")
-        viewModelScope.launch {
-            try {
-                val wsManager = WebSocketManager.getInstance()
-                if (!wsManager.isConnected) {
-                    LogUtils.i("SharedVM", "🔌 Auto-connecting WebSocket for active mission...")
-
-                    // 🔥 CRITICAL: Get latest pilotId and adminId from SessionManager
-                    GCSApplication.getInstance()?.let { app ->
-                        val pilotId = com.example.kftgcs.api.SessionManager.getPilotId(app)
-                        val adminId = com.example.kftgcs.api.SessionManager.getAdminId(app)
-                        val superAdminId = com.example.kftgcs.api.SessionManager.getSuperAdminId(app)
-                        wsManager.pilotId = pilotId
-                        wsManager.adminId = adminId
-                        wsManager.superAdminId = superAdminId
-                        LogUtils.i("SharedVM", "📋 Auto-connect: Updated WebSocket credentials: pilotId=$pilotId, adminId=$adminId, superAdminId=$superAdminId")
-
-                        if (pilotId <= 0) {
-                            LogUtils.e("SharedVM", "⚠️ WARNING: pilotId=$pilotId - User may not be logged in! Telemetry will not be saved.")
-                        }
-                    }
-
-                    // 🔥 Set plot name before connecting
-                    wsManager.selectedPlotName = _currentPlotName.value
-                    LogUtils.i("SharedVM", "📋 Auto-connect: Plot name set: ${_currentPlotName.value}")
-
-                    // 🔥 Set flight mode (Automatic or Manual)
-                    wsManager.selectedFlightMode = _userSelectedFlightMode.value.name
-                    LogUtils.i("SharedVM", "📋 Auto-connect: Flight mode set: ${_userSelectedFlightMode.value.name}")
-
-                    // 🔥 Set mission type (Grid or Waypoint)
-                    wsManager.selectedMissionType = _selectedMissionType.value.name
-                    LogUtils.i("SharedVM", "📋 Auto-connect: Mission type set: ${_selectedMissionType.value.name}")
-
-                    // 🔥 Set grid setup source
-                    wsManager.gridSetupSource = _gridSetupSource.value.name
-                    LogUtils.i("SharedVM", "📋 Auto-connect: Grid setup source set: ${_gridSetupSource.value.name}")
-
-                    wsManager.connect()
-
-                    // Wait for WebSocket to connect
-                    var waitTime = 0
-                    while (!wsManager.isConnected && waitTime < 5000) {
-                        delay(100)
-                        waitTime += 100
-                    }
-
-                    if (wsManager.isConnected) {
-                        delay(500) // Give time for session_ack and mission_created
-                        LogUtils.i("SharedVM", "✅ Auto-connect: WebSocket ready after ${waitTime}ms")
-                    } else {
-                        LogUtils.w("SharedVM", "⚠️ Auto-connect: WebSocket failed to connect within timeout")
-                    }
-
-                    // Send mission started status unconditionally — sendMissionStatus
-                    // handles offline enqueue if socket/missionId not ready yet.
-                    wsManager.sendMissionStatus(WebSocketManager.MISSION_STATUS_STARTED)
-                    wsManager.sendMissionEvent(
-                        eventType = "MISSION_STARTED",
-                        eventStatus = "INFO",
-                        description = "Mission started (auto-detected via mode change)"
-                    )
-                    LogUtils.i("SharedVM", "✅ Auto-connect: Mission status STARTED sent/queued (connected=${wsManager.isConnected}, missionId=${wsManager.missionId})")
-                } else {
-                    LogUtils.i("SharedVM", "✅ WebSocket already connected - no action needed")
-                }
-            } catch (e: Exception) {
-                LogUtils.e("SharedVM", "❌ Auto-connect: Failed to connect WebSocket", e)
-            }
-        }
+        // The backend session (session_start → Mission) is no longer opened here. Opening it the
+        // instant a mission "becomes active" (before takeoff) created phantom missions when the
+        // drone armed but never flew. UnifiedFlightTracker.openBackendSession() now opens the
+        // session from its takeoff gate, for both AUTO and MANUAL flights. Kept as a hook for
+        // observability only.
+        LogUtils.i("SharedVM", "🚀 Mission became active — backend session will open on takeoff")
     }
 
     /**
@@ -1933,19 +1869,26 @@ class SharedViewModel : ViewModel() {
 
             LogUtils.d("SharedVM", "🔥 DEBUG: completionData.sprayedAcres='${completionData.sprayedAcres}', parsed totalSprayedAcres=$totalSprayedAcres")
 
-            wsManager.sendMissionSummary(
-                totalAcres = totalAcres,
-                totalSprayUsed = totalSprayUsed,
-                flyingTimeMinutes = flyingTimeMinutes,
-                averageSpeed = 0.0, // Average speed would need to be calculated
-                alertsCount = wsManager.missionAlertsCount,
-                status = "COMPLETED",
-                projectName = projectName,
-                plotName = plotName,
-                cropType = cropType,
-                totalSprayedAcres = totalSprayedAcres
-            )
-            LogUtils.i("SharedVM", "📤 Mission summary sent with cropType=$cropType")
+            // Only send a summary if a backend session was actually opened this flight (drone took
+            // off). Otherwise this is a ground arm/disarm whose dialog was shown locally — sending
+            // would enqueue an orphan summary that a later real mission would inherit on reconnect.
+            if (wsManager.sessionOpenedForFlight) {
+                wsManager.sendMissionSummary(
+                    totalAcres = totalAcres,
+                    totalSprayUsed = totalSprayUsed,
+                    flyingTimeMinutes = flyingTimeMinutes,
+                    averageSpeed = 0.0, // Average speed would need to be calculated
+                    alertsCount = wsManager.missionAlertsCount,
+                    status = "COMPLETED",
+                    projectName = projectName,
+                    plotName = plotName,
+                    cropType = cropType,
+                    totalSprayedAcres = totalSprayedAcres
+                )
+                LogUtils.i("SharedVM", "📤 Mission summary sent with cropType=$cropType")
+            } else {
+                LogUtils.i("SharedVM", "⏭️ Skipped mission summary — no backend session (drone never took off)")
+            }
         } catch (e: Exception) {
             LogUtils.e("SharedVM", "❌ Failed to send mission summary: ${e.message}", e)
         }
@@ -3674,39 +3617,14 @@ class SharedViewModel : ViewModel() {
                             wsManager.gridSetupSource = _gridSetupSource.value.name
                             LogUtils.i("SharedVM", "📋 Grid setup source set for WebSocket: ${_gridSetupSource.value.name}")
 
-                            wsManager.connect()
-
-                            // 🔥 Wait for WebSocket to connect and receive session_ack before sending status
-                            // This prevents the "socket not ready" error
-                            var waitTime = 0
-                            while (!wsManager.isConnected && waitTime < 5000) {
-                                delay(100)
-                                waitTime += 100
-                            }
-                            // Additional wait for session_ack and mission_created
-                            if (wsManager.isConnected) {
-                                delay(500) // Give time for session_ack and mission_created
-                                LogUtils.i("SharedVM", "✅ WebSocket ready after ${waitTime}ms")
-                            }
+                            // Backend session is NOT opened here. Connecting the moment the user
+                            // presses Start created phantom missions when the drone armed but never
+                            // took off. UnifiedFlightTracker.openBackendSession() opens the session
+                            // (and sends MISSION_STARTED) once the drone actually takes off. The
+                            // credentials/plot/mode set above are re-applied there at open time.
                         }
                     } catch (e: Exception) {
-                        LogUtils.e("SharedVM", "Failed to connect WebSocket", e)
-                    }
-
-                    // ✅ Send mission status STARTED to backend (crash-safe)
-                    // sendMissionStatus/sendMissionEvent handle offline enqueue
-                    // internally if the socket is down or missionId not yet received.
-                    try {
-                        val wsManager = WebSocketManager.getInstance()
-                        wsManager.sendMissionStatus(WebSocketManager.MISSION_STATUS_STARTED)
-                        wsManager.sendMissionEvent(
-                            eventType = "MISSION_STARTED",
-                            eventStatus = "INFO",
-                            description = "Mission started successfully"
-                        )
-                        LogUtils.i("SharedVM", "✅ Mission status STARTED sent/queued (connected=${wsManager.isConnected}, missionId=${wsManager.missionId})")
-                    } catch (e: Exception) {
-                        LogUtils.e("SharedVM", "Failed to send STARTED status", e)
+                        LogUtils.e("SharedVM", "Failed to prepare WebSocket credentials", e)
                     }
 
                     // Start yaw enforcement if yaw hold is enabled

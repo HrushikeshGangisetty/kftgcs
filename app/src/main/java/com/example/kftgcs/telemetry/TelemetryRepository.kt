@@ -1599,6 +1599,8 @@ class MavlinkTelemetryRepository(
                                         // âœ… Send mission status ENDED to backend (crash-safe)
                                         try {
                                             val wsManager = WebSocketManager.getInstance()
+                                            // Only report to backend if a session was opened (drone took off).
+                                            if (wsManager.sessionOpenedForFlight) {
                                             wsManager.sendMissionStatus(WebSocketManager.MISSION_STATUS_ENDED)
                                             wsManager.sendMissionEvent(
                                                 eventType = "MISSION_ENDED",
@@ -1631,6 +1633,7 @@ class MavlinkTelemetryRepository(
                                                 status = "COMPLETED",
                                                 totalSprayedAcres = totalSprayedAcres
                                             )
+                                            }
                                         } catch (e: Exception) {
                                         }
 
@@ -1678,6 +1681,10 @@ class MavlinkTelemetryRepository(
                                 // Send mission status ENDED to backend
                                 try {
                                     val wsManager = WebSocketManager.getInstance()
+                                    // MANUAL end/summary is owned by UnifiedFlightTracker — only report here
+                                    // for AUTO (prevents the double-send), and only if a backend session was
+                                    // opened this flight (drone took off), else we'd enqueue a phantom mission.
+                                    if (wasInAutoMode && wsManager.sessionOpenedForFlight) {
                                     wsManager.sendMissionStatus(WebSocketManager.MISSION_STATUS_ENDED)
                                     wsManager.sendMissionEvent(
                                         eventType = "MISSION_ENDED",
@@ -1707,6 +1714,7 @@ class MavlinkTelemetryRepository(
                                         status = "COMPLETED",
                                         totalSprayedAcres = totalSprayedAcres
                                     )
+                                    }
                                 } catch (e: Exception) {
                                     // Ignore WebSocket errors
                                 }

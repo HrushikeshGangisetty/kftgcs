@@ -23,7 +23,7 @@
         <domain includeSubdomains="true">65.0.76.31</domain>
 
         <!-- Param Management Auth backend (HTTP) -->
-        <domain includeSubdomains="true">13.235.13.233</domain>
+        <domain includeSubdomains="true">13.233.2.207</domain>
 
         <!-- Localhost for emulator/local testing -->
         <domain includeSubdomains="true">localhost</domain>

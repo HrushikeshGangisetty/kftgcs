@@ -15,7 +15,7 @@ import java.util.concurrent.TimeUnit
  * Auth backend for the Param Management secondary login screen.
  *
  * This is a SEPARATE server from the main `kftgcs.com` API exposed by [com.example.kftgcs.api.ApiService].
- * Base URL: http://13.235.13.233:5000  (HTTP — whitelisted in network_security_config.xml)
+ * Base URL: http://13.233.2.207:5000  (HTTP — whitelisted in network_security_config.xml)
  *
  * Endpoints:
  *  - POST /mobile/auth/login    (no auth)  → access + refresh tokens + user profile
@@ -24,7 +24,7 @@ import java.util.concurrent.TimeUnit
  */
 object ParamAuthApiService {
 
-    private const val BASE_URL = "http://13.235.13.233:5000"
+    private const val BASE_URL = "http://13.233.2.207:5000"
 
     private val client: OkHttpClient by lazy {
         OkHttpClient.Builder()

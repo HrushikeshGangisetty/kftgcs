@@ -159,6 +159,16 @@ class WebSocketManager {
     @Volatile
     private var readyForTelemetry = false
 
+    /**
+     * True once a backend session (session_start) has been opened for the CURRENT flight —
+     * i.e. the drone actually took off and [connect] was called. Stays true across mid-flight
+     * reconnects; reset only by [disconnect] (a clean mission end). End/summary senders read
+     * this to skip recording a "mission" for a flight that never opened a session.
+     */
+    @Volatile
+    var sessionOpenedForFlight = false
+        private set
+
     // Timing (debug only)
     private var connectionOpenedTime  = 0L
     private var sessionAckReceivedTime = 0L
@@ -222,6 +232,12 @@ class WebSocketManager {
                     .add(getProductionHost(), pin)
                     .build()
             )
+        } else if (isSecureConnectionEnabled()) {
+            // ⚠️ SECURITY: USE_SECURE_CONNECTION is on but CERTIFICATE_PIN is still the
+            // placeholder, so NO pin is applied — the wss:// link is MITM-exposed. Replace
+            // CERTIFICATE_PIN with the real SHA-256 pin for the production host.
+            android.util.Log.w(TAG,
+                "⚠️ SECURITY: certificate pinning DISABLED (placeholder pin) for ${getProductionHost()}")
         }
         return builder.build()
     }
@@ -276,6 +292,9 @@ class WebSocketManager {
         shouldReconnect   = true
         if (!isReconnecting) reconnectAttempts = 0
         isReconnecting    = false
+        // Committing to a session_start on this open — mark the flight's session as opened.
+        // (Survives reconnects; only disconnect() clears it.)
+        sessionOpenedForFlight = true
 
         try {
             android.util.Log.i(TAG, "┌─── WebSocket CONNECT ───")
@@ -309,6 +328,7 @@ class WebSocketManager {
         telemetryEnabled  = false
         readyForTelemetry = false
         missionId         = null
+        sessionOpenedForFlight = false   // Clean mission end — next flight starts fresh
     }
 
     /** Hard-reset + fresh connect (e.g. from UI "reconnect" button). */
@@ -334,6 +354,11 @@ class WebSocketManager {
 
         override fun onOpen(webSocket: WebSocket, response: Response) {
             android.util.Log.i(TAG, "WebSocket CONNECTED (${response.code})")
+            // If a session was already opened this flight and we still hold its missionId,
+            // this onOpen is a mid-flight RECONNECT — offer that missionId so the backend can
+            // resume the SAME Mission instead of minting a duplicate. Harmless no-op until the
+            // backend honours resume_mission_id (see backend spec, idempotent-mission item).
+            val resumeMissionId = if (sessionOpenedForFlight) missionId else null
             isConnected           = true
             sessionStarted        = false
             readyForTelemetry     = false
@@ -361,6 +386,7 @@ class WebSocketManager {
                     put("flight_mode",       selectedFlightMode)
                     put("mission_type",      selectedMissionType)
                     put("grid_setup_source", gridSetupSource)
+                    if (resumeMissionId != null) put("resume_mission_id", resumeMissionId)
                 }.toString()
 
                 android.util.Log.i(TAG, "┌─── session_start PAYLOAD ───")
@@ -519,6 +545,10 @@ class WebSocketManager {
     fun sendTelemetry() {
         if (!isConnected || !readyForTelemetry || !sessionStarted) return
         if (!::webSocket.isInitialized || missionId == null)       return
+
+        // Drop pre-GPS-lock placeholder positions: lat/lng default to 0.0 before a fix, which
+        // the backend would otherwise persist as a valid "Null Island" (0,0) coordinate.
+        if (lat == 0.0 && lng == 0.0) return
 
         telemetrySendCount++
         // Log on first send and every 60th send to avoid spam

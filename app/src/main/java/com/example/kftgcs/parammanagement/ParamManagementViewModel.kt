@@ -58,7 +58,7 @@ class ParamManagementViewModel(application: Application) : AndroidViewModel(appl
             return
         }
 
-        // ── 2) Real authentication against http://13.235.13.233:5000/mobile/auth/login ──
+        // ── 2) Real authentication against http://13.233.2.207:5000/mobile/auth/login ──
         viewModelScope.launch {
             val result = ParamAuthApiService.login(
                 ParamLoginRequest(email = email.trim(), password = password)
