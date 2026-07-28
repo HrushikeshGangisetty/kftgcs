@@ -12,6 +12,13 @@ import androidx.compose.ui.graphics.Color
  */
 
 /**
+ * How long a distance reading stays displayable after it was received. `DISTANCE_SENSOR` streams at
+ * a few Hz, so anything older than this means the stream stopped (sensor lost the target, CAN hub
+ * dropped out, link died) and the reading must be cleared rather than latched on screen.
+ */
+const val SENSOR_STALE_AFTER_MS = 1500L
+
+/**
  * Wraps MAVLink `DISTANCE_SENSOR` (ID 132) — a single downward-facing rangefinder giving distance to
  * ground (terrain). Raw MAVLink distances are centimetres; all fields here are already in metres.
  */
@@ -22,11 +29,23 @@ data class TerrainData(
     /** True when the sensor reports MAV_SENSOR_ROTATION_PITCH_270 (downward-facing). */
     val isDownwardFacing: Boolean,
     /** Sensor signal quality 1..100, or null when unknown/unset (raw 0). */
-    val signalQuality: Int? = null
+    val signalQuality: Int? = null,
+    /** `System.currentTimeMillis()` when this reading was parsed; see [isStaleAt]. */
+    val receivedAtMs: Long = System.currentTimeMillis()
 ) {
-    /** True when [currentDistanceM] is a usable reading inside the sensor's valid range. */
+    /**
+     * True when [currentDistanceM] is a usable reading strictly inside the sensor's valid range.
+     * Bounds are exclusive: MAVLink's "no target" convention reports a distance at or beyond
+     * `max_distance`, and a reading at or below `min_distance` is equally untrustworthy.
+     */
     val hasValidReading: Boolean
-        get() = maxDistanceM > minDistanceM && currentDistanceM in minDistanceM..maxDistanceM
+        get() = maxDistanceM > minDistanceM &&
+                currentDistanceM > minDistanceM &&
+                currentDistanceM < maxDistanceM
+
+    /** True when this reading is older than [maxAgeMs] and should no longer be displayed. */
+    fun isStaleAt(nowMs: Long, maxAgeMs: Long = SENSOR_STALE_AFTER_MS): Boolean =
+        nowMs - receivedAtMs > maxAgeMs
 }
 
 /**
@@ -40,15 +59,27 @@ data class ProximityData(
     val minDistanceM: Float,
     val maxDistanceM: Float,
     /** Sensor signal quality 1..100, or null when unknown/unset (raw 0). */
-    val signalQuality: Int? = null
+    val signalQuality: Int? = null,
+    /** `System.currentTimeMillis()` when this reading was parsed; see [isStaleAt]. */
+    val receivedAtMs: Long = System.currentTimeMillis()
 ) {
-    /** True when [currentDistanceM] is a usable reading inside the sensor's valid range. */
+    /**
+     * True when [currentDistanceM] is a usable reading strictly inside the sensor's valid range.
+     * Bounds are exclusive: the sensor signals "no target" by reporting a distance at or beyond
+     * `max_distance`, which must NOT render as an obstacle sitting at full scale.
+     */
     val hasValidReading: Boolean
-        get() = maxDistanceM > minDistanceM && currentDistanceM in minDistanceM..maxDistanceM
+        get() = maxDistanceM > minDistanceM &&
+                currentDistanceM > minDistanceM &&
+                currentDistanceM < maxDistanceM
 
     /** Forward obstacle distance in metres when the reading is valid, else null. */
     val forwardDistanceM: Float?
         get() = if (hasValidReading) currentDistanceM else null
+
+    /** True when this reading is older than [maxAgeMs] and should no longer be displayed. */
+    fun isStaleAt(nowMs: Long, maxAgeMs: Long = SENSOR_STALE_AFTER_MS): Boolean =
+        nowMs - receivedAtMs > maxAgeMs
 }
 
 /**

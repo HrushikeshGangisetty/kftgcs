@@ -139,6 +139,10 @@ class MavlinkTelemetryRepository(
     private val lastFcuHeartbeatTime = AtomicLong(0L)
     private val HEARTBEAT_TIMEOUT_MS = 8000L // Increased to 8 seconds for Bluetooth reliability
 
+    // How often the DISTANCE_SENSOR staleness watchdog ticks. Well under SENSOR_STALE_AFTER_MS so a
+    // dropped rangefinder reading clears within ~1.5-1.75s rather than lingering on screen.
+    private val STALE_SENSOR_CHECK_INTERVAL_MS = 250L
+
     // KFT Auth state
     private val _authStatus = MutableStateFlow(AuthResult.FAILED)
     val authStatusFlow: StateFlow<AuthResult> = _authStatus.asStateFlow()
@@ -872,6 +876,30 @@ class MavlinkTelemetryRepository(
                         else -> { /* other orientations are not used by the obstacle/terrain UI */ }
                     }
                 }
+        }
+
+        // DISTANCE_SENSOR staleness watchdog. The collector above is purely event-driven, so with no
+        // watchdog the last reading stays in TelemetryState forever once the stream stops — which is
+        // exactly what "no target" looks like on the wire (ArduPilot stops relaying that rangefinder
+        // instance). Clearing here rather than in the widget means every consumer of terrainData /
+        // proximityData gets the same guarantee. Also clears the moment the FCU link drops, since the
+        // heartbeat watchdog only flips connected/fcuDetected and leaves telemetry fields untouched.
+        scope.launch {
+            while (isActive) {
+                delay(STALE_SENSOR_CHECK_INTERVAL_MS)
+                val now = System.currentTimeMillis()
+                val linkDown = !state.value.fcuDetected
+                _state.update { current ->
+                    val dropTerrain = current.terrainData?.let { linkDown || it.isStaleAt(now) } == true
+                    val dropProximity = current.proximityData?.let { linkDown || it.isStaleAt(now) } == true
+                    when {
+                        dropTerrain && dropProximity -> current.copy(terrainData = null, proximityData = null)
+                        dropTerrain -> current.copy(terrainData = null)
+                        dropProximity -> current.copy(proximityData = null)
+                        else -> current
+                    }
+                }
+            }
         }
 
         // GLOBAL_POSITION_INT
