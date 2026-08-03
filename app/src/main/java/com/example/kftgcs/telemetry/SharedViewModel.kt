@@ -96,6 +96,21 @@ data class UsbDeviceInfo(
 /** Drives the ARMING_CHECK safety-check dialog. See [SharedViewModel.armingCheckState]. */
 enum class ArmingCheckState { HIDDEN, PROMPT_WRITE, WRITING, WRITE_FAILED, PROMPT_REBOOT }
 
+/**
+ * The failsafe configuration the pilot must acknowledge on every connection before the
+ * drone can be armed. See [SharedViewModel.preflightFailsafeSummary].
+ */
+data class PreflightFailsafeSummary(
+    /** Low voltage level 1 (warning) threshold in volts — mirrors BATT_LOW_VOLT. */
+    val lowVoltLevel1: Float,
+    /** Low voltage level 2 (critical) threshold in volts — mirrors BATT_CRT_VOLT. */
+    val criticalVoltage: Float,
+    /** Tank empty action; reads "HOVER" or "HOVER / RTL (Manual / Auto)" when they differ. */
+    val tankEmptyAction: String,
+    /** Action the GCS takes at the critical voltage: HOVER / RTL / LAND. */
+    val batteryFailsafeAction: String
+)
+
 class SharedViewModel : ViewModel() {
 
     // TextToSpeech manager for voice announcements
@@ -118,6 +133,15 @@ class SharedViewModel : ViewModel() {
     private var voltageAlertLevel2Triggered = false  // Once true, action won't fire again until disarm→arm
     private val VOLTAGE_ALERT_INTERVAL_MS = 3000L // Alert every 3 seconds for Level 1
     private val VOLTAGE_CRITICAL_INTERVAL_MS = 5000L // Re-alert every 5 seconds for Level 2 if still critical
+
+    // Altitude ceiling failsafe tracking (FENCE_ALT_MAX)
+    private var altitudeLimitActionTriggered = false // One-shot per arm cycle, like the voltage action
+    private var lastAltitudeWarnTime = 0L
+    private var lastAltitudeLimitTime = 0L
+    private val ALTITUDE_WARN_INTERVAL_MS = 4000L
+    private val ALTITUDE_LIMIT_INTERVAL_MS = 5000L
+    /** Start warning this far below the ceiling so the pilot can level off before hitting it. */
+    private val ALTITUDE_WARN_MARGIN_M = 10f
 
     init {
         // Setup emergency RTL callback for crash handler
@@ -146,17 +170,23 @@ class SharedViewModel : ViewModel() {
 
         // 🔋 BATTERY VOLTAGE FAILSAFE MONITORING
         // Monitors battery voltage against user-configured thresholds
+        // 🛑 ALTITUDE CEILING FAILSAFE MONITORING (FENCE_ALT_MAX)
         viewModelScope.launch {
             _telemetryState.collect { state ->
                 // Only monitor when connected and armed (in flight)
-                if (state.connected && state.armed && state.voltage != null) {
-                    handleBatteryVoltageFailsafe(state.voltage)
+                if (state.connected && state.armed) {
+                    state.voltage?.let { handleBatteryVoltageFailsafe(it) }
+                    state.altitudeRelative?.let { handleAltitudeFailsafe(it) }
                 } else if (!state.armed) {
                     // Reset tracking when disarmed — allows failsafe to fire again on next arm
                     voltageAlertLevel2Triggered = false
                     lastVoltageAlertLevel1Time = 0L
                     lastVoltageAlertLevel2Time = 0L
                     repository?.setVoltageFailsafeActive(false)
+
+                    altitudeLimitActionTriggered = false
+                    lastAltitudeWarnTime = 0L
+                    lastAltitudeLimitTime = 0L
                 }
             }
         }
@@ -306,6 +336,125 @@ class SharedViewModel : ViewModel() {
         }
         // NOTE: No voltage recovery reset here. voltageAlertLevel2Triggered only resets on DISARM.
         // This ensures the failsafe action is truly one-shot per arm cycle.
+    }
+
+    /**
+     * Altitude ceiling failsafe, backed by the FENCE_ALT_MAX parameter.
+     *
+     * Why the GCS enforces this rather than leaving it to the FC: the flight controller
+     * only acts on FENCE_ALT_MAX when FENCE_ENABLE is on AND bit 0 (altitude) is set in
+     * FENCE_TYPE. On a drone flying without a geofence uploaded neither is guaranteed, so
+     * the ceiling would silently do nothing. This mirrors how the GCS already owns the
+     * critical-battery action (see [handleBatteryVoltageFailsafe]) instead of letting the
+     * FC race it.
+     *
+     * Warning zone: within [ALTITUDE_WARN_MARGIN_M] of the ceiling → TTS + notification only.
+     * At/above the ceiling: the configured action (HOVER→BRAKE / RTL / LAND) fires ONCE per
+     * arm cycle. One-shot for the same reason the battery action is: a pilot who deliberately
+     * takes back control must not be fought on every telemetry frame. TTS keeps repeating.
+     */
+    private fun handleAltitudeFailsafe(altitude: Float) {
+        val context = GCSApplication.getInstance() ?: return
+        if (!isAltitudeFailsafeEnabled(context)) return
+
+        val ceiling = getMaxAltitude(context)
+        if (ceiling <= 0f) return   // 0 / negative means "no ceiling configured"
+
+        val action = getMaxAltitudeAction(context)
+        val now = System.currentTimeMillis()
+
+        if (altitude >= ceiling) {
+
+            // ═══ PRIORITY GUARDS: never cancel a higher-priority recovery ═══
+            // Same reasoning as the voltage failsafe's geofence guard: while the FC is
+            // pulling the drone back inside a breached fence, or while the critical-battery
+            // action is bringing it home, issuing our own DO_SET_MODE here would override
+            // that recovery and strand the drone. Suppress the action WITHOUT consuming the
+            // one-shot, and keep warning the pilot.
+            val deferReason = when {
+                _geofenceEnabled.value && _geofenceViolationDetected.value -> "geofence recovery in progress"
+                voltageAlertLevel2Triggered -> "critical-battery action in progress"
+                else -> null
+            }
+            if (!altitudeLimitActionTriggered && deferReason != null) {
+                if (now - lastAltitudeLimitTime >= ALTITUDE_LIMIT_INTERVAL_MS) {
+                    lastAltitudeLimitTime = now
+                    LogUtils.w("AltitudeFailsafe", "⏸️ Altitude ${altitude}m over ceiling ${ceiling}m but $deferReason — deferring $action (one-shot NOT consumed)")
+                    ttsManager?.speak("Above altitude limit.")
+                }
+                return
+            }
+
+            if (!altitudeLimitActionTriggered) {
+                // ═══ FIRST TRIGGER: stop the climb (one-shot per arm cycle) ═══
+                altitudeLimitActionTriggered = true
+                lastAltitudeLimitTime = now
+
+                LogUtils.i("AltitudeFailsafe", "⛔ ALTITUDE LIMIT: ${altitude}m >= FENCE_ALT_MAX ${ceiling}m — triggering $action (one-shot), mode=${_telemetryState.value.mode}")
+
+                ttsManager?.speak("Altitude limit ${ceiling.toInt()} meters reached. Activating $action.")
+                addNotification(
+                    Notification(
+                        message = "⛔ ALTITUDE LIMIT: ${String.format(Locale.US, "%.0f", altitude)}m ≥ ${String.format(Locale.US, "%.0f", ceiling)}m — activating $action",
+                        type = NotificationType.ERROR
+                    )
+                )
+
+                viewModelScope.launch {
+                    // BRAKE holds both position and altitude, so it is the right "stop
+                    // climbing" action; RTL/LAND are offered for pilots who want the
+                    // drone brought down instead.
+                    val targetMode = when (action.uppercase()) {
+                        "RTL" -> MavMode.RTL
+                        "LAND" -> MavMode.LAND
+                        else -> MavMode.BRAKE
+                    }
+                    val targetModeName = when (targetMode) {
+                        MavMode.RTL -> "RTL"
+                        MavMode.LAND -> "LAND"
+                        else -> "BRAKE"
+                    }
+
+                    val result = repo?.changeMode(targetMode) ?: false
+                    if (result) {
+                        LogUtils.i("AltitudeFailsafe", "✅ $targetModeName activated for altitude limit")
+                    } else {
+                        LogUtils.e("AltitudeFailsafe", "❌ Failed to activate $targetModeName for altitude limit")
+                    }
+
+                    try {
+                        WebSocketManager.getInstance().sendMissionEvent(
+                            eventType = "ALTITUDE_LIMIT",
+                            eventStatus = "CRITICAL",
+                            description = "Altitude ${String.format(Locale.US, "%.1f", altitude)}m reached ceiling ${String.format(Locale.US, "%.1f", ceiling)}m - $targetModeName activated"
+                        )
+                    } catch (e: Exception) {
+                        LogUtils.e("AltitudeFailsafe", "Failed to send altitude limit event", e)
+                    }
+                }
+            } else if (now - lastAltitudeLimitTime >= ALTITUDE_LIMIT_INTERVAL_MS) {
+                // ═══ REPEAT: TTS only, action already taken this arm cycle ═══
+                lastAltitudeLimitTime = now
+                LogUtils.i("AltitudeFailsafe", "⛔ Still above ceiling: ${altitude}m >= ${ceiling}m (action already taken this arm cycle)")
+                ttsManager?.speak("Above altitude limit. ${altitude.toInt()} meters.")
+            }
+        }
+        // Approaching the ceiling — alert only, so the pilot can level off themselves.
+        else if (altitude >= ceiling - ALTITUDE_WARN_MARGIN_M) {
+            if (now - lastAltitudeWarnTime >= ALTITUDE_WARN_INTERVAL_MS) {
+                lastAltitudeWarnTime = now
+                LogUtils.i("AltitudeFailsafe", "⚠️ Approaching altitude limit: ${altitude}m of ${ceiling}m")
+                ttsManager?.speak("Approaching altitude limit. ${altitude.toInt()} meters.")
+                addNotification(
+                    Notification(
+                        message = "⚠️ Approaching altitude limit: ${String.format(Locale.US, "%.0f", altitude)}m of ${String.format(Locale.US, "%.0f", ceiling)}m",
+                        type = NotificationType.WARNING
+                    )
+                )
+            }
+        }
+        // NOTE: like the voltage failsafe, altitudeLimitActionTriggered only resets on DISARM,
+        // so descending back below the ceiling does not re-arm the action mid-flight.
     }
 
     /**
@@ -715,11 +864,24 @@ class SharedViewModel : ViewModel() {
         return prefs.getString(key, legacy) ?: legacy
     }
 
-    // ═══ Pack-aware voltage thresholds (mixed 6S / 12S fleet) ═══
-    // A single hardcoded default (e.g. 21V or 42V) is wrong for one of the two pack
-    // types: 42V is a NORMAL in-flight voltage for a 12S pack but an impossible one
-    // for 6S. So when the user hasn't explicitly configured thresholds, derive them
-    // from the live summed pack voltage instead of guessing a fixed number.
+    /**
+     * The tank empty action as a single display line for the pre-arm summary popup.
+     * Collapses to one word when Manual and Auto agree, which is the common case.
+     */
+    private fun describeTankEmptyAction(context: Context): String {
+        val manual = getTankEmptyAction(context, isAuto = false)
+        val auto = getTankEmptyAction(context, isAuto = true)
+        return if (manual.equals(auto, ignoreCase = true)) manual
+        else "$manual / $auto (Manual / Auto)"
+    }
+
+    // ═══ Voltage thresholds — 12S defaults with a 6S fallback ═══
+    // The out-of-the-box thresholds are DEFAULT_LOW_VOLT_1 / DEFAULT_LOW_VOLT_2 (43V /
+    // 42V), which suit the 12S fleet. They cannot be applied blindly to a 6S pack: 42V
+    // is a normal in-flight voltage for 12S but an impossible one for 6S, so a 6S drone
+    // would sit below its "critical" threshold from the moment it powered on and trip
+    // the failsafe on the first arm. So when live telemetry clearly shows a 6S pack we
+    // derive the thresholds per-cell instead. An explicitly saved value beats both.
     private val PER_CELL_WARN_V = 3.6f   // per-cell low/warning voltage
     private val PER_CELL_CRIT_V = 3.5f   // per-cell critical voltage
 
@@ -737,32 +899,32 @@ class SharedViewModel : ViewModel() {
         }
     }
 
-    /** Pack-aware default warning (level 1) voltage; falls back to 6S when unknown. */
+    /** Default warning (level 1) voltage: 43V, or the per-cell figure on a known 6S pack. */
     private fun defaultWarnVoltage(packVoltage: Float?): Float =
-        (detectCellCount(packVoltage) ?: 6) * PER_CELL_WARN_V
+        if (detectCellCount(packVoltage) == 6) 6 * PER_CELL_WARN_V else DEFAULT_LOW_VOLT_1
 
-    /** Pack-aware default critical (level 2) voltage; falls back to 6S when unknown. */
+    /** Default critical (level 2) voltage: 42V, or the per-cell figure on a known 6S pack. */
     private fun defaultCritVoltage(packVoltage: Float?): Float =
-        (detectCellCount(packVoltage) ?: 6) * PER_CELL_CRIT_V
+        if (detectCellCount(packVoltage) == 6) 6 * PER_CELL_CRIT_V else DEFAULT_LOW_VOLT_2
 
     /**
      * Get the low-voltage level 1 (warning) threshold.
-     * Honors an explicitly saved value; otherwise derives a pack-aware default
-     * from the live pack voltage so a 12S pack isn't held to a 6S threshold.
+     * Honors an explicitly saved value; otherwise 43V, unless the live pack voltage
+     * identifies a 6S drone that a 12S threshold would be nonsensical for.
      */
     private fun getLowVoltLevel1(context: Context): Float {
         val prefs = context.getSharedPreferences("failsafe_options", Context.MODE_PRIVATE)
-        if (prefs.contains("low_volt_level_1")) return prefs.getFloat("low_volt_level_1", 22.2f)
+        if (prefs.contains("low_volt_level_1")) return prefs.getFloat("low_volt_level_1", DEFAULT_LOW_VOLT_1)
         return defaultWarnVoltage(_telemetryState.value.voltage)
     }
 
     /**
      * Get the low-voltage level 2 (critical) threshold.
-     * Honors an explicitly saved value; otherwise derives a pack-aware default.
+     * Honors an explicitly saved value; otherwise 42V, with the same 6S fallback.
      */
     private fun getLowVoltLevel2(context: Context): Float {
         val prefs = context.getSharedPreferences("failsafe_options", Context.MODE_PRIVATE)
-        if (prefs.contains("low_volt_level_2")) return prefs.getFloat("low_volt_level_2", 21.0f)
+        if (prefs.contains("low_volt_level_2")) return prefs.getFloat("low_volt_level_2", DEFAULT_LOW_VOLT_2)
         return defaultCritVoltage(_telemetryState.value.voltage)
     }
 
@@ -772,6 +934,36 @@ class SharedViewModel : ViewModel() {
     private fun getLowVoltLevel2Action(context: Context): String {
         val prefs = context.getSharedPreferences("failsafe_options", Context.MODE_PRIVATE)
         return prefs.getString("low_volt_level_2_action", "HOVER") ?: "HOVER"
+    }
+
+    // ═══ Altitude ceiling (FENCE_ALT_MAX) ═══
+
+    /** Whether the altitude ceiling failsafe is armed. On by default — it's a safety limit. */
+    private fun isAltitudeFailsafeEnabled(context: Context): Boolean {
+        val prefs = context.getSharedPreferences("failsafe_options", Context.MODE_PRIVATE)
+        return prefs.getBoolean("max_altitude_enabled", true)
+    }
+
+    /** Configured altitude ceiling in metres AGL — mirrors the FC's FENCE_ALT_MAX. */
+    private fun getMaxAltitude(context: Context): Float {
+        val prefs = context.getSharedPreferences("failsafe_options", Context.MODE_PRIVATE)
+        return prefs.getFloat("max_altitude", DEFAULT_MAX_ALTITUDE_M)
+    }
+
+    /** What the GCS does when the ceiling is reached: HOVER (BRAKE) / RTL / LAND. */
+    private fun getMaxAltitudeAction(context: Context): String {
+        val prefs = context.getSharedPreferences("failsafe_options", Context.MODE_PRIVATE)
+        return prefs.getString("max_altitude_action", "HOVER") ?: "HOVER"
+    }
+
+    /**
+     * The altitude ceiling other components should respect (geofence upload, mission
+     * planning). Returns the configured value, or null when the failsafe is disabled.
+     */
+    fun getAltitudeCeiling(): Float? {
+        val context = GCSApplication.getInstance() ?: return null
+        if (!isAltitudeFailsafeEnabled(context)) return null
+        return getMaxAltitude(context).takeIf { it > 0f }
     }
 
     fun speak(text: String) {
@@ -1078,9 +1270,16 @@ class SharedViewModel : ViewModel() {
     val servoOutputRaw: SharedFlow<com.divpundir.mavlink.definitions.common.ServoOutputRaw>
         get() = repo?.servoOutputRaw ?: MutableSharedFlow()
 
-    // Expose PARAM_VALUE flow for parameter reading
+    // Expose PARAM_VALUE flow for parameter reading.
+    // The no-repo fallback is a single long-lived instance: returning a fresh
+    // MutableSharedFlow() on every property read means a collector that subscribes
+    // before the repository is attached ends up on a throwaway flow and silently
+    // never receives anything.
+    private val noRepoParamValueFlow =
+        MutableSharedFlow<com.divpundir.mavlink.definitions.common.ParamValue>()
+
     val paramValue: SharedFlow<com.divpundir.mavlink.definitions.common.ParamValue>
-        get() = repo?.paramValue ?: MutableSharedFlow()
+        get() = repo?.paramValue ?: noRepoParamValueFlow
 
     // --- Flight state management (for UnifiedFlightTracker) ---
     /**
@@ -1314,6 +1513,34 @@ class SharedViewModel : ViewModel() {
     }
 
     /**
+     * Request a single parameter by its index rather than its name.
+     *
+     * Used to fill gaps after a PARAM_REQUEST_LIST download: the autopilot streams the
+     * list once and never repeats it, so any PARAM_VALUE dropped by the telemetry link
+     * is gone unless we ask for that index again. The reply arrives on [paramValue] like
+     * any other parameter.
+     */
+    suspend fun requestParameterByIndex(paramIndex: Int) {
+        repo?.let { repository ->
+            try {
+                val paramRequestRead = com.divpundir.mavlink.definitions.common.ParamRequestRead(
+                    targetSystem = repository.fcuSystemId,
+                    targetComponent = repository.fcuComponentId,
+                    paramId = "",
+                    paramIndex = paramIndex.toShort()
+                )
+                repository.connection.trySendUnsignedV2(
+                    repository.gcsSystemId,
+                    repository.gcsComponentId,
+                    paramRequestRead
+                )
+            } catch (e: Exception) {
+                LogUtils.e("FullParamList", "Failed to request param index $paramIndex", e)
+            }
+        }
+    }
+
+    /**
      * Read a parameter value from the autopilot by name.
      * Subscribes to the paramValue flow FIRST, then sends PARAM_REQUEST_READ,
      * so the response is never missed due to race conditions.
@@ -1392,16 +1619,22 @@ class SharedViewModel : ViewModel() {
                     paramType = com.divpundir.mavlink.definitions.common.MavParamType.REAL32.wrap()
                 )
 
-                repository.connection.trySendUnsignedV2(
-                    repository.gcsSystemId,
-                    repository.gcsComponentId,
-                    paramSet
-                )
-
-                // Wait for PARAM_VALUE response confirming the set
+                // Wait for the PARAM_VALUE response confirming the set. The PARAM_SET is sent from
+                // onSubscription so it goes out only AFTER this collector is attached: the flow has
+                // no replay, so sending first raced the ack — a fast FC could answer before the
+                // collector existed, the ack was dropped, and a successful write was reported as
+                // failed, stalling every caller that gates on it for the full timeout.
+                // (readParameter() collects before sending for the same reason.)
                 // Note: paramId from drone may contain null-terminator chars, so we must clean before comparing
                 return withTimeoutOrNull(timeoutMs) {
                     paramValue
+                        .onSubscription {
+                            repository.connection.trySendUnsignedV2(
+                                repository.gcsSystemId,
+                                repository.gcsComponentId,
+                                paramSet
+                            )
+                        }
                         .filter { it.paramId.trim().replace("\u0000", "") == paramId }
                         .first()
                 }
@@ -1753,7 +1986,9 @@ class SharedViewModel : ViewModel() {
     var currentFieldAreaAcres: Double? = null
         private set
 
-    // Planned spray ground speed (m/s) for the active mission; drives the spray-rate mapping.
+    // Planned spray ground speed (m/s) for the active mission, recorded with the other mission
+    // params. NOT used to scale the spray rate — the slider writes SPRAY_PUMP_RATE 1:1 (see
+    // [applySprayRateToFc]); the FC's own speed-proportional pump model is what applies speed.
     @Volatile
     var currentNominalSpeedMs: Double = DEFAULT_NOMINAL_SPEED_MS
         private set
@@ -2377,7 +2612,9 @@ class SharedViewModel : ViewModel() {
             // Use the new Mission Planner-style upload
             val config = FenceConfiguration(
                 zones = listOf(FenceZone.Polygon(points = polygon, isInclusion = true)),
-                altitudeMax = 120f,  // Default max altitude
+                // Use the configured altitude ceiling so the FC's alt fence and the GCS
+                // altitude failsafe enforce the same limit, instead of a hardcoded 120 m.
+                altitudeMax = getAltitudeCeiling() ?: DEFAULT_MAX_ALTITUDE_M,
                 action = FenceAction.BRAKE,  // Recommended for spray drones
                 margin = 3.0f
             )
@@ -2865,6 +3102,10 @@ class SharedViewModel : ViewModel() {
 
                 delay(500)
 
+                // Make sure the pump is off before the drone starts flying back to the resume
+                // point. The mission's DO_SPRAYER(1) turns it on again on arrival.
+                ensureSprayerOffForTransit()
+
                 // Step 8: Switch to AUTO Mode
                 onProgress("Switching to AUTO mode...")
                 val currentMode = _telemetryState.value.mode
@@ -2928,11 +3169,11 @@ class SharedViewModel : ViewModel() {
                 lastUploadedMissionItems = resequenced.toList()
                 LogUtils.i("SharedVM", "✅ Mission upload status updated: uploaded=$_missionUploaded, count=$lastUploadedCount")
 
-                // ✅ Restore spray if it was active before pause
+                // ✅ Spray restore is handled by the uploaded mission's DO_SPRAYER items
+                // (see filterWaypointsForResume) — off for the transit leg, back on when the
+                // drone reaches the resume waypoint. Do NOT fire an immediate spray-on here.
                 if (_sprayWasActiveBeforePause) {
-                    LogUtils.i("SharedVM", "💧 Restoring spray after resume from waypoint $resumeWaypoint (was active before pause)")
-                    delay(500) // Small delay to ensure mode change is complete
-                    setSprayEnabled(true)
+                    LogUtils.i("SharedVM", "💧 Spray will resume at waypoint $resumeWaypoint via the mission's DO_SPRAYER item (off during transit)")
                     _sprayWasActiveBeforePause = false
                 }
 
@@ -3098,6 +3339,10 @@ class SharedViewModel : ViewModel() {
                 // Small delay to ensure FC is ready
                 delay(300)
 
+                // Pump off before the drone starts flying back to the resume point. The
+                // resume mission's DO_SPRAYER(1) turns it on again once it gets there.
+                ensureSprayerOffForTransit()
+
                 // Send mission start command
                 val startSuccess = repo?.startMission() ?: false
 
@@ -3114,11 +3359,12 @@ class SharedViewModel : ViewModel() {
                         )
                     }
 
-                    // ✅ Restore spray if it was active before pause
+                    // ✅ Spray restore is handled by the resume mission that was already
+                    // uploaded (processResumePoint / resumeMissionFromManualPoint), which
+                    // brackets the resume waypoint with DO_SPRAYER(0)/DO_SPRAYER(1). Turning
+                    // spray on here would spray the whole transit leg to that waypoint.
                     if (_sprayWasActiveBeforePause) {
-                        LogUtils.i("SharedVM", "💧 Restoring spray after AUTO mode change (was active before pause)")
-                        delay(500) // Small delay to ensure mode change is complete
-                        setSprayEnabled(true)
+                        LogUtils.i("SharedVM", "💧 Spray will resume at the resume point via the mission's DO_SPRAYER item (off during transit)")
                         _sprayWasActiveBeforePause = false
                     }
 
@@ -3851,6 +4097,10 @@ class SharedViewModel : ViewModel() {
 
                 delay(500)
 
+                // Make sure the pump is off before the drone starts flying back to the resume
+                // point. The mission's DO_SPRAYER(1) turns it on again on arrival.
+                ensureSprayerOffForTransit()
+
                 // Step 8: Switch to AUTO Mode
                 onProgress("Step 8/8: Switching to AUTO mode...")
                 val currentMode = _telemetryState.value.mode
@@ -3914,11 +4164,14 @@ class SharedViewModel : ViewModel() {
                 lastUploadedMissionItems = resequenced.toList()
                 LogUtils.i("ResumeMission", "✅ Mission upload status updated: uploaded=$_missionUploaded, count=$lastUploadedCount")
 
-                // ✅ Restore spray if it was active before pause
+                // ✅ Spray restore is handled BY THE MISSION, not from here.
+                // filterWaypointsForResume already bracketed the resume waypoint with
+                // DO_SPRAYER(0) → resume WP → DO_SPRAYER(1), so the FC turns the pump back
+                // on only once the drone has actually arrived at the resume point. Firing
+                // setSprayEnabled(true) here as well is what made it spray the whole transit
+                // leg from wherever the pilot left the drone back to that point.
                 if (_sprayWasActiveBeforePause) {
-                    LogUtils.i("ResumeMission", "💧 Restoring spray after resume from waypoint $resumeWaypointNumber (was active before pause)")
-                    delay(500) // Small delay to ensure mode change is complete
-                    setSprayEnabled(true)
+                    LogUtils.i("ResumeMission", "💧 Spray will resume at waypoint $resumeWaypointNumber via the mission's DO_SPRAYER item (off during transit)")
                     _sprayWasActiveBeforePause = false
                 }
 
@@ -3962,9 +4215,12 @@ class SharedViewModel : ViewModel() {
                     if (result) {
                         _telemetryState.update { it.copy(missionPaused = false) }
 
-                        // ✅ Restore spray if it was active before pause
+                        // ✅ Restore spray if it was active before pause.
+                        // No transit leg in this branch: the FC keeps its existing mission index,
+                        // so the drone carries on along the same line it was interrupted on and
+                        // spray should come straight back.
                         if (_sprayWasActiveBeforePause) {
-                            LogUtils.i("SharedVM", "💧 Restoring spray after resume (was active before pause)")
+                            LogUtils.i("SharedVM", "💧 Restoring spray — mission continues from the current index, no transit leg")
                             delay(500) // Small delay to ensure mode change is complete
                             setSprayEnabled(true)
                             _sprayWasActiveBeforePause = false
@@ -4003,6 +4259,10 @@ class SharedViewModel : ViewModel() {
 
                 delay(500)
 
+                // Pump off for the leg back to $pausedWaypoint; restoreSprayOnArrival below
+                // turns it on again once the drone actually gets there.
+                ensureSprayerOffForTransit()
+
                 // Switch to AUTO mode
                 val result = repo?.changeMode(MavMode.AUTO) ?: false
 
@@ -4014,11 +4274,13 @@ class SharedViewModel : ViewModel() {
                         )
                     }
 
-                    // ✅ Restore spray if it was active before pause
+                    // ✅ Restore spray only once the drone has actually REACHED the waypoint.
+                    // This path jumps the FC's mission index without re-uploading a mission, so
+                    // there is no DO_SPRAYER item to gate on — but the drone still has to fly
+                    // from wherever it is to $pausedWaypoint, and that leg must stay dry.
                     if (_sprayWasActiveBeforePause) {
-                        LogUtils.i("SharedVM", "💧 Restoring spray after resume from waypoint $pausedWaypoint (was active before pause)")
-                        delay(500) // Small delay to ensure mode change is complete
-                        setSprayEnabled(true)
+                        LogUtils.i("SharedVM", "💧 Spray will restore on arrival at waypoint $pausedWaypoint (off during transit)")
+                        restoreSprayOnArrival(pausedWaypoint)
                         _sprayWasActiveBeforePause = false
                     }
 
@@ -4082,61 +4344,60 @@ class SharedViewModel : ViewModel() {
     // - Uses MAV_CMD_DO_SPRAYER (216) to enable/disable spraying
     // - Uses SPRAY_PUMP_RATE parameter to control the application rate
     //
-    // IMPORTANT — AC_Sprayer semantics (why the slider must be mapped, not sent 1:1):
-    // SPRAY_PUMP_RATE is the pump output PERCENTAGE PER 1 m/s of ground speed. The library
-    // computes pump output% ≈ ground_speed_ms × SPRAY_PUMP_RATE, floored at SPRAY_PUMP_MIN and
-    // capped at 100%. So sending the raw slider % (10–100) 1:1 saturates at 100% for almost the
-    // whole range in flight, and collapses to the SPRAY_PUMP_MIN floor at rest — which is why
-    // every slider value produced the same spray. We instead:
-    //   1. force SPRAY_PUMP_MIN = 0 (remove the floor so low values aren't clamped up), and
-    //   2. map slider% → SPRAY_PUMP_RATE = slider% / nominalSpeed, so that AT the nominal spray
-    //      speed the pump output% ≈ slider% and the full 10–100% range is usable/monotonic.
-    // NOTE: output stays speed-proportional (agriculturally correct: constant L per area), so on
-    // the ground (speed ≈ 0) all rates spray ≈ 0 — rate differences are only visible in flight.
+    // The slider writes SPRAY_PUMP_RATE 1:1 — slider 80% → SPRAY_PUMP_RATE 80. The value in the
+    // app and the value on the FC are always the same number, so a param refresh (or a manual
+    // param write) agrees with the slider instead of contradicting it.
+    //
+    // Know what that number means on the FC: ArduPilot defines SPRAY_PUMP_RATE as the pump output
+    // percentage PER 1 m/s of ground speed — AC_Sprayer computes pump output% = ground_speed_ms ×
+    // SPRAY_PUMP_RATE, floored at SPRAY_PUMP_MIN and capped at 100%. So the slider is NOT the pump
+    // output percentage in flight: at 4 m/s any value above ~25 already commands full pump, which
+    // makes the top of the slider range flat. Spray density is tuned with the slider and the
+    // mission's ground speed together.
+    //
+    // We deliberately do NOT touch SPRAY_PUMP_MIN: it is the pilot's pump floor, set in Spraying
+    // Configuration, and nothing here needs it moved.
     private val MAV_CMD_DO_SPRAYER = 216u
 
-    // Valid clamp for the SPRAY_PUMP_RATE parameter we push to the FC.
-    private val SPRAY_PUMP_RATE_MIN = 0.5f
+    // Valid clamp for the SPRAY_PUMP_RATE parameter we push to the FC (its documented range).
+    private val SPRAY_PUMP_RATE_MIN = 0f
     private val SPRAY_PUMP_RATE_MAX = 100f
 
-    // SPRAY_PUMP_MIN is forced to 0 once per session so the slider mapping is monotonic.
-    @Volatile
-    private var sprayPumpMinZeroed = false
+    // Serializes rate writes so two overlapping applies can't reach the FC out of order.
+    private val sprayRateWriteMutex = kotlinx.coroutines.sync.Mutex()
 
     /**
-     * Push the current slider rate to the FC as SPRAY_PUMP_RATE, mapped for AC_Sprayer's
-     * speed-proportional model (see the block comment above). Also ensures SPRAY_PUMP_MIN = 0
-     * once per session so low slider values are not floored. Safe to call whether or not the
-     * sprayer is currently enabled — SPRAY_PUMP_RATE takes effect immediately for an ongoing
-     * mission's DO_SPRAYER, which is what makes mid-mission slider changes work.
+     * Push the current slider rate to the FC as SPRAY_PUMP_RATE (1:1 — see the block comment
+     * above). Safe to call whether or not the sprayer is currently enabled: SPRAY_PUMP_RATE takes
+     * effect immediately for an ongoing mission's DO_SPRAYER, which is what makes mid-mission
+     * slider changes work.
      */
     private suspend fun applySprayRateToFc() {
         if (repo == null) {
             LogUtils.e("SprayControl", "✗ Cannot set spray rate - not connected to drone")
             return
         }
-        val slider = _sprayRate.value.coerceIn(10f, 100f)
-        val nominalSpeed = currentNominalSpeedMs.coerceAtLeast(0.5).toFloat()
-        val pumpRate = (slider / nominalSpeed).coerceIn(SPRAY_PUMP_RATE_MIN, SPRAY_PUMP_RATE_MAX)
 
+        sprayRateWriteMutex.lock()
         try {
-            // One-time: remove the pump floor so the slider is monotonic across its whole range.
-            if (!sprayPumpMinZeroed) {
-                val minAck = setParameter("SPRAY_PUMP_MIN", 0f)
-                if (minAck != null) {
-                    sprayPumpMinZeroed = true
-                    LogUtils.i("SprayControl", "✓ SPRAY_PUMP_MIN set to 0 (monotonic slider)")
-                } else {
-                    LogUtils.w("SprayControl", "⚠ SPRAY_PUMP_MIN=0 not confirmed (will retry next change)")
-                }
-            }
+            // Read the slider HERE, not at call time: a write that queued behind the mutex must
+            // push the rate the pilot ended up on, not the one current when it was queued.
+            val pumpRate = _sprayRate.value.coerceIn(SPRAY_PUMP_RATE_MIN, SPRAY_PUMP_RATE_MAX)
 
-            val rateAck = setParameter("SPRAY_PUMP_RATE", pumpRate)
+            // PARAM_SET is fire-and-forget and the link can drop it, so an unconfirmed write
+            // gets one resend rather than silently leaving the FC on the old rate.
+            var rateAck = setParameter("SPRAY_PUMP_RATE", pumpRate)
+            if (rateAck == null) {
+                LogUtils.w("SprayControl", "⚠ SPRAY_PUMP_RATE=$pumpRate unconfirmed — resending")
+                rateAck = setParameter("SPRAY_PUMP_RATE", pumpRate)
+            }
             LogUtils.i("SprayControl",
-                "🚿 Spray rate slider=${slider.toInt()}% @ nominal=${nominalSpeed}m/s → SPRAY_PUMP_RATE=$pumpRate " +
+                "🚿 Spray rate ${pumpRate.toInt()}% → SPRAY_PUMP_RATE=$pumpRate " +
                 (if (rateAck != null) "(confirmed)" else "(no confirmation)"))
         } catch (e: Exception) {
             LogUtils.e("SprayControl", "✗ Failed to set spray rate: ${e.message}", e)
+        } finally {
+            sprayRateWriteMutex.unlock()
         }
     }
 
@@ -4153,16 +4414,20 @@ class SharedViewModel : ViewModel() {
         viewModelScope.launch {
             repo?.let { repository ->
                 try {
-                    // Step 1: Push the mapped SPRAY_PUMP_RATE (and ensure SPRAY_PUMP_MIN=0).
-                    applySprayRateToFc()
-
-                    // Step 2: Send DO_SPRAYER command to enable/disable
+                    // Step 1: Send DO_SPRAYER to enable/disable — the pilot's on/off must never
+                    // queue behind a parameter write (which waits on acks and can retry).
                     // MAV_CMD_DO_SPRAYER (216): param1 = 1 (enable) or 0 (disable)
                     repository.sendCommandRaw(
                         commandId = MAV_CMD_DO_SPRAYER,
                         param1 = if (enable) 1f else 0f
                     )
                     LogUtils.i("SprayControl", "✓ DO_SPRAYER command sent: ${if (enable) "ENABLE" else "DISABLE"}")
+
+                    // Step 2: Push the mapped SPRAY_PUMP_RATE (and ensure SPRAY_PUMP_MIN=0).
+                    // Safe to do after the enable: AC_Sprayer recomputes pump output from
+                    // SPRAY_PUMP_RATE on every update, so a rate landing a moment later still
+                    // applies to the spray that just started.
+                    applySprayRateToFc()
                 } catch (e: Exception) {
                     LogUtils.e("SprayControl", "✗ Failed to send spray command: ${e.message}", e)
                 }
@@ -4187,6 +4452,76 @@ class SharedViewModel : ViewModel() {
     }
 
     /**
+     * Force the pump off before a resumed mission starts flying back to its resume point.
+     *
+     * Pausing already sends DO_SPRAYER(0) via [disableSprayOnModeChange], but the pilot can
+     * turn spray back on by hand while parked. Without this the drone would spray the whole
+     * transit leg. Unlike [disableSprayOnModeChange] this is silent — no "spray disabled"
+     * notification, because from the pilot's point of view nothing was disabled.
+     */
+    private suspend fun ensureSprayerOffForTransit() {
+        _sprayEnabled.value = false
+        repo?.let { repository ->
+            try {
+                repository.sendCommandRaw(commandId = MAV_CMD_DO_SPRAYER, param1 = 0f)
+                LogUtils.i("SprayControl", "🚿 DO_SPRAYER(0) sent — pump off for the resume transit leg")
+            } catch (e: Exception) {
+                LogUtils.e("SprayControl", "✗ Failed to send DO_SPRAYER(0) before resume", e)
+            }
+        }
+    }
+
+    /** Pending "turn spray back on once the drone arrives" watcher. */
+    private var sprayRestoreJob: Job? = null
+
+    /** Give up waiting for arrival after this long, rather than arming the pump indefinitely. */
+    private val SPRAY_RESTORE_TIMEOUT_MS = 5 * 60 * 1000L
+
+    /**
+     * Turn the sprayer back on only once the drone has actually reached [targetWaypoint].
+     *
+     * On resume the drone first has to fly from wherever the pilot left it back to the
+     * mission, and that transit leg must stay dry — it has either already been sprayed or
+     * was never part of the mission. Resume paths that re-upload a mission get this for free
+     * from the DO_SPRAYER items in [MavlinkTelemetryRepository.filterWaypointsForResume];
+     * this helper covers the path that only jumps the FC's mission index.
+     *
+     * Arrival is detected as currentWaypoint STRICTLY GREATER than [targetWaypoint], not
+     * equal to it: MISSION_CURRENT reports the waypoint the FC is flying TO, and
+     * setCurrentWaypoint has just pointed it at [targetWaypoint] — so `==` would be true
+     * immediately, while the drone is still at the far end of the transit leg. The index
+     * only advances past [targetWaypoint] once it has actually been reached.
+     *
+     * Aborts silently if the drone leaves AUTO or disarms before arriving — the pilot has
+     * taken over, and a delayed pump start would be a nasty surprise.
+     */
+    private fun restoreSprayOnArrival(targetWaypoint: Int) {
+        sprayRestoreJob?.cancel()
+        sprayRestoreJob = viewModelScope.launch {
+            val outcome = withTimeoutOrNull(SPRAY_RESTORE_TIMEOUT_MS) {
+                _telemetryState.first { st ->
+                    !st.armed ||
+                        !st.mode.equals("Auto", ignoreCase = true) ||
+                        (st.currentWaypoint ?: -1) > targetWaypoint
+                }
+            }
+
+            when {
+                outcome == null ->
+                    LogUtils.w("SprayControl", "💧 Spray restore timed out — never reached WP$targetWaypoint, leaving pump off")
+
+                outcome.armed && outcome.mode.equals("Auto", ignoreCase = true) -> {
+                    LogUtils.i("SprayControl", "💧 Reached WP$targetWaypoint (now heading to ${outcome.currentWaypoint}) — restoring spray")
+                    setSprayEnabled(true)
+                }
+
+                else ->
+                    LogUtils.i("SprayControl", "💧 Spray restore abandoned — left AUTO before reaching WP$targetWaypoint (mode=${outcome.mode}, armed=${outcome.armed})")
+            }
+        }
+    }
+
+    /**
      * Disable spray when mode changes from Auto to another mode
      * This ensures spray is turned off when pilot takes manual control or mission is paused/aborted.
      * Always sends DO_SPRAYER(0) to FC regardless of app state, because mission-embedded
@@ -4194,6 +4529,10 @@ class SharedViewModel : ViewModel() {
      */
     fun disableSprayOnModeChange() {
         LogUtils.i("SprayControl", "🚿 Disabling spray due to mode change from Auto")
+
+        // Drop any pending arrival-gated spray restore — leaving AUTO cancels the resume.
+        sprayRestoreJob?.cancel()
+        sprayRestoreJob = null
 
         // Reset AUTO mode spray detection to prevent false "Tank Empty" alerts
         repo?.resetAutoModeSprayDetection()
@@ -4235,11 +4574,16 @@ class SharedViewModel : ViewModel() {
         // takes effect immediately for the ongoing mission's DO_SPRAYER, so this is what makes
         // changing the slider mid-mission actually change the spray. We do NOT toggle DO_SPRAYER
         // here — enabling/disabling the pump stays with controlSpray()/RC7/the mission.
+        // Only the debounce DELAY is cancellable. Once a write has started it finishes in its
+        // own job: cancelling a param write that is already in flight is what let a rate change
+        // vanish, leaving the FC on the last value that got through while the slider showed the
+        // new one. applySprayRateToFc() re-reads the slider under a mutex, so the write that
+        // wins is always the pilot's latest value.
         sprayRateDebounceJob?.cancel()
         sprayRateDebounceJob = viewModelScope.launch {
             delay(SPRAY_RATE_DEBOUNCE_MS)
             if (repo != null) {
-                applySprayRateToFc()
+                viewModelScope.launch { applySprayRateToFc() }
             } else {
                 LogUtils.d("SprayControl", "Rate set to ${newRate.toInt()}% (not connected; will apply when connected)")
             }
@@ -4751,8 +5095,18 @@ class SharedViewModel : ViewModel() {
         // line spacing is available (e.g. manual flights). Approximate boom/spray width.
         const val DEFAULT_SWATH_METERS = 5.0
         // Fallback nominal spray ground speed (m/s) when no mission speed is planned.
-        // Drives the spray-rate → SPRAY_PUMP_RATE mapping so the slider is not saturated.
         const val DEFAULT_NOMINAL_SPEED_MS = 5.0
+
+        // Battery failsafe voltage defaults, used until the pilot saves their own values
+        // in Options. These are the 12S fleet figures; see the pack-aware fallback at
+        // [defaultWarnVoltage] / [defaultCritVoltage] for why a known-6S pack overrides them.
+        const val DEFAULT_LOW_VOLT_1 = 43.0f   // low voltage level 1 (warning) → BATT_LOW_VOLT
+        const val DEFAULT_LOW_VOLT_2 = 42.0f   // low voltage level 2 (critical) → BATT_CRT_VOLT
+
+        // Altitude ceiling failsafe default (metres AGL), mirrored to the FC's FENCE_ALT_MAX.
+        // 120 m is the DGCA / most-jurisdictions legal ceiling for this class of drone and
+        // matches the value the geofence upload has always used.
+        const val DEFAULT_MAX_ALTITUDE_M = 120.0f
     }
 
     // Current fence configuration uploaded to FC
@@ -4787,6 +5141,16 @@ class SharedViewModel : ViewModel() {
     private val _armingCheckState = MutableStateFlow(ArmingCheckState.HIDDEN)
     val armingCheckState: StateFlow<ArmingCheckState> = _armingCheckState.asStateFlow()
 
+    // ═══ Pre-arm failsafe acknowledgement ═══
+    // Shown on every connection; the pilot must press OK before the drone will arm.
+    // Non-null means the popup is up. Reset on disconnect so each flight session
+    // re-confirms the settings that were actually pushed to this vehicle.
+    private val _preflightFailsafeSummary = MutableStateFlow<PreflightFailsafeSummary?>(null)
+    val preflightFailsafeSummary: StateFlow<PreflightFailsafeSummary?> = _preflightFailsafeSummary.asStateFlow()
+
+    @Volatile
+    private var preflightAcknowledged = false
+
     init {
         // Monitor connection status and announce via TTS
         // Also start fence status monitoring when connected
@@ -4802,6 +5166,8 @@ class SharedViewModel : ViewModel() {
                     syncFailsafeOptionsOnConnect()
                     // Check ARMING_CHECK safety param for targeted accounts
                     checkArmingCheckOnConnect()
+                    // Make the pilot acknowledge the failsafe settings before arming
+                    showPreflightFailsafeSummaryOnConnect()
                 } else if (!connected) {
                     // Stop fence monitoring on disconnect to prevent stale state
                     stopFenceStatusMonitoring()
@@ -4812,6 +5178,10 @@ class SharedViewModel : ViewModel() {
                     geofenceTriggeringModeChange = false
                     _localFenceStatus.value = FenceStatus()
                     LogUtils.i("Geofence", "Connection lost - fence monitoring stopped, fence state reset")
+
+                    // Require a fresh pre-arm acknowledgement on the next connection
+                    preflightAcknowledged = false
+                    _preflightFailsafeSummary.value = null
                 }
             }
         }
@@ -4836,18 +5206,25 @@ class SharedViewModel : ViewModel() {
                 // BATTERY_STATUS frames to arrive so we can read the live pack voltage.
                 delay(2000)
 
-                // ═══ Pack-aware thresholds (mixed 6S / 12S fleet) ═══
-                // Honor explicitly saved values; otherwise derive from the live pack
-                // voltage. NEVER hardcode 42/43 — for a 12S pack 42V is a normal
-                // in-flight voltage, so pushing BATT_CRT_VOLT=42 made the FC trip its
-                // critical-battery failsafe mid-mission and RTL straight through the
-                // geofence (the "voltage 42 doesn't stop at the fence" report).
+                // ═══ Altitude ceiling (FENCE_ALT_MAX) ═══
+                // Hybrid, like the radar thresholds: if the pilot has explicitly set a
+                // ceiling we push it to the FC so both layers agree; if they haven't, we
+                // seed the local setting from whatever the FC already has instead of
+                // overwriting a value someone configured in Mission Planner.
+                syncAltitudeCeilingOnConnect(prefs)
+
+                // ═══ Voltage thresholds (43V / 42V default, 6S fallback) ═══
+                // Honor explicitly saved values; otherwise use the 12S defaults, except
+                // on a pack the telemetry identifies as 6S — pushing BATT_CRT_VOLT=42 to
+                // a 6S drone puts it below its critical threshold on the ground, and the
+                // FC then RTLs straight through the geofence mid-mission (the "voltage 42
+                // doesn't stop at the fence" report).
                 val livePackVoltage = _telemetryState.value.voltage
                 val lowVoltLevel1 = if (prefs.contains("low_volt_level_1")) {
-                    prefs.getFloat("low_volt_level_1", 22.2f)
+                    prefs.getFloat("low_volt_level_1", DEFAULT_LOW_VOLT_1)
                 } else defaultWarnVoltage(livePackVoltage)
                 val lowVoltLevel2 = if (prefs.contains("low_volt_level_2")) {
-                    prefs.getFloat("low_volt_level_2", 21.0f)
+                    prefs.getFloat("low_volt_level_2", DEFAULT_LOW_VOLT_2)
                 } else defaultCritVoltage(livePackVoltage)
 
                 LogUtils.i("OptionsSync", "Pack voltage=${livePackVoltage}V → cells=${detectCellCount(livePackVoltage)} | lowVolt=$lowVoltLevel1 critVolt=$lowVoltLevel2")
@@ -4918,6 +5295,49 @@ class SharedViewModel : ViewModel() {
     }
 
     /**
+     * Keep the GCS altitude ceiling and the FC's FENCE_ALT_MAX in agreement on connect.
+     *
+     * The GCS is the primary enforcer (see [handleAltitudeFailsafe]) because the FC's
+     * altitude fence is inert unless FENCE_ENABLE is on, but FENCE_ALT_MAX is still worth
+     * keeping correct: the moment a geofence *is* enabled the FC becomes a second layer,
+     * and it must not be guarding some stale ceiling from a previous configuration.
+     *
+     * NOTE: this deliberately does NOT touch FENCE_ENABLE or FENCE_TYPE. Those are owned
+     * by the geofence upload flow, and forcing them on here would change fence/pre-arm
+     * behaviour for drones flying without a geofence.
+     */
+    private suspend fun syncAltitudeCeilingOnConnect(prefs: android.content.SharedPreferences) {
+        try {
+            if (!prefs.getBoolean("max_altitude_enabled", true)) {
+                LogUtils.i("OptionsSync", "Altitude ceiling failsafe disabled — skipping FENCE_ALT_MAX sync")
+                return
+            }
+
+            if (prefs.contains("max_altitude")) {
+                val ceiling = prefs.getFloat("max_altitude", DEFAULT_MAX_ALTITUDE_M)
+                if (ceiling <= 0f) return
+                if (setParameter("FENCE_ALT_MAX", ceiling) != null) {
+                    LogUtils.i("OptionsSync", "✓ FENCE_ALT_MAX = $ceiling m (from saved setting)")
+                } else {
+                    LogUtils.e("OptionsSync", "✗ Failed to set FENCE_ALT_MAX")
+                }
+            } else {
+                // No explicit pilot setting yet — adopt the FC's value so the GCS ceiling
+                // matches what the vehicle was already configured with.
+                val fcValue = readParameter("FENCE_ALT_MAX", timeoutMs = 4000L)
+                if (fcValue != null && fcValue > 0f) {
+                    prefs.edit().putFloat("max_altitude", fcValue).apply()
+                    LogUtils.i("OptionsSync", "✓ Seeded altitude ceiling from FC: FENCE_ALT_MAX = $fcValue m")
+                } else {
+                    LogUtils.w("OptionsSync", "Could not read FENCE_ALT_MAX — using default ${DEFAULT_MAX_ALTITUDE_M}m")
+                }
+            }
+        } catch (e: Exception) {
+            LogUtils.e("OptionsSync", "Error syncing altitude ceiling", e)
+        }
+    }
+
+    /**
      * ARMING_CHECK=0 lets the FC arm despite failing PreArm checks (a fielded
      * drone crashed because of this). For targeted accounts only, check on every
      * connection whether ARMING_CHECK is still 0 and surface a fix dialog if so.
@@ -4971,6 +5391,57 @@ class SharedViewModel : ViewModel() {
 
     fun dismissArmingCheckRebootPrompt() {
         _armingCheckState.value = ArmingCheckState.HIDDEN
+    }
+
+    // ════════════════════════════════════════════════════════════════
+    // PRE-ARM FAILSAFE ACKNOWLEDGEMENT
+    // ════════════════════════════════════════════════════════════════
+
+    /**
+     * Raise the pre-arm summary popup once the drone is connected.
+     *
+     * Delayed past [syncFailsafeOptionsOnConnect] (2 s) so the values shown are the ones
+     * that were actually pushed to this vehicle, and so the first BATTERY_STATUS frames
+     * have landed — without a live pack voltage an unconfigured threshold would be
+     * reported as the 12S default even on a 6S drone.
+     */
+    private fun showPreflightFailsafeSummaryOnConnect() {
+        viewModelScope.launch {
+            delay(3000)
+            val context = GCSApplication.getInstance() ?: return@launch
+            if (preflightAcknowledged) return@launch
+            _preflightFailsafeSummary.value = buildPreflightFailsafeSummary(context)
+            LogUtils.i("PreArm", "Showing pre-arm failsafe acknowledgement: ${_preflightFailsafeSummary.value}")
+        }
+    }
+
+    private fun buildPreflightFailsafeSummary(context: Context) = PreflightFailsafeSummary(
+        lowVoltLevel1 = getLowVoltLevel1(context),
+        criticalVoltage = getLowVoltLevel2(context),
+        tankEmptyAction = describeTankEmptyAction(context),
+        batteryFailsafeAction = getLowVoltLevel2Action(context)
+    )
+
+    /**
+     * Arming gate: true while the pilot still owes an acknowledgement of the failsafe
+     * summary. Called from [TelemetryRepository.arm]. Also re-raises the popup if the
+     * arm attempt beat the post-connect delay, so the block is always actionable.
+     */
+    fun isPreflightAcknowledgementPending(): Boolean {
+        if (preflightAcknowledged) return false
+        if (_preflightFailsafeSummary.value == null) {
+            GCSApplication.getInstance()?.let {
+                _preflightFailsafeSummary.value = buildPreflightFailsafeSummary(it)
+            }
+        }
+        return true
+    }
+
+    /** Pilot pressed OK on the pre-arm popup — arming is unblocked for this connection. */
+    fun acknowledgePreflightFailsafeSummary() {
+        preflightAcknowledged = true
+        _preflightFailsafeSummary.value = null
+        LogUtils.i("PreArm", "Pre-arm failsafe summary acknowledged — arming unblocked")
     }
 
     /**

@@ -507,7 +507,7 @@ fun TopNavBar(
                         HorizontalDivider(color = Color.White.copy(alpha = 0.3f))
 
                         // Spray Rate Slider
-                        // Sets SPRAY_PUMP_RATE (mapped for AC_Sprayer's speed-proportional model).
+                        // Written to the FC as SPRAY_PUMP_RATE 1:1.
                         // Slider is always functional regardless of RC7 status.
                         Column(modifier = Modifier.padding(vertical = 4.dp)) {
                             Row(verticalAlignment = Alignment.CenterVertically) {

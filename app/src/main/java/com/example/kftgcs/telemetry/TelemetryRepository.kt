@@ -2621,6 +2621,17 @@ class MavlinkTelemetryRepository(
      * @return true if armed successfully, false otherwise
      */
     suspend fun arm(forceArm: Boolean = false): Boolean {
+        // Pre-arm failsafe acknowledgement. The popup raised on connect lists the voltage
+        // thresholds and failsafe actions this vehicle is configured with; nothing arms
+        // until the pilot has confirmed them. Checked ahead of the armable test so
+        // force-arm cannot slip past it either.
+        if (sharedViewModel.isPreflightAcknowledgementPending()) {
+            sharedViewModel.addNotification(
+                Notification("Confirm the failsafe settings popup before arming.", NotificationType.ERROR)
+            )
+            return false
+        }
+
         if (!state.value.armable && !forceArm) {
             sharedViewModel.addNotification(
                 Notification("Vehicle not armable. Check pre-arm status.", NotificationType.ERROR)
@@ -3804,11 +3815,17 @@ class MavlinkTelemetryRepository(
      * - Skip ALL waypoints BEFORE resume point (including TAKEOFF - drone is already in the air)
      * - Keep ALL waypoints from resume point onward
      *
-     * Result structure: HOME (seq 0) + Resume Location WP (seq 1) + Remaining waypoints (seq 2+)
+     * Result structure: HOME (seq 0) + Resume Location WP (seq 1) + [DO_SPRAYER(1)] + Remaining waypoints
      * NO TAKEOFF included since drone is already flying!
      *
      * The resume location waypoint is inserted at the drone's exact GPS position where it was paused.
      * This ensures the drone resumes from its actual paused position, not from the next waypoint.
+     * It stays at seq 1 because every caller targets it with setCurrentWaypoint(1).
+     *
+     * When spray is being restored, the DO_SPRAYER(1) sits immediately AFTER that resume waypoint,
+     * so the FC only runs it once the waypoint has been reached — the pump stays off for the
+     * transit leg. Callers must NOT additionally fire an immediate spray-on command; doing that
+     * is what made the drone spray all the way back to the resume point.
      *
      * @param allWaypoints Complete mission from flight controller
      * @param resumeWaypointSeq The waypoint sequence number to resume from
@@ -3867,6 +3884,30 @@ class MavlinkTelemetryRepository(
                 val cmdName = waypoint.command.entry?.name ?: "CMD_$cmdId"
                 filtered.add(waypoint)
 
+                // Builds a DO_SPRAYER mission item. placeholderSeq is arbitrary —
+                // resequenceWaypoints renumbers everything before upload.
+                fun sprayerItem(placeholderSeq: UShort, on: Boolean) = MissionItemInt(
+                    targetSystem = fcuSystemId,
+                    targetComponent = fcuComponentId,
+                    seq = placeholderSeq,
+                    frame = MavEnumValue.of(com.divpundir.mavlink.definitions.common.MavFrame.GLOBAL_RELATIVE_ALT_INT),
+                    command = MavEnumValue.fromValue(MAV_CMD_DO_SPRAYER),
+                    current = 0u,
+                    autocontinue = 1u,
+                    param1 = if (on) 1f else 0f, // 1 = START spraying, 0 = STOP
+                    param2 = 0f,
+                    param3 = 0f,
+                    param4 = 0f,
+                    x = 0,
+                    y = 0,
+                    z = 0f
+                )
+
+                // NOTE: no DO_SPRAYER(0) is embedded ahead of the resume waypoint on purpose —
+                // that would shift the transit waypoint off seq 1, which every caller targets
+                // with setCurrentWaypoint(1). The pump is instead shut off out-of-band, just
+                // before AUTO is engaged (SharedViewModel.ensureSprayerOffForTransit).
+
                 // Insert resume location waypoint right after HOME if we have valid coordinates
                 if (resumeLatitude != null && resumeLongitude != null) {
                     val resumeWp = MissionItemInt(
@@ -3888,27 +3929,11 @@ class MavlinkTelemetryRepository(
                     filtered.add(resumeWp)
                 }
 
-                // Insert DO_SPRAYER(1) command right after resume waypoint (or after HOME if no resume WP)
-                // This ensures spray is turned ON as a mission item so FC executes it during AUTO mode
+                // Insert DO_SPRAYER(1) command right AFTER the resume waypoint, so the FC only
+                // executes it once that waypoint has been REACHED — i.e. spray comes back on at
+                // the resume point, not the instant AUTO is engaged.
                 if (shouldInsertSprayerOn) {
-                    val sprayerOnWp = MissionItemInt(
-                        targetSystem = fcuSystemId,
-                        targetComponent = fcuComponentId,
-                        seq = 2u, // Will be resequenced later
-                        frame = MavEnumValue.of(com.divpundir.mavlink.definitions.common.MavFrame.GLOBAL_RELATIVE_ALT_INT),
-                        command = MavEnumValue.fromValue(MAV_CMD_DO_SPRAYER),
-                        current = 0u,
-                        autocontinue = 1u,
-                        param1 = 1f, // 1 = Enable/START spraying
-                        param2 = 0f,
-                        param3 = 0f,
-                        param4 = 0f,
-                        x = 0,
-                        y = 0,
-                        z = 0f
-                    )
-                    filtered.add(sprayerOnWp)
-                    // DO_SPRAYER(1) mission item inserted after resume waypoint
+                    filtered.add(sprayerItem(placeholderSeq = 2u, on = true))
                 }
                 continue
             }

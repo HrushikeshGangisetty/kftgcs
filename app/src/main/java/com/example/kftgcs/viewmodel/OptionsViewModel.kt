@@ -16,9 +16,13 @@ data class FailsafeOptions(
     // Tank empty action is configured separately for Manual flight and Auto missions.
     val tankEmptyActionManual: String = "HOVER",
     val tankEmptyActionAuto: String = "HOVER",
-    val lowVoltLevel1: Float = 22.2f,
-    val lowVoltLevel2: Float = 21.0f,
-    val lowVoltLevel2Action: String = "HOVER"
+    val lowVoltLevel1: Float = SharedViewModel.DEFAULT_LOW_VOLT_1,
+    val lowVoltLevel2: Float = SharedViewModel.DEFAULT_LOW_VOLT_2,
+    val lowVoltLevel2Action: String = "HOVER",
+    // Altitude ceiling failsafe — mirrors the FC's FENCE_ALT_MAX parameter.
+    val maxAltitudeEnabled: Boolean = true,
+    val maxAltitude: Float = 120.0f,
+    val maxAltitudeAction: String = "HOVER"
 )
 
 class OptionsViewModel(application: Application) : AndroidViewModel(application) {
@@ -34,12 +38,18 @@ class OptionsViewModel(application: Application) : AndroidViewModel(application)
         private const val KEY_LOW_VOLT_LEVEL_1 = "low_volt_level_1"
         private const val KEY_LOW_VOLT_LEVEL_2 = "low_volt_level_2"
         private const val KEY_LOW_VOLT_LEVEL_2_ACTION = "low_volt_level_2_action"
+        private const val KEY_MAX_ALTITUDE_ENABLED = "max_altitude_enabled"
+        private const val KEY_MAX_ALTITUDE = "max_altitude"
+        private const val KEY_MAX_ALTITUDE_ACTION = "max_altitude_action"
+
+        private const val DEFAULT_MAX_ALTITUDE = 120.0f
 
         // ArduPilot parameter names
         private const val PARAM_BATT_LOW_VOLT = "BATT_LOW_VOLT"
         private const val PARAM_BATT_CRT_VOLT = "BATT_CRT_VOLT"
         private const val PARAM_BATT_FS_LOW_ACT = "BATT_FS_LOW_ACT"
         private const val PARAM_BATT_FS_CRT_ACT = "BATT_FS_CRT_ACT"
+        private const val PARAM_FENCE_ALT_MAX = "FENCE_ALT_MAX"
 
         /**
          * Read the mission completion action from SharedPreferences.
@@ -85,7 +95,7 @@ class OptionsViewModel(application: Application) : AndroidViewModel(application)
     fun loadFromDrone(sharedViewModel: SharedViewModel) {
         viewModelScope.launch {
             _isLoadingFromDrone.value = true
-            _loadStatus.value = "Reading voltage parameters from drone..."
+            _loadStatus.value = "Reading failsafe parameters from drone..."
             val failures = mutableListOf<String>()
 
             // Read BATT_LOW_VOLT → lowVoltLevel1
@@ -110,9 +120,21 @@ class OptionsViewModel(application: Application) : AndroidViewModel(application)
                 LogUtils.e(TAG, "✗ Failed to read $PARAM_BATT_CRT_VOLT from drone")
             }
 
+            kotlinx.coroutines.delay(100)
+
+            // Read FENCE_ALT_MAX → maxAltitude (the altitude ceiling failsafe)
+            val altMax = sharedViewModel.readParameter(PARAM_FENCE_ALT_MAX)
+            if (altMax != null && altMax > 0f) {
+                _options.value = _options.value.copy(maxAltitude = altMax)
+                LogUtils.i(TAG, "✓ Read $PARAM_FENCE_ALT_MAX = $altMax from drone")
+            } else {
+                failures.add(PARAM_FENCE_ALT_MAX)
+                LogUtils.e(TAG, "✗ Failed to read $PARAM_FENCE_ALT_MAX from drone")
+            }
+
             _isLoadingFromDrone.value = false
             _loadStatus.value = if (failures.isEmpty()) {
-                "Loaded voltage values from drone ✓"
+                "Loaded failsafe values from drone ✓"
             } else {
                 "Could not read: ${failures.joinToString()}. Using saved values."
             }
@@ -127,9 +149,12 @@ class OptionsViewModel(application: Application) : AndroidViewModel(application)
             missionCompletionAction = prefs.getString(KEY_MISSION_COMPLETION_ACTION, "HOVER") ?: "HOVER",
             tankEmptyActionManual = prefs.getString(KEY_TANK_EMPTY_ACTION_MANUAL, legacyTankEmpty) ?: legacyTankEmpty,
             tankEmptyActionAuto = prefs.getString(KEY_TANK_EMPTY_ACTION_AUTO, legacyTankEmpty) ?: legacyTankEmpty,
-            lowVoltLevel1 = prefs.getFloat(KEY_LOW_VOLT_LEVEL_1, 22.2f),
-            lowVoltLevel2 = prefs.getFloat(KEY_LOW_VOLT_LEVEL_2, 21.0f),
-            lowVoltLevel2Action = prefs.getString(KEY_LOW_VOLT_LEVEL_2_ACTION, "HOVER") ?: "HOVER"
+            lowVoltLevel1 = prefs.getFloat(KEY_LOW_VOLT_LEVEL_1, SharedViewModel.DEFAULT_LOW_VOLT_1),
+            lowVoltLevel2 = prefs.getFloat(KEY_LOW_VOLT_LEVEL_2, SharedViewModel.DEFAULT_LOW_VOLT_2),
+            lowVoltLevel2Action = prefs.getString(KEY_LOW_VOLT_LEVEL_2_ACTION, "HOVER") ?: "HOVER",
+            maxAltitudeEnabled = prefs.getBoolean(KEY_MAX_ALTITUDE_ENABLED, true),
+            maxAltitude = prefs.getFloat(KEY_MAX_ALTITUDE, DEFAULT_MAX_ALTITUDE),
+            maxAltitudeAction = prefs.getString(KEY_MAX_ALTITUDE_ACTION, "HOVER") ?: "HOVER"
         )
     }
 
@@ -157,6 +182,18 @@ class OptionsViewModel(application: Application) : AndroidViewModel(application)
         _options.value = _options.value.copy(lowVoltLevel2Action = action)
     }
 
+    fun updateMaxAltitudeEnabled(enabled: Boolean) {
+        _options.value = _options.value.copy(maxAltitudeEnabled = enabled)
+    }
+
+    fun updateMaxAltitude(value: Float) {
+        _options.value = _options.value.copy(maxAltitude = value)
+    }
+
+    fun updateMaxAltitudeAction(action: String) {
+        _options.value = _options.value.copy(maxAltitudeAction = action)
+    }
+
     /**
      * Save settings locally and sync to drone via MAVLink PARAM_SET.
      */
@@ -174,6 +211,9 @@ class OptionsViewModel(application: Application) : AndroidViewModel(application)
                 .putFloat(KEY_LOW_VOLT_LEVEL_1, current.lowVoltLevel1)
                 .putFloat(KEY_LOW_VOLT_LEVEL_2, current.lowVoltLevel2)
                 .putString(KEY_LOW_VOLT_LEVEL_2_ACTION, current.lowVoltLevel2Action)
+                .putBoolean(KEY_MAX_ALTITUDE_ENABLED, current.maxAltitudeEnabled)
+                .putFloat(KEY_MAX_ALTITUDE, current.maxAltitude)
+                .putString(KEY_MAX_ALTITUDE_ACTION, current.maxAltitudeAction)
                 .commit()
         } catch (e: Exception) {
             false
@@ -225,6 +265,23 @@ class OptionsViewModel(application: Application) : AndroidViewModel(application)
             } else {
                 results.add(PARAM_BATT_FS_CRT_ACT)
                 LogUtils.e(TAG, "✗ Failed to set $PARAM_BATT_FS_CRT_ACT")
+            }
+
+            // FENCE_ALT_MAX ← maxAltitude (the altitude ceiling failsafe)
+            //
+            // FENCE_ENABLE / FENCE_TYPE are deliberately NOT touched here: they belong to
+            // the geofence upload flow, and switching the fence on for a drone flying
+            // without a geofence would change its pre-arm and breach behaviour. The GCS
+            // enforces the ceiling itself (SharedViewModel.handleAltitudeFailsafe); this
+            // write just keeps the FC's own limit correct as a second layer.
+            if (current.maxAltitudeEnabled && current.maxAltitude > 0f) {
+                val r5 = sharedViewModel.setParameter(PARAM_FENCE_ALT_MAX, current.maxAltitude)
+                if (r5 != null) {
+                    LogUtils.i(TAG, "✓ $PARAM_FENCE_ALT_MAX = ${current.maxAltitude} m")
+                } else {
+                    results.add(PARAM_FENCE_ALT_MAX)
+                    LogUtils.e(TAG, "✗ Failed to set $PARAM_FENCE_ALT_MAX")
+                }
             }
 
             if (results.isEmpty()) {

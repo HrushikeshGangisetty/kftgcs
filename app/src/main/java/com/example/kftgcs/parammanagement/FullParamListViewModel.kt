@@ -5,13 +5,21 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.kftgcs.telemetry.SharedViewModel
 import com.example.kftgcs.utils.LogUtils
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.cancelAndJoin
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.AtomicLong
 
 // ─────────────────────────────────────────────────────────────────────
 // Data classes
@@ -39,6 +47,10 @@ data class FullParamListState(
     val totalCount: Int = 0,
     val errorMessage: String? = null,
     val isDroneConnected: Boolean = false,
+    /** Params the FC advertised but never delivered, after the gap-fill retries. */
+    val missingCount: Int = 0,
+    /** True while re-requesting the params that were dropped by the telemetry link. */
+    val isFillingGaps: Boolean = false,
     // Write-param feedback
     val writingParam: String? = null,      // Name of param currently being written
     val writeSuccess: String? = null,      // Success message (param name)
@@ -59,8 +71,22 @@ class FullParamListViewModel(
 
     companion object {
         private const val TAG = "FullParamListVM"
-        /** Timeout after last received param before we consider loading done. */
+        /** Idle gap after the last received PARAM_VALUE before we stop waiting for more. */
         private const val RECEIVE_TIMEOUT_MS = 4000L
+        /** Absolute cap on one fetch, so the screen can never sit on the spinner forever. */
+        private const val HARD_TIMEOUT_MS = 180_000L
+        /** How often the accumulated params are pushed to the UI while downloading. */
+        private const val PUBLISH_INTERVAL_MS = 250L
+        /** Passes of index-targeted re-requests for params the FC never delivered. */
+        private const val MAX_GAP_FILL_PASSES = 3
+        /**
+         * Skip gap filling when more than this fraction of the list is missing —
+         * that means the link is broken, not lossy, and firing a thousand
+         * PARAM_REQUEST_READs would only make it worse.
+         */
+        private const val GAP_FILL_MAX_MISSING_FRACTION = 0.5f
+        /** Spacing between gap-fill requests so the link isn't flooded. */
+        private const val GAP_FILL_REQUEST_SPACING_MS = 25L
     }
 
     private val _state = MutableStateFlow(FullParamListState())
@@ -70,8 +96,7 @@ class FullParamListViewModel(
     private val _paramMetadata = MutableStateFlow<Map<String, ParamMeta>>(emptyMap())
     val paramMetadata: StateFlow<Map<String, ParamMeta>> = _paramMetadata.asStateFlow()
 
-    private var collectJob: Job? = null
-    private var timeoutJob: Job? = null
+    private var fetchJob: Job? = null
 
     init {
         // Observe drone connection status
@@ -126,68 +151,193 @@ class FullParamListViewModel(
      */
     fun fetchAllParams() {
         if (_state.value.isLoading) return
+        val previous = fetchJob
+        // Runs off the main thread. The old implementation copied the whole param map
+        // and emitted a new UI state on *every* PARAM_VALUE; for a 1000+ param download
+        // that saturated the main thread, so the progress counter climbed but the screen
+        // never got to render the table.
+        fetchJob = viewModelScope.launch(Dispatchers.Default) {
+            // Join the previous run so two collectors can't accumulate into rival maps.
+            previous?.cancelAndJoin()
+            runFetch()
+        }
+    }
 
+    /**
+     * Stop waiting for more parameters and show whatever has arrived so far.
+     * Gives the pilot the list on a lossy link instead of an endless spinner.
+     */
+    fun stopFetch() {
+        if (!_state.value.isLoading) return
+        fetchJob?.cancel()
+        fetchJob = null
+        val current = _state.value
+        _state.update {
+            it.copy(
+                isLoading = false,
+                isFillingGaps = false,
+                loadingProgress = 1f,
+                missingCount = (current.totalCount - current.params.size).coerceAtLeast(0)
+            )
+        }
+        LogUtils.d(TAG, "⏹ Fetch stopped by user at ${current.params.size}/${current.totalCount}")
+    }
+
+    private suspend fun runFetch() = coroutineScope {
         _state.update {
             it.copy(
                 isLoading = true,
+                isFillingGaps = false,
                 loadingProgress = 0f,
                 receivedCount = 0,
                 totalCount = 0,
+                missingCount = 0,
                 errorMessage = null,
                 params = emptyMap()
             )
         }
 
+        // Params accumulate here rather than in the UI state, so the collector never
+        // blocks on a state copy and keeps up with the incoming stream.
+        val collected = ConcurrentHashMap<String, DroneParam>()
+        val seenIndices = ConcurrentHashMap.newKeySet<Int>()
+        val expectedTotal = AtomicInteger(0)
+        val lastReceivedAt = AtomicLong(System.currentTimeMillis())
+
         // Step 1: Start collector BEFORE sending request (avoid race)
-        collectJob?.cancel()
-        collectJob = viewModelScope.launch {
+        val collector = launch {
             sharedViewModel.paramValue.collect { pv ->
                 val paramName = pv.paramId.trim().replace("\u0000", "")
                 if (paramName.isBlank()) return@collect
 
                 val paramCount = pv.paramCount.toInt()
                 val paramIndex = pv.paramIndex.toInt()
+                if (paramCount > 0) expectedTotal.set(paramCount)
 
-                val droneParam = DroneParam(
+                collected[paramName] = DroneParam(
                     name = paramName,
                     value = pv.paramValue,
                     paramIndex = paramIndex,
                     paramCount = paramCount,
                     paramType = pv.paramType.value.toInt()
                 )
-
-                _state.update { current ->
-                    val updatedParams = current.params.toMutableMap()
-                    updatedParams[paramName] = droneParam
-                    val received = updatedParams.size
-                    val total = if (paramCount > 0) paramCount else current.totalCount
-                    val progress = if (total > 0) received.toFloat() / total else 0f
-                    current.copy(
-                        params = updatedParams,
-                        receivedCount = received,
-                        totalCount = total,
-                        loadingProgress = progress.coerceIn(0f, 1f)
-                    )
-                }
-
-                // Reset the "no more params" timeout each time we get one
-                resetTimeout()
+                // PARAM_SET acks come back with index 65535; only real list indices count.
+                if (paramIndex in 0 until 65535) seenIndices.add(paramIndex)
+                lastReceivedAt.set(System.currentTimeMillis())
             }
         }
 
-        // Step 2: Small delay to let collector start, then send the request
-        viewModelScope.launch {
-            delay(100)
-            try {
-                sharedViewModel.requestAllParameters()
-                LogUtils.d(TAG, "📤 PARAM_REQUEST_LIST sent")
-            } catch (e: Exception) {
-                LogUtils.e(TAG, "Failed to request all parameters", e)
-                _state.update {
-                    it.copy(isLoading = false, errorMessage = "Failed to request parameters: ${e.message}")
-                }
-                collectJob?.cancel()
+        // Step 2: Publish on a timer instead of once per message.
+        val publisher = launch {
+            while (isActive) {
+                delay(PUBLISH_INTERVAL_MS)
+                publishProgress(collected, expectedTotal.get())
             }
+        }
+
+        try {
+            sharedViewModel.requestAllParameters()
+            LogUtils.d(TAG, "📤 PARAM_REQUEST_LIST sent")
+
+            // Step 3: Wait until the list is complete or the stream goes quiet.
+            val deadline = System.currentTimeMillis() + HARD_TIMEOUT_MS
+            awaitStreamIdle(collected, expectedTotal, lastReceivedAt, deadline)
+
+            // Step 4: Re-request the indices the FC advertised but never delivered.
+            fillGaps(collected, seenIndices, expectedTotal, lastReceivedAt, deadline)
+        } catch (e: CancellationException) {
+            // stopFetch() / onCleared() already settled the state — don't run step 5.
+            throw e
+        } catch (e: Exception) {
+            LogUtils.e(TAG, "Failed to request all parameters", e)
+            _state.update { it.copy(errorMessage = "Failed to request parameters: ${e.message}") }
+        } finally {
+            collector.cancel()
+            publisher.cancel()
+        }
+
+        // Step 5: Final publish, then settle the loading flags.
+        val total = expectedTotal.get()
+        publishProgress(collected, total)
+        val missing = if (total > 0) (total - collected.size).coerceAtLeast(0) else 0
+        _state.update {
+            it.copy(
+                isLoading = false,
+                isFillingGaps = false,
+                loadingProgress = 1f,
+                missingCount = missing,
+                errorMessage = if (collected.isEmpty()) {
+                    "No parameters received from the drone. Check the telemetry link and try again."
+                } else it.errorMessage
+            )
+        }
+        LogUtils.d(TAG, "✅ Fetch finished: ${collected.size}/$total ($missing missing)")
+    }
+
+    /** Block until every advertised param has arrived, the stream stalls, or [deadline] passes. */
+    private suspend fun awaitStreamIdle(
+        collected: Map<String, DroneParam>,
+        expectedTotal: AtomicInteger,
+        lastReceivedAt: AtomicLong,
+        deadline: Long
+    ) {
+        while (System.currentTimeMillis() < deadline) {
+            val total = expectedTotal.get()
+            if (total > 0 && collected.size >= total) return
+            if (System.currentTimeMillis() - lastReceivedAt.get() > RECEIVE_TIMEOUT_MS) return
+            delay(200)
+        }
+    }
+
+    /**
+     * Re-request params the link dropped, by index.
+     * ArduPilot streams the parameter list exactly once per PARAM_REQUEST_LIST, so
+     * without this a single dropped packet leaves a permanent hole in the list.
+     */
+    private suspend fun fillGaps(
+        collected: Map<String, DroneParam>,
+        seenIndices: Set<Int>,
+        expectedTotal: AtomicInteger,
+        lastReceivedAt: AtomicLong,
+        deadline: Long
+    ) {
+        var pass = 0
+        while (pass < MAX_GAP_FILL_PASSES && System.currentTimeMillis() < deadline) {
+            val total = expectedTotal.get()
+            if (total <= 0 || collected.size >= total) return
+
+            val missing = (0 until total).filter { it !in seenIndices }
+            if (missing.isEmpty()) return
+            if (missing.size > total * GAP_FILL_MAX_MISSING_FRACTION) {
+                LogUtils.d(TAG, "⚠ ${missing.size}/$total params missing — link too lossy for gap fill")
+                return
+            }
+
+            pass++
+            _state.update { it.copy(isFillingGaps = true) }
+            LogUtils.d(TAG, "🔁 Gap-fill pass $pass: re-requesting ${missing.size} params")
+
+            for (index in missing) {
+                if (System.currentTimeMillis() >= deadline) break
+                sharedViewModel.requestParameterByIndex(index)
+                delay(GAP_FILL_REQUEST_SPACING_MS)
+            }
+            awaitStreamIdle(collected, expectedTotal, lastReceivedAt, deadline)
+        }
+    }
+
+    /** Copy the accumulated params into the UI state. Called on a timer, not per message. */
+    private fun publishProgress(collected: Map<String, DroneParam>, total: Int) {
+        val snapshot = collected.toMap()
+        _state.update { current ->
+            val effectiveTotal = if (total > 0) total else current.totalCount
+            val progress = if (effectiveTotal > 0) snapshot.size.toFloat() / effectiveTotal else 0f
+            current.copy(
+                params = snapshot,
+                receivedCount = snapshot.size,
+                totalCount = effectiveTotal,
+                loadingProgress = progress.coerceIn(0f, 1f)
+            )
         }
     }
 
@@ -270,31 +420,9 @@ class FullParamListViewModel(
         _state.update { it.copy(errorMessage = null) }
     }
 
-    // ─────────────────────────────────────────────────────────────────
-    // Private helpers
-    // ─────────────────────────────────────────────────────────────────
-
-    /**
-     * After no PARAM_VALUE is received for [RECEIVE_TIMEOUT_MS] ms,
-     * mark loading as complete.
-     */
-    private fun resetTimeout() {
-        timeoutJob?.cancel()
-        timeoutJob = viewModelScope.launch {
-            delay(RECEIVE_TIMEOUT_MS)
-            val s = _state.value
-            if (s.isLoading) {
-                LogUtils.d(TAG, "✅ All params received: ${s.receivedCount}/${s.totalCount}")
-                _state.update { it.copy(isLoading = false, loadingProgress = 1f) }
-                collectJob?.cancel()
-            }
-        }
-    }
-
     override fun onCleared() {
         super.onCleared()
-        collectJob?.cancel()
-        timeoutJob?.cancel()
+        fetchJob?.cancel()
     }
 }
 

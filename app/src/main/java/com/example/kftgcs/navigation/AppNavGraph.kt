@@ -35,6 +35,7 @@ import com.example.kftgcs.calibration.LevelCalibrationViewModel
 import androidx.compose.runtime.saveable.rememberSaveable
 import com.example.kftgcs.integration.TlogIntegration
 import com.example.kftgcs.safety.ArmingCheckSafetyDialog
+import com.example.kftgcs.safety.PreflightFailsafeDialog
 import com.example.kftgcs.telemetry.SharedViewModel
 import com.example.kftgcs.update.UpdateAvailableDialog
 import com.example.kftgcs.update.UpdateDownloadedDialog
@@ -278,6 +279,13 @@ fun AppNavGraph(
                 onSkip = { sharedViewModel.skipArmingCheckWarning() },
                 onReboot = { sharedViewModel.confirmArmingCheckReboot() },
                 onLater = { sharedViewModel.dismissArmingCheckRebootPrompt() }
+            )
+
+            // Pre-arm failsafe acknowledgement — blocks arming until the pilot presses OK
+            val preflightSummary by sharedViewModel.preflightFailsafeSummary.collectAsState()
+            PreflightFailsafeDialog(
+                summary = preflightSummary,
+                onAcknowledge = { sharedViewModel.acknowledgePreflightFailsafeSummary() }
             )
         }
 

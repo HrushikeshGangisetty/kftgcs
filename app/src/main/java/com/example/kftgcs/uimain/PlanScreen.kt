@@ -2189,8 +2189,8 @@ fun PlanScreen(
                         }
 
                         // Spray Rate Slider (moved above Auto Spray)
-                        // Sets SPRAY_PUMP_RATE via setSprayRate() (mapped for AC_Sprayer's
-                        // speed-proportional model). Applied to the FC immediately, even mid-mission.
+                        // Written to the FC as SPRAY_PUMP_RATE 1:1 by setSprayRate(), applied
+                        // immediately — even mid-mission.
                         Column(modifier = Modifier.padding(vertical = 4.dp)) {
                             Row(verticalAlignment = Alignment.CenterVertically) {
                                 Text("Spray Rate", color = Color.White, modifier = Modifier.weight(1f))
@@ -2243,7 +2243,10 @@ fun PlanScreen(
                                 }
                             }
                             Text(
-                                "PWM: ${(1000 + (sprayRate.toInt() / 100f * 1000f)).toInt()} (10-100%)",
+                                // Name the parameter and its value, so cross-checking on the
+                                // param screen agrees with the slider. The old "PWM: ..." text
+                                // was invented here — nothing in this flow writes a servo PWM.
+                                "SPRAY_PUMP_RATE: ${sprayRate.toInt()} (% pump per 1 m/s)",
                                 color = Color.Gray,
                                 style = MaterialTheme.typography.bodySmall,
                                 modifier = Modifier.padding(top = 2.dp)
@@ -2572,7 +2575,7 @@ fun PlanScreen(
                         }
 
                         // Spray Rate Slider
-                        // PWM mapping: OFF=1000, 10%=1100, 50%=1500, 100%=2000
+                        // Written to the FC as SPRAY_PUMP_RATE 1:1 by setSprayRate().
                         Column(modifier = Modifier.padding(vertical = 4.dp)) {
                             Row(verticalAlignment = Alignment.CenterVertically) {
                                 Text("Spray Rate", color = Color.White, modifier = Modifier.weight(1f))
@@ -2625,7 +2628,10 @@ fun PlanScreen(
                                 }
                             }
                             Text(
-                                "PWM: ${(1000 + (sprayRate.toInt() / 100f * 1000f)).toInt()} (10-100%)",
+                                // Name the parameter and its value, so cross-checking on the
+                                // param screen agrees with the slider. The old "PWM: ..." text
+                                // was invented here — nothing in this flow writes a servo PWM.
+                                "SPRAY_PUMP_RATE: ${sprayRate.toInt()} (% pump per 1 m/s)",
                                 color = Color.Gray,
                                 style = MaterialTheme.typography.bodySmall,
                                 modifier = Modifier.padding(top = 2.dp)

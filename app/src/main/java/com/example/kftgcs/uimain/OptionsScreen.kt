@@ -185,7 +185,7 @@ fun OptionsScreen(
             // Section: Low Voltage Alerts
             SectionCard(title = "Low Voltage Alerts") {
                 // Level 1
-                VoltageTextField(
+                NumericTextField(
                     label = "Level 1 Threshold (V)",
                     value = options.lowVoltLevel1,
                     onValueChange = { viewModel.updateLowVoltLevel1(it) }
@@ -201,7 +201,7 @@ fun OptionsScreen(
                 )
 
                 // Level 2
-                VoltageTextField(
+                NumericTextField(
                     label = "Level 2 Threshold (V)",
                     value = options.lowVoltLevel2,
                     onValueChange = { viewModel.updateLowVoltLevel2(it) }
@@ -214,6 +214,54 @@ fun OptionsScreen(
                     label = "Level 2 Action",
                     selected = options.lowVoltLevel2Action,
                     onSelectionChanged = { viewModel.updateLowVoltLevel2Action(it) }
+                )
+            }
+
+            Spacer(modifier = Modifier.height(16.dp))
+
+            // Section: Altitude Limit — mirrors the FC's FENCE_ALT_MAX parameter
+            SectionCard(title = "Maximum Altitude") {
+                Row(
+                    modifier = Modifier.fillMaxWidth().padding(bottom = 12.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Text(
+                        text = "Enforce altitude ceiling",
+                        color = Color.White,
+                        fontSize = 15.sp
+                    )
+                    Switch(
+                        checked = options.maxAltitudeEnabled,
+                        onCheckedChange = { viewModel.updateMaxAltitudeEnabled(it) },
+                        colors = SwitchDefaults.colors(
+                            checkedThumbColor = Color.White,
+                            checkedTrackColor = AccentBlue,
+                            uncheckedThumbColor = Color.LightGray,
+                            uncheckedTrackColor = BorderGray
+                        )
+                    )
+                }
+
+                NumericTextField(
+                    label = "Max Altitude (m AGL) — FENCE_ALT_MAX",
+                    value = options.maxAltitude,
+                    onValueChange = { viewModel.updateMaxAltitude(it) }
+                )
+
+                Spacer(modifier = Modifier.height(8.dp))
+
+                Text(
+                    text = "Warns from ${(options.maxAltitude - 10f).coerceAtLeast(0f).toInt()} m, then acts at ${options.maxAltitude.toInt()} m.",
+                    color = Color(0xFFB0B0B0),
+                    fontSize = 13.sp,
+                    modifier = Modifier.padding(start = 4.dp, bottom = 12.dp)
+                )
+
+                ActionDropdown(
+                    label = "Action at Limit",
+                    selected = options.maxAltitudeAction,
+                    onSelectionChanged = { viewModel.updateMaxAltitudeAction(it) }
                 )
             }
 
@@ -321,8 +369,9 @@ private fun ActionRadioGroup(
     }
 }
 
+/** Decimal entry used for both the voltage thresholds and the altitude ceiling. */
 @Composable
-private fun VoltageTextField(
+private fun NumericTextField(
     label: String,
     value: Float,
     onValueChange: (Float) -> Unit

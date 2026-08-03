@@ -7,7 +7,7 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -213,9 +213,25 @@ fun FullParamListScreen(
     ) { padding ->
         Box(Modifier.fillMaxSize().padding(padding)) {
             when {
-                state.isLoading      -> LoadingView(state)
-                state.params.isEmpty() -> EmptyView(state.isDroneConnected, state.errorMessage) { viewModel.fetchAllParams() }
-                else                  -> ParamTable(filteredParams, searchQuery, state.writingParam, paramMetadata) { n, v -> viewModel.writeParam(n, v) }
+                // Only block the screen while there is genuinely nothing to show.
+                // Once params start arriving the table renders and keeps filling in,
+                // so a stalled download can never leave the pilot staring at a spinner.
+                state.isLoading && state.params.isEmpty() ->
+                    LoadingView(state) { viewModel.stopFetch() }
+
+                state.params.isEmpty() ->
+                    EmptyView(state.isDroneConnected, state.errorMessage) { viewModel.fetchAllParams() }
+
+                else -> Column(Modifier.fillMaxSize()) {
+                    if (state.isLoading) {
+                        FetchBanner(state) { viewModel.stopFetch() }
+                    } else if (state.missingCount > 0) {
+                        MissingBanner(state.missingCount) { viewModel.fetchAllParams() }
+                    }
+                    ParamTable(filteredParams, searchQuery, state.writingParam, paramMetadata) { n, v ->
+                        viewModel.writeParam(n, v)
+                    }
+                }
             }
         }
     }
@@ -254,7 +270,7 @@ private fun InlineSearchField(query: String, onChange: (String) -> Unit, onClose
 // ═══════════════════════════ Loading ══════════════════════════════════
 
 @Composable
-private fun LoadingView(state: FullParamListState) {
+private fun LoadingView(state: FullParamListState, onStop: () -> Unit) {
     Column(
         Modifier.fillMaxSize().padding(40.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
@@ -288,7 +304,60 @@ private fun LoadingView(state: FullParamListState) {
                     modifier = Modifier.fillMaxWidth().height(5.dp).clip(RoundedCornerShape(3.dp)),
                     color = BluePrimary, trackColor = BluePrimary.copy(alpha = 0.12f)
                 )
+                Spacer(Modifier.height(16.dp))
+                TextButton(onClick = onStop) {
+                    Text("Stop and show what's loaded", color = BluePrimary, fontSize = 13.sp)
+                }
             }
+        }
+    }
+}
+
+// ═══════════════════════════ In-table banners ═════════════════════════
+
+/** Slim progress strip shown above the table while the rest of the list streams in. */
+@Composable
+private fun FetchBanner(state: FullParamListState, onStop: () -> Unit) {
+    Column(
+        Modifier
+            .fillMaxWidth()
+            .background(Color(0xFFE8F1FE))
+            .padding(horizontal = 14.dp, vertical = 8.dp)
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text(
+                if (state.isFillingGaps) "Re-requesting dropped parameters…"
+                else "Fetching parameters… ${state.receivedCount} / ${if (state.totalCount > 0) state.totalCount else "?"}",
+                color = TextMed, fontSize = 12.sp, modifier = Modifier.weight(1f)
+            )
+            TextButton(onClick = onStop, contentPadding = PaddingValues(horizontal = 8.dp)) {
+                Text("Stop", color = BluePrimary, fontSize = 12.sp)
+            }
+        }
+        LinearProgressIndicator(
+            progress = { state.loadingProgress },
+            modifier = Modifier.fillMaxWidth().height(3.dp).clip(RoundedCornerShape(2.dp)),
+            color = BluePrimary, trackColor = BluePrimary.copy(alpha = 0.12f)
+        )
+    }
+}
+
+/** Shown when the FC advertised more params than the link delivered. */
+@Composable
+private fun MissingBanner(missingCount: Int, onRetry: () -> Unit) {
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .background(Color(0xFFFFF4E5))
+            .padding(horizontal = 14.dp, vertical = 8.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Text(
+            "$missingCount parameter${if (missingCount == 1) "" else "s"} not received — telemetry link dropped them.",
+            color = Amber, fontSize = 12.sp, modifier = Modifier.weight(1f)
+        )
+        TextButton(onClick = onRetry, contentPadding = PaddingValues(horizontal = 8.dp)) {
+            Text("Retry", color = BluePrimary, fontSize = 12.sp)
         }
     }
 }
@@ -408,8 +477,9 @@ private fun ParamTable(
 
                 // ── Data rows ──
                 LazyColumn(state = listState, modifier = Modifier.fillMaxSize()) {
-                    items(items = params, key = { it.name }) { param ->
-                        val idx = params.indexOf(param)
+                    // itemsIndexed, not items + indexOf: the latter is a linear scan of a
+                    // 1000+ entry list for every row that composes.
+                    itemsIndexed(items = params, key = { _, p -> p.name }) { idx, param ->
                         DataRow(param, idx, writingParam == param.name, hScroll, metadataMap) { v -> onWrite(param.name, v) }
                         // Divider between rows (skip after last)
                         if (idx < params.lastIndex) {
