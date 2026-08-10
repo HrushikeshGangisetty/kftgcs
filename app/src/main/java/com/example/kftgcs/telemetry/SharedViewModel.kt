@@ -143,6 +143,8 @@ class SharedViewModel : ViewModel() {
     private val ALTITUDE_LIMIT_INTERVAL_MS = 5000L
     /** Start warning this far below the ceiling so the pilot can level off before hitting it. */
     private val ALTITUDE_WARN_MARGIN_M = 10f
+    /** Fire the RTL/LAND/BRAKE action this far below the ceiling so the drone's momentum never carries it past the limit. */
+    private val ALTITUDE_ACTION_MARGIN_M = 4f
 
     // Max Range failsafe tracking (fixed 300m circular fence, GCS-side only)
     private var maxRangeActionTriggered = false // One-shot per arm cycle, like the other failsafes
@@ -152,6 +154,8 @@ class SharedViewModel : ViewModel() {
     private val MAX_RANGE_LIMIT_INTERVAL_MS = 5000L
     /** Start warning this far inside the radius so the pilot can turn back before hitting it. */
     private val MAX_RANGE_WARN_MARGIN_M = 30f
+    /** Fire RTL this far inside the radius so the drone's momentum never carries it past the limit. */
+    private val MAX_RANGE_ACTION_MARGIN_M = 4f
 
     init {
         // Setup emergency RTL callback for crash handler
@@ -267,8 +271,8 @@ class SharedViewModel : ViewModel() {
                 // be traced to the exact failsafe sequence.
                 LogUtils.i("BatteryFailsafe", "🔎 FENCE-CONTEXT: voltage=${voltage}V crit=${level2Threshold}V mode=${_telemetryState.value.mode} geofenceEnabled=${_geofenceEnabled.value} fenceBreached=${_geofenceViolationDetected.value} action=$level2Action")
 
-                // TTS alert
-                ttsManager?.speak("Critical! Battery voltage ${String.format(Locale.US, "%.1f", voltage)} volts. Activating $level2Action mode.")
+                // TTS alert — matches the "Battery Failsafe" popup text exactly.
+                ttsManager?.speak("Battery Failsafe")
 
                 // Add notification
                 addNotification(
@@ -378,8 +382,9 @@ class SharedViewModel : ViewModel() {
 
         val action = getMaxAltitudeAction(context)
         val now = System.currentTimeMillis()
+        val actionThreshold = ceiling - ALTITUDE_ACTION_MARGIN_M
 
-        if (altitude >= ceiling) {
+        if (altitude >= actionThreshold) {
 
             // ═══ PRIORITY GUARDS: never cancel a higher-priority recovery ═══
             // Same reasoning as the voltage failsafe's geofence guard: while the FC is
@@ -395,7 +400,7 @@ class SharedViewModel : ViewModel() {
             if (!altitudeLimitActionTriggered && deferReason != null) {
                 if (now - lastAltitudeLimitTime >= ALTITUDE_LIMIT_INTERVAL_MS) {
                     lastAltitudeLimitTime = now
-                    LogUtils.w("AltitudeFailsafe", "⏸️ Altitude ${altitude}m over ceiling ${ceiling}m but $deferReason — deferring $action (one-shot NOT consumed)")
+                    LogUtils.w("AltitudeFailsafe", "⏸️ Altitude ${altitude}m over action threshold ${actionThreshold}m (ceiling ${ceiling}m) but $deferReason — deferring $action (one-shot NOT consumed)")
                     ttsManager?.speak("Above altitude limit.")
                 }
                 return
@@ -406,12 +411,12 @@ class SharedViewModel : ViewModel() {
                 altitudeLimitActionTriggered = true
                 lastAltitudeLimitTime = now
 
-                LogUtils.i("AltitudeFailsafe", "⛔ ALTITUDE LIMIT: ${altitude}m >= FENCE_ALT_MAX ${ceiling}m — triggering $action (one-shot), mode=${_telemetryState.value.mode}")
+                LogUtils.i("AltitudeFailsafe", "⛔ ALTITUDE LIMIT: ${altitude}m >= action threshold ${actionThreshold}m (FENCE_ALT_MAX ${ceiling}m, ${ALTITUDE_ACTION_MARGIN_M.toInt()}m margin) — triggering $action (one-shot), mode=${_telemetryState.value.mode}")
 
-                ttsManager?.speak("Altitude limit ${ceiling.toInt()} meters reached. Activating $action.")
+                ttsManager?.speak("Approaching altitude limit. Activating $action.")
                 addNotification(
                     Notification(
-                        message = "⛔ ALTITUDE LIMIT: ${String.format(Locale.US, "%.0f", altitude)}m ≥ ${String.format(Locale.US, "%.0f", ceiling)}m — activating $action",
+                        message = "⛔ ALTITUDE LIMIT: ${String.format(Locale.US, "%.0f", altitude)}m ≥ ${String.format(Locale.US, "%.0f", actionThreshold)}m (${ALTITUDE_ACTION_MARGIN_M.toInt()}m margin below ${String.format(Locale.US, "%.0f", ceiling)}m ceiling) — activating $action",
                         type = NotificationType.ERROR
                     )
                 )
@@ -500,8 +505,9 @@ class SharedViewModel : ViewModel() {
 
         val distance = GeofenceUtils.haversineDistance(LatLng(homeLat, homeLon), LatLng(lat, lon))
         val now = System.currentTimeMillis()
+        val actionThreshold = MAX_RANGE_METERS - MAX_RANGE_ACTION_MARGIN_M
 
-        if (distance >= MAX_RANGE_METERS) {
+        if (distance >= actionThreshold) {
 
             // ═══ PRIORITY GUARD: never cancel a rectangular-fence recovery in progress ═══
             // Same reasoning as the altitude ceiling's geofence guard — while the FC is
@@ -510,7 +516,7 @@ class SharedViewModel : ViewModel() {
             if (!maxRangeActionTriggered && _geofenceEnabled.value && _geofenceViolationDetected.value) {
                 if (now - lastMaxRangeLimitTime >= MAX_RANGE_LIMIT_INTERVAL_MS) {
                     lastMaxRangeLimitTime = now
-                    LogUtils.w("MaxRangeFailsafe", "⏸️ Range ${distance}m over ${MAX_RANGE_METERS}m but geofence recovery in progress — deferring RTL (one-shot NOT consumed)")
+                    LogUtils.w("MaxRangeFailsafe", "⏸️ Range ${distance}m over action threshold ${actionThreshold}m (limit ${MAX_RANGE_METERS}m) but geofence recovery in progress — deferring RTL (one-shot NOT consumed)")
                     ttsManager?.speak("Max range exceeded. Returning inside the fence first.")
                 }
                 return
@@ -521,12 +527,12 @@ class SharedViewModel : ViewModel() {
                 maxRangeActionTriggered = true
                 lastMaxRangeLimitTime = now
 
-                LogUtils.i("MaxRangeFailsafe", "⛔ MAX RANGE: ${distance}m >= ${MAX_RANGE_METERS}m — triggering RTL (one-shot), mode=${state.mode}")
+                LogUtils.i("MaxRangeFailsafe", "⛔ MAX RANGE: ${distance}m >= action threshold ${actionThreshold}m (limit ${MAX_RANGE_METERS}m, ${MAX_RANGE_ACTION_MARGIN_M.toInt()}m margin) — triggering RTL (one-shot), mode=${state.mode}")
 
-                ttsManager?.speak("Max range ${MAX_RANGE_METERS.toInt()} meters reached. Returning to launch.")
+                ttsManager?.speak("Approaching max range. Returning to launch.")
                 addNotification(
                     Notification(
-                        message = "⛔ MAX RANGE: ${String.format(Locale.US, "%.0f", distance)}m ≥ ${String.format(Locale.US, "%.0f", MAX_RANGE_METERS)}m — activating RTL",
+                        message = "⛔ MAX RANGE: ${String.format(Locale.US, "%.0f", distance)}m ≥ ${String.format(Locale.US, "%.0f", actionThreshold)}m (${MAX_RANGE_ACTION_MARGIN_M.toInt()}m margin below ${String.format(Locale.US, "%.0f", MAX_RANGE_METERS)}m limit) — activating RTL",
                         type = NotificationType.ERROR
                     )
                 )
@@ -889,13 +895,14 @@ class SharedViewModel : ViewModel() {
                 // we simply notify the user and backend that the tank is empty.
                 if (tankEmptyAction.equals("REPORT_ONLY", ignoreCase = true)) {
                     LogUtils.i("SharedVM", "Report Only selected - reporting tank empty without changing mode")
-                    ttsManager?.speak("Tank empty!")
+                    ttsManager?.speak("Tank Empty")
                     addNotification(
                         Notification(
                             message = "Tank empty - report only (drone continues flying)",
                             type = NotificationType.WARNING
                         )
                     )
+                    showFailsafePopup("Tank Empty")
                     try {
                         WebSocketManager.getInstance().sendMissionEvent(
                             eventType = "TANK_EMPTY_REPORT",
@@ -931,7 +938,8 @@ class SharedViewModel : ViewModel() {
                     LogUtils.i("SharedVM", "$modeName mode command sent successfully")
                     
                     // TTS announcement for tank empty
-                    ttsManager?.speak("Tank empty! Switching to $modeName mode.")
+                    ttsManager?.speak("Tank Empty")
+                    showFailsafePopup("Tank Empty")
 
                     // Send mission status to backend (only in AUTO mode)
                     try {
@@ -2820,9 +2828,11 @@ class SharedViewModel : ViewModel() {
     private val _sprayStatusPopup = MutableStateFlow<String?>(null)
     val sprayStatusPopup: StateFlow<String?> = _sprayStatusPopup.asStateFlow()
 
-    // Failsafe alert popup (top-left, temporary message that disappears after 2 seconds).
-    // Shared by every failsafe trigger — Battery, Geofence, Max Range, Max Altitude — so only
-    // one can be on screen at a time; a new trigger restarts the 2-second window.
+    // Failsafe alert popup (top-left, temporary message that disappears after
+    // FAILSAFE_POPUP_DURATION_MS). Shared by every failsafe trigger — Battery, Fence, Max
+    // Range, Max Altitude, Tank Empty, RC, RTL/link-loss — so only one can be on screen at a
+    // time; a new trigger restarts the window. Also dismissible early via [dismissFailsafePopup].
+    private val FAILSAFE_POPUP_DURATION_MS = 6000L
     private val _failsafePopup = MutableStateFlow<String?>(null)
     val failsafePopup: StateFlow<String?> = _failsafePopup.asStateFlow()
     private var failsafePopupJob: Job? = null
@@ -2831,9 +2841,15 @@ class SharedViewModel : ViewModel() {
         failsafePopupJob?.cancel()
         failsafePopupJob = viewModelScope.launch {
             _failsafePopup.value = message
-            delay(2000) // Show for 2 seconds
+            delay(FAILSAFE_POPUP_DURATION_MS)
             _failsafePopup.value = null
         }
+    }
+
+    /** Pilot tapped the popup's close button — dismiss immediately instead of waiting out the timer. */
+    fun dismissFailsafePopup() {
+        failsafePopupJob?.cancel()
+        _failsafePopup.value = null
     }
 
     // ── Vehicle service alert ─────────────────────────────────────────────────
@@ -4895,6 +4911,20 @@ class SharedViewModel : ViewModel() {
                 LogUtils.e("SharedVM", "Error in emergency RTL callback", e)
             }
         }
+
+        // Surface a failsafe popup + notification when DisconnectionRTLHandler auto-triggers
+        // RTL after a mid-flight link loss, matching Battery/Fence/Max Range/Tank Empty.
+        DisconnectionRTLHandler.onRtlTriggered = {
+            LogUtils.w("SharedVM", "⛔ LINK LOSS: connection lost mid-flight — RTL triggered automatically")
+            addNotification(
+                Notification(
+                    message = "⛔ Communication Link Loss, Drone Disconnected — RTL activated automatically",
+                    type = NotificationType.ERROR
+                )
+            )
+            showFailsafePopup("Communication Link Loss, Drone Disconnected")
+            ttsManager?.speak("Communication Link Loss, Drone Disconnected")
+        }
     }
 
     /**
@@ -5710,8 +5740,8 @@ class SharedViewModel : ViewModel() {
                         message = "⚠️ Geofence breach! FC activated ${getCurrentFenceAction()}",
                         type = NotificationType.WARNING
                     ))
-                    showFailsafePopup("Geofence Breached")
-                    speak("Geofence breach")
+                    showFailsafePopup("Fence Breached")
+                    speak("Fence Breached")
 
                     // Reset geofence triggering flag after FC handles it
                     delay(2000)

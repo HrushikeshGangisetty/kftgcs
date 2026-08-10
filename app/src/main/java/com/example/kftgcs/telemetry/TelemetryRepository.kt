@@ -502,6 +502,16 @@ class MavlinkTelemetryRepository(
             // enough to keep the "distance to home" readout honest without loading the link.
             setMessageRate(242u, 0.2f) // HOME_POSITION (every 5s)
 
+            // DISTANCE_SENSOR - explicitly request this. Unlike the other messages above, this
+            // one was never actively requested and only ever arrived because the FC happened to
+            // include it in its own default stream rates — so a vehicle/param change that drops
+            // it from those defaults silences the terrain + obstacle widgets with no error (they
+            // still render their frame/labels, just no live reading). Like BATTERY_STATUS above,
+            // the FC multiplexes two rangefinder instances (terrain + forward) onto this one
+            // message ID and round-robins between them, so ask for double the desired per-sensor
+            // rate.
+            setMessageRate(132u, 10f) // DISTANCE_SENSOR - ~5Hz per instance (terrain/forward)
+
             // Request AUTOPILOT_VERSION for drone identification
             val autopilotVersionCmd = CommandLong(
                 targetSystem = fcuSystemId,
@@ -1967,6 +1977,19 @@ class MavlinkTelemetryRepository(
                         else -> NotificationType.INFO
                     }
                     sharedViewModel.addNotification(Notification(message, type))
+
+                    // RC (radio) failsafe is only surfaced by the FC via STATUSTEXT — there is
+                    // no dedicated MAVLink status bit polled elsewhere in this repo — so detect
+                    // it here and mirror the popup shown for Battery/Altitude/Max Range/Tank
+                    // Empty. "cleared"/"resolved" messages are excluded so the popup only fires
+                    // on the actual failsafe activation, not its recovery.
+                    val isRcFailsafeActivation = (message.contains("RC Failsafe", ignoreCase = true) ||
+                            message.contains("Radio Failsafe", ignoreCase = true)) &&
+                            !message.contains("clear", ignoreCase = true) &&
+                            !message.contains("resolved", ignoreCase = true)
+                    if (isRcFailsafeActivation) {
+                        sharedViewModel.showFailsafePopup("RC Failsafe")
+                    }
                 }
         }
 

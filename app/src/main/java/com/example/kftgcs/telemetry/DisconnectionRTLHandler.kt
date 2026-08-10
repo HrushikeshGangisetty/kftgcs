@@ -20,6 +20,9 @@ object DisconnectionRTLHandler {
     private var lastKnownAltitude = 0f
     private var rtlSentForCurrentDisconnection = false
 
+    /** Optional UI hook, set by SharedViewModel, so this singleton can surface a failsafe popup. */
+    var onRtlTriggered: (() -> Unit)? = null
+
     /**
      * Start monitoring telemetry for mid-flight disconnections
      */
@@ -86,6 +89,7 @@ object DisconnectionRTLHandler {
             // Attempt to send RTL command
             try {
                 repository.changeMode(6u) // RTL mode
+                onRtlTriggered?.invoke()
             } catch (e: Exception) {
                 // Failed to send RTL command - continue silently
             }

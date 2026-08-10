@@ -1,7 +1,11 @@
 // Kotlin
 package com.example.kftgcs.uimain
 
+import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.LinearEasing
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
@@ -255,9 +259,12 @@ fun MainPage(
                     .padding(12.dp),
                 verticalArrangement = Arrangement.spacedBy(8.dp)
             ) {
-                // Failsafe Alert Popup (top-left, disappears after 2 seconds)
+                // Failsafe Alert Popup (top-left, disappears after 6 seconds)
                 failsafePopup?.let { message ->
-                    FailsafeAlertPopup(message = message)
+                    FailsafeAlertPopup(
+                        message = message,
+                        onDismiss = { telemetryViewModel.dismissFailsafePopup() }
+                    )
                 }
 
                 // Obstacle-avoidance / terrain overlay: toggle buttons + floating widgets.
@@ -1089,37 +1096,79 @@ fun SprayStatusPopup(message: String) {
     }
 }
 
+/** How long [FailsafeAlertPopup] stays up; must match [SharedViewModel.showFailsafePopup]'s timer. */
+private const val FAILSAFE_POPUP_DURATION_MS = 6000
+
 /**
- * Failsafe alert popup — shown at the top-left of the screen for 2 seconds whenever any
- * failsafe fires (Battery Failsafe / Geofence Breached / Max Range / Max Altitude).
- * Auto-dismisses via [SharedViewModel.showFailsafePopup]; this composable is purely visual.
+ * Failsafe alert popup — a dark toast-style bar shown at the top-left of the screen for
+ * [FAILSAFE_POPUP_DURATION_MS] whenever any RTL-triggering failsafe fires (Communication Link
+ * Loss, Tank Empty, Battery Failsafe, Fence Breached, RC Failsafe, ...). A thin progress line
+ * along the bottom drains over the same window so the pilot can see how long it'll stay up, and
+ * the close button lets them dismiss it early via [onDismiss].
+ *
+ * Auto-dismiss timing itself lives in [SharedViewModel.showFailsafePopup]; this composable is
+ * purely visual, restarting its own drain animation whenever [message] changes.
  */
 @Composable
-fun FailsafeAlertPopup(message: String) {
+fun FailsafeAlertPopup(message: String, onDismiss: () -> Unit) {
+    val progress = remember(message) { Animatable(1f) }
+    LaunchedEffect(message) {
+        progress.snapTo(1f)
+        progress.animateTo(
+            targetValue = 0f,
+            animationSpec = tween(durationMillis = FAILSAFE_POPUP_DURATION_MS, easing = LinearEasing)
+        )
+    }
+
     Surface(
         modifier = Modifier.wrapContentSize(),
-        color = Color(0xFFD32F2F).copy(alpha = 0.95f), // Red background — safety alert
-        shape = RoundedCornerShape(12.dp),
+        color = Color(0xFF12181F).copy(alpha = 0.96f), // Dark toast background
+        shape = RoundedCornerShape(10.dp),
         shadowElevation = 8.dp
     ) {
-        Row(
-            modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.Center
-        ) {
-            Icon(
-                imageVector = Icons.Default.Warning,
-                contentDescription = null,
-                tint = Color.White,
-                modifier = Modifier.size(22.dp)
-            )
-            Spacer(modifier = Modifier.width(10.dp))
-            Text(
-                text = message,
-                color = Color.White,
-                fontSize = 15.sp,
-                fontWeight = FontWeight.Bold
-            )
+        Column {
+            Row(
+                modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Icon(
+                    imageVector = Icons.Default.Warning,
+                    contentDescription = null,
+                    tint = Color(0xFFFF9800),
+                    modifier = Modifier.size(18.dp)
+                )
+                Spacer(modifier = Modifier.width(10.dp))
+                Text(
+                    text = message,
+                    color = Color.White,
+                    fontSize = 14.sp,
+                    fontWeight = FontWeight.Medium,
+                    modifier = Modifier.weight(1f, fill = false)
+                )
+                Spacer(modifier = Modifier.width(12.dp))
+                Icon(
+                    imageVector = Icons.Default.Close,
+                    contentDescription = "Dismiss",
+                    tint = Color.White.copy(alpha = 0.7f),
+                    modifier = Modifier
+                        .size(16.dp)
+                        .clickable(onClick = onDismiss)
+                )
+            }
+            // Countdown line: full width at trigger, drains to nothing over the popup's lifetime.
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(2.dp)
+                    .background(Color.White.copy(alpha = 0.15f))
+            ) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxHeight()
+                        .fillMaxWidth(progress.value.coerceIn(0f, 1f))
+                        .background(Color(0xFFFF9800))
+                )
+            }
         }
     }
 }
