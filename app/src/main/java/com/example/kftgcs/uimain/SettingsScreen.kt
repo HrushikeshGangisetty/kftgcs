@@ -39,8 +39,20 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.navigation.NavHostController
 import androidx.compose.ui.graphics.vector.ImageVector
+import com.example.kftgcs.BuildConfig
 import com.example.kftgcs.telemetry.ConnectionType
 import com.example.kftgcs.telemetry.SharedViewModel
+
+// The SVD white-label build ships for DGCA inspection: the pilot must not be able to
+// re-tune the failsafe/battery configuration, so "Options" and "Battery" are hidden and
+// those values come from the flight controller's own parameters instead.
+private val isSvdFlavor = BuildConfig.FLAVOR == "svd"
+
+private class SettingsEntry(
+    val icon: ImageVector,
+    val title: String,
+    val onClick: () -> Unit
+)
 
 @Composable
 fun SettingsScreen(
@@ -107,129 +119,68 @@ fun SettingsScreen(
             val buttonHeight = 70.dp
             val buttonSpacing = 12.dp
 
-            // 1. IMU Calibrations
-            NumberedButton(
-                number = 1,
-                icon = Icons.Filled.Speed,
-                title = "IMU Calibrations",
-                onClick = { navController.navigate("accelerometer_calibration") },
-                height = buttonHeight
-            )
-
-            Spacer(modifier = Modifier.height(buttonSpacing))
-
-            // 2. Compass Calibration
-            NumberedButton(
-                number = 2,
-                icon = Icons.Filled.Explore,
-                title = "Compass Calibration",
-                onClick = { navController.navigate("compass_calibration") },
-                height = buttonHeight
-            )
-
-            Spacer(modifier = Modifier.height(buttonSpacing))
-
-            // 3. Barometer Calibration
-            NumberedButton(
-                number = 3,
-                icon = Icons.Filled.Thermostat,
-                title = "Barometer Calibration",
-                onClick = { navController.navigate("barometer_calibration") },
-                height = buttonHeight
-            )
-
-            Spacer(modifier = Modifier.height(buttonSpacing))
-
-            // 4. Spraying System
-            NumberedButton(
-                number = 4,
-                icon = Icons.Filled.Opacity,
-                title = "Spraying System",
-                onClick = { navController.navigate("spraying_system") },
-                height = buttonHeight
-            )
-
-            Spacer(modifier = Modifier.height(buttonSpacing))
-
-            // 5. Remote Controller
-            NumberedButton(
-                number = 5,
-                icon = Icons.Filled.Gamepad,
-                title = "Remote Controller",
-                onClick = { navController.navigate("remote_controller") },
-                height = buttonHeight
-            )
-
-            Spacer(modifier = Modifier.height(buttonSpacing))
-
-            // 6. Privacy Policy
-            NumberedButton(
-                number = 6,
-                icon = Icons.Filled.Policy,
-                title = "Privacy Policy",
-                onClick = {
+            // Built as a list so the entries hidden on some builds (Options/Battery on
+            // SVD, Analyze Log without USB) don't leave gaps in the numbering.
+            val entries = buildList {
+                add(SettingsEntry(Icons.Filled.Speed, "IMU Calibrations") {
+                    navController.navigate("accelerometer_calibration")
+                })
+                add(SettingsEntry(Icons.Filled.Explore, "Compass Calibration") {
+                    navController.navigate("compass_calibration")
+                })
+                add(SettingsEntry(Icons.Filled.Thermostat, "Barometer Calibration") {
+                    navController.navigate("barometer_calibration")
+                })
+                add(SettingsEntry(Icons.Filled.Opacity, "Spraying System") {
+                    navController.navigate("spraying_system")
+                })
+                add(SettingsEntry(Icons.Filled.Gamepad, "Remote Controller") {
+                    navController.navigate("remote_controller")
+                })
+                add(SettingsEntry(Icons.Filled.Policy, "Privacy Policy") {
                     val intent = Intent(
                         Intent.ACTION_VIEW,
                         "https://sreenijagangadari.github.io/pavamanGCS-privacy-policy/".toUri()
                     )
                     context.startActivity(intent)
-                },
-                height = buttonHeight
-            )
+                })
 
-            Spacer(modifier = Modifier.height(buttonSpacing))
+                // Options (failsafe settings) and Battery (BATT_MONITOR setup) are
+                // omitted on SVD — see [isSvdFlavor].
+                if (!isSvdFlavor) {
+                    add(SettingsEntry(Icons.Filled.Settings, "Options") {
+                        navController.navigate("options")
+                    })
+                    add(SettingsEntry(Icons.Filled.BatteryChargingFull, "Battery") {
+                        navController.navigate("battery_monitor_settings")
+                    })
+                }
 
-            // 7. Options (Failsafe Settings)
-            NumberedButton(
-                number = 7,
-                icon = Icons.Filled.Settings,
-                title = "Options",
-                onClick = { navController.navigate("options") },
-                height = buttonHeight
-            )
+                add(SettingsEntry(Icons.Filled.Person, "User Settings") {
+                    navController.navigate("user_settings")
+                })
+                // Sensor Settings (proximity-radar thresholds)
+                add(SettingsEntry(Icons.Filled.Radar, "Sensor Settings") {
+                    navController.navigate("sensor_settings")
+                })
 
-            Spacer(modifier = Modifier.height(buttonSpacing))
+                // Analyze Log — visible only on an active USB connection
+                if (usbConnected) {
+                    add(SettingsEntry(Icons.Filled.Analytics, "Analyze Log") {
+                        navController.navigate("analyze_log")
+                    })
+                }
+            }
 
-            // 8. Battery
-            NumberedButton(
-                number = 8,
-                icon = Icons.Filled.BatteryChargingFull,
-                title = "Battery",
-                onClick = { navController.navigate("battery_monitor_settings") },
-                height = buttonHeight
-            )
-
-            Spacer(modifier = Modifier.height(buttonSpacing))
-
-            // 9. User Settings
-            NumberedButton(
-                number = 9,
-                icon = Icons.Filled.Person,
-                title = "User Settings",
-                onClick = { navController.navigate("user_settings") },
-                height = buttonHeight
-            )
-
-            Spacer(modifier = Modifier.height(buttonSpacing))
-
-            // 10. Sensor Settings (proximity-radar thresholds)
-            NumberedButton(
-                number = 10,
-                icon = Icons.Filled.Radar,
-                title = "Sensor Settings",
-                onClick = { navController.navigate("sensor_settings") },
-                height = buttonHeight
-            )
-
-            // 11. Analyze Log — visible only on an active USB connection
-            if (usbConnected) {
-                Spacer(modifier = Modifier.height(buttonSpacing))
-
+            entries.forEachIndexed { index, entry ->
+                if (index > 0) {
+                    Spacer(modifier = Modifier.height(buttonSpacing))
+                }
                 NumberedButton(
-                    number = 11,
-                    icon = Icons.Filled.Analytics,
-                    title = "Analyze Log",
-                    onClick = { navController.navigate("analyze_log") },
+                    number = index + 1,
+                    icon = entry.icon,
+                    title = entry.title,
+                    onClick = entry.onClick,
                     height = buttonHeight
                 )
             }

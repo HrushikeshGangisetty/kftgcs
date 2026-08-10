@@ -26,6 +26,7 @@ import androidx.compose.ui.unit.sp
 import com.google.maps.android.compose.rememberCameraPositionState
 import com.google.android.gms.maps.CameraUpdateFactory
 import com.google.android.gms.maps.model.LatLng
+import com.google.maps.android.SphericalUtil
 import androidx.compose.ui.text.font.FontWeight
 import com.example.kftgcs.telemetry.SharedViewModel
 import androidx.compose.runtime.getValue
@@ -96,6 +97,9 @@ fun MainPage(
 
     // Collect spray status popup
     val sprayStatusPopup by telemetryViewModel.sprayStatusPopup.collectAsState()
+
+    // Collect failsafe alert popup (Battery Failsafe / Geofence Breached / Max Range / Max Altitude)
+    val failsafePopup by telemetryViewModel.failsafePopup.collectAsState()
 
     // Collect vehicle service alert state
     val showServiceAlert by telemetryViewModel.showServiceAlert.collectAsState()
@@ -243,16 +247,27 @@ fun MainPage(
                 }
             )
 
-            // Obstacle-avoidance / terrain overlay: toggle buttons + floating widgets (top-start).
-            val radarThresholds by telemetryViewModel.radarThresholds.collectAsState()
-            ProximityMapOverlay(
+            // Top-left column: failsafe alert popup (when active) stacked above the
+            // obstacle-avoidance / terrain overlay, so neither ever overlaps the other.
+            Column(
                 modifier = Modifier
                     .align(Alignment.TopStart)
                     .padding(12.dp),
-                terrain = telemetryState.terrainData,
-                proximity = telemetryState.proximityData,
-                thresholds = radarThresholds
-            )
+                verticalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                // Failsafe Alert Popup (top-left, disappears after 2 seconds)
+                failsafePopup?.let { message ->
+                    FailsafeAlertPopup(message = message)
+                }
+
+                // Obstacle-avoidance / terrain overlay: toggle buttons + floating widgets.
+                val radarThresholds by telemetryViewModel.radarThresholds.collectAsState()
+                ProximityMapOverlay(
+                    terrain = telemetryState.terrainData,
+                    proximity = telemetryState.proximityData,
+                    thresholds = radarThresholds
+                )
+            }
 
             if (isNotificationPanelVisible) {
                 Box(modifier = Modifier.align(Alignment.CenterEnd)) {
@@ -738,9 +753,26 @@ fun StatusPanel(
     telemetryState: TelemetryState,
     areaFormatted: String
 ) {
+    // Shortest (great-circle) distance between the drone and the FC-reported home point.
+    // Null whenever either fix is missing, so the readout falls back to "N/A".
+    val homeDistanceMeters = remember(
+        telemetryState.latitude,
+        telemetryState.longitude,
+        telemetryState.homeLatitude,
+        telemetryState.homeLongitude
+    ) {
+        val lat = telemetryState.latitude
+        val lon = telemetryState.longitude
+        val homeLat = telemetryState.homeLatitude
+        val homeLon = telemetryState.homeLongitude
+        if (lat != null && lon != null && homeLat != null && homeLon != null) {
+            SphericalUtil.computeDistanceBetween(LatLng(lat, lon), LatLng(homeLat, homeLon))
+        } else null
+    }
+
     Surface(
         modifier = modifier
-            .widthIn(min = 180.dp, max = 480.dp)
+            .widthIn(min = 180.dp, max = 560.dp)
             .heightIn(min = 48.dp, max = 74.dp),
         color = Color.Black.copy(alpha = 0.22f),
         shape = RoundedCornerShape(10.dp)
@@ -835,6 +867,19 @@ fun StatusPanel(
                 )
                 Text(
                     "${AppStrings.consumed}: ${telemetryState.sprayTelemetry.formattedConsumed ?: "N/A"}",
+                    color = Color.White,
+                    fontSize = 11.sp,
+                    modifier = Modifier.weight(1f),
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+                // Straight-line (great-circle) distance from the drone to the FC's home point.
+                val homeDistStr = homeDistanceMeters?.let { d ->
+                    if (d < 1000.0) "%.0f m".format(d)
+                    else "%.2f km".format(d / 1000.0)
+                } ?: "N/A"
+                Text(
+                    "${AppStrings.homeDistance}: $homeDistStr",
                     color = Color.White,
                     fontSize = 11.sp,
                     modifier = Modifier.weight(1f),
@@ -1039,6 +1084,41 @@ fun SprayStatusPopup(message: String) {
                 fontSize = 16.sp,
                 fontWeight = FontWeight.Bold,
                 style = MaterialTheme.typography.bodyLarge
+            )
+        }
+    }
+}
+
+/**
+ * Failsafe alert popup — shown at the top-left of the screen for 2 seconds whenever any
+ * failsafe fires (Battery Failsafe / Geofence Breached / Max Range / Max Altitude).
+ * Auto-dismisses via [SharedViewModel.showFailsafePopup]; this composable is purely visual.
+ */
+@Composable
+fun FailsafeAlertPopup(message: String) {
+    Surface(
+        modifier = Modifier.wrapContentSize(),
+        color = Color(0xFFD32F2F).copy(alpha = 0.95f), // Red background — safety alert
+        shape = RoundedCornerShape(12.dp),
+        shadowElevation = 8.dp
+    ) {
+        Row(
+            modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.Center
+        ) {
+            Icon(
+                imageVector = Icons.Default.Warning,
+                contentDescription = null,
+                tint = Color.White,
+                modifier = Modifier.size(22.dp)
+            )
+            Spacer(modifier = Modifier.width(10.dp))
+            Text(
+                text = message,
+                color = Color.White,
+                fontSize = 15.sp,
+                fontWeight = FontWeight.Bold
             )
         }
     }

@@ -498,6 +498,10 @@ class MavlinkTelemetryRepository(
             // Request RADIO_STATUS for RC battery monitoring
             setMessageRate(109u, 1f) // RADIO_STATUS (1Hz for RC battery monitoring)
 
+            // HOME_POSITION - home rarely moves (only on arm/DO_SET_HOME), so a slow trickle is
+            // enough to keep the "distance to home" readout honest without loading the link.
+            setMessageRate(242u, 0.2f) // HOME_POSITION (every 5s)
+
             // Request AUTOPILOT_VERSION for drone identification
             val autopilotVersionCmd = CommandLong(
                 targetSystem = fcuSystemId,
@@ -514,6 +518,26 @@ class MavlinkTelemetryRepository(
             )
             try {
                 connection.trySendUnsignedV2(gcsSystemId, gcsComponentId, autopilotVersionCmd)
+            } catch (e: Exception) {
+            }
+
+            // Ask for HOME_POSITION once immediately so the overlay isn't blank for up to 5s
+            // after connecting to an already-armed/homed vehicle.
+            val homePositionCmd = CommandLong(
+                targetSystem = fcuSystemId,
+                targetComponent = fcuComponentId,
+                command = MavCmd.REQUEST_MESSAGE.wrap(),
+                confirmation = 0u,
+                param1 = 242f, // HOME_POSITION message ID
+                param2 = 0f,
+                param3 = 0f,
+                param4 = 0f,
+                param5 = 0f,
+                param6 = 0f,
+                param7 = 0f
+            )
+            try {
+                connection.trySendUnsignedV2(gcsSystemId, gcsComponentId, homePositionCmd)
             } catch (e: Exception) {
             }
 
@@ -796,10 +820,13 @@ class MavlinkTelemetryRepository(
                     _state.update { state ->
                         state.copy(
                             altitudeMsl = hud.alt,
-                            airspeed = hud.airspeed.takeIf { v -> v > 0f },
-                            groundspeed = hud.groundspeed.takeIf { v -> v > 0f },
-                            formattedAirspeed = formatSpeed(hud.airspeed.takeIf { v -> v > 0f }),
-                            formattedGroundspeed = formatSpeed(hud.groundspeed.takeIf { v -> v > 0f }),
+                            // Only filter out invalid negative readings - a genuine 0 (or
+                            // any low value during a turn) should still be displayed as-is,
+                            // not dropped to null/"N/A".
+                            airspeed = hud.airspeed.takeIf { v -> v >= 0f },
+                            groundspeed = hud.groundspeed.takeIf { v -> v >= 0f },
+                            formattedAirspeed = formatSpeed(hud.airspeed.takeIf { v -> v >= 0f }),
+                            formattedGroundspeed = formatSpeed(hud.groundspeed.takeIf { v -> v >= 0f }),
                             heading = normalizedHeading
                         )
                     }
@@ -942,6 +969,23 @@ class MavlinkTelemetryRepository(
 
                     // Update previous armed state for next iteration
                     previousArmedState = currentArmed
+                }
+        }
+
+        // HOME_POSITION - the FC's launch / RTL point, used for the "distance to home" readout.
+        scope.launch {
+            mavFrame
+                .filter { state.value.fcuDetected && it.systemId == fcuSystemId }
+                .map { it.message }
+                .filterIsInstance<HomePosition>()
+                .collect { hp ->
+                    val lat = hp.latitude / 10_000_000.0
+                    val lon = hp.longitude / 10_000_000.0
+                    // ArduPilot reports 0/0 before home is set; treat that as "no home yet"
+                    // rather than a point off the coast of Africa.
+                    if (lat != 0.0 || lon != 0.0) {
+                        _state.update { it.copy(homeLatitude = lat, homeLongitude = lon) }
+                    }
                 }
         }
 
@@ -3646,13 +3690,11 @@ class MavlinkTelemetryRepository(
     // Format speed for human-readable display
     private fun formatSpeed(speed: Float?): String? {
         if (speed == null) return null
-        return when {
-//            speed >= 1000f -> String.format("%.3f km/s", speed / 1000f)
-            speed >= 1f -> String.format("%.3f m/s", speed)
-//            speed >= 0.01f -> String.format("%.1f cm/s", speed * 100f)
-//            speed > 0f -> String.format("%.1f mm/s", speed * 1000f)
-            else -> "0 m/s"
-        }
+        // Always show the actual reading at 1 decimal place. Previously anything
+        // below 1 m/s was clamped to a flat "0 m/s", which made ground speed
+        // appear to drop to zero during turns (when the reading legitimately
+        // dips below 1 m/s but is still non-zero).
+        return String.format("%.1f m/s", speed)
     }
 
     // Format time for human-readable display

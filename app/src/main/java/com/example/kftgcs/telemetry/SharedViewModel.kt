@@ -16,6 +16,7 @@ import com.divpundir.mavlink.definitions.common.MavCmd
 import com.divpundir.mavlink.definitions.common.MavResult
 import com.divpundir.mavlink.definitions.common.MissionItemInt
 import com.divpundir.mavlink.definitions.common.Statustext
+import com.example.kftgcs.BuildConfig
 import com.example.kftgcs.GCSApplication
 import com.example.kftgcs.usersettings.UserSettingsManager
 import com.example.kftgcs.telemetry.TelemetryState
@@ -143,6 +144,15 @@ class SharedViewModel : ViewModel() {
     /** Start warning this far below the ceiling so the pilot can level off before hitting it. */
     private val ALTITUDE_WARN_MARGIN_M = 10f
 
+    // Max Range failsafe tracking (fixed 300m circular fence, GCS-side only)
+    private var maxRangeActionTriggered = false // One-shot per arm cycle, like the other failsafes
+    private var lastMaxRangeWarnTime = 0L
+    private var lastMaxRangeLimitTime = 0L
+    private val MAX_RANGE_WARN_INTERVAL_MS = 4000L
+    private val MAX_RANGE_LIMIT_INTERVAL_MS = 5000L
+    /** Start warning this far inside the radius so the pilot can turn back before hitting it. */
+    private val MAX_RANGE_WARN_MARGIN_M = 30f
+
     init {
         // Setup emergency RTL callback for crash handler
         setupEmergencyRTLCallback()
@@ -177,6 +187,7 @@ class SharedViewModel : ViewModel() {
                 if (state.connected && state.armed) {
                     state.voltage?.let { handleBatteryVoltageFailsafe(it) }
                     state.altitudeRelative?.let { handleAltitudeFailsafe(it) }
+                    handleMaxRangeFailsafe(state)
                 } else if (!state.armed) {
                     // Reset tracking when disarmed — allows failsafe to fire again on next arm
                     voltageAlertLevel2Triggered = false
@@ -187,6 +198,10 @@ class SharedViewModel : ViewModel() {
                     altitudeLimitActionTriggered = false
                     lastAltitudeWarnTime = 0L
                     lastAltitudeLimitTime = 0L
+
+                    maxRangeActionTriggered = false
+                    lastMaxRangeWarnTime = 0L
+                    lastMaxRangeLimitTime = 0L
                 }
             }
         }
@@ -262,6 +277,7 @@ class SharedViewModel : ViewModel() {
                         type = NotificationType.ERROR
                     )
                 )
+                showFailsafePopup("Battery Failsafe")
 
                 // Execute the action
                 viewModelScope.launch {
@@ -399,6 +415,7 @@ class SharedViewModel : ViewModel() {
                         type = NotificationType.ERROR
                     )
                 )
+                showFailsafePopup("Max Altitude")
 
                 viewModelScope.launch {
                     // BRAKE holds both position and altitude, so it is the right "stop
@@ -455,6 +472,107 @@ class SharedViewModel : ViewModel() {
         }
         // NOTE: like the voltage failsafe, altitudeLimitActionTriggered only resets on DISARM,
         // so descending back below the ceiling does not re-arm the action mid-flight.
+    }
+
+    /**
+     * Max Range failsafe — a fixed [MAX_RANGE_METERS] (300 m) circular fence centred on home,
+     * enforced entirely on the GCS side.
+     *
+     * Deliberately NOT uploaded to the FC as a fence zone: the FC only enforces one active
+     * fence at a time, and that slot already holds the mission's rectangular polygon fence
+     * (see uploadGeofence). Adding a circular zone there would replace it instead of layering
+     * on top of it. Watching the haversine distance from HOME_POSITION here, exactly the way
+     * [handleAltitudeFailsafe] watches FENCE_ALT_MAX independently of the polygon fence, keeps
+     * the two fences fully independent — a Max Range breach never touches the rectangular
+     * fence's state, and vice versa.
+     *
+     * Warning zone: within [MAX_RANGE_WARN_MARGIN_M] of the radius → TTS + notification only.
+     * At/beyond the radius: RTL fires ONCE per arm cycle (the failsafe explicitly always uses
+     * RTL, unlike the configurable altitude/battery actions). One-shot for the same reason as
+     * the other failsafes — a pilot who deliberately takes back control must not be fought on
+     * every telemetry frame.
+     */
+    private fun handleMaxRangeFailsafe(state: TelemetryState) {
+        val lat = state.latitude ?: return
+        val lon = state.longitude ?: return
+        val homeLat = state.homeLatitude ?: return
+        val homeLon = state.homeLongitude ?: return
+
+        val distance = GeofenceUtils.haversineDistance(LatLng(homeLat, homeLon), LatLng(lat, lon))
+        val now = System.currentTimeMillis()
+
+        if (distance >= MAX_RANGE_METERS) {
+
+            // ═══ PRIORITY GUARD: never cancel a rectangular-fence recovery in progress ═══
+            // Same reasoning as the altitude ceiling's geofence guard — while the FC is
+            // pulling the drone back inside a breached polygon fence, issuing our own RTL
+            // here would override that recovery. Suppress WITHOUT consuming the one-shot.
+            if (!maxRangeActionTriggered && _geofenceEnabled.value && _geofenceViolationDetected.value) {
+                if (now - lastMaxRangeLimitTime >= MAX_RANGE_LIMIT_INTERVAL_MS) {
+                    lastMaxRangeLimitTime = now
+                    LogUtils.w("MaxRangeFailsafe", "⏸️ Range ${distance}m over ${MAX_RANGE_METERS}m but geofence recovery in progress — deferring RTL (one-shot NOT consumed)")
+                    ttsManager?.speak("Max range exceeded. Returning inside the fence first.")
+                }
+                return
+            }
+
+            if (!maxRangeActionTriggered) {
+                // ═══ FIRST TRIGGER: RTL (one-shot per arm cycle) ═══
+                maxRangeActionTriggered = true
+                lastMaxRangeLimitTime = now
+
+                LogUtils.i("MaxRangeFailsafe", "⛔ MAX RANGE: ${distance}m >= ${MAX_RANGE_METERS}m — triggering RTL (one-shot), mode=${state.mode}")
+
+                ttsManager?.speak("Max range ${MAX_RANGE_METERS.toInt()} meters reached. Returning to launch.")
+                addNotification(
+                    Notification(
+                        message = "⛔ MAX RANGE: ${String.format(Locale.US, "%.0f", distance)}m ≥ ${String.format(Locale.US, "%.0f", MAX_RANGE_METERS)}m — activating RTL",
+                        type = NotificationType.ERROR
+                    )
+                )
+                showFailsafePopup("Max Range")
+
+                viewModelScope.launch {
+                    val result = repo?.changeMode(MavMode.RTL) ?: false
+                    if (result) {
+                        LogUtils.i("MaxRangeFailsafe", "✅ RTL activated for max range limit")
+                    } else {
+                        LogUtils.e("MaxRangeFailsafe", "❌ Failed to activate RTL for max range limit")
+                    }
+
+                    try {
+                        WebSocketManager.getInstance().sendMissionEvent(
+                            eventType = "MAX_RANGE",
+                            eventStatus = "CRITICAL",
+                            description = "Range ${String.format(Locale.US, "%.1f", distance)}m reached limit ${String.format(Locale.US, "%.1f", MAX_RANGE_METERS)}m - RTL activated"
+                        )
+                    } catch (e: Exception) {
+                        LogUtils.e("MaxRangeFailsafe", "Failed to send max range event", e)
+                    }
+                }
+            } else if (now - lastMaxRangeLimitTime >= MAX_RANGE_LIMIT_INTERVAL_MS) {
+                // ═══ REPEAT: TTS only, action already taken this arm cycle ═══
+                lastMaxRangeLimitTime = now
+                LogUtils.i("MaxRangeFailsafe", "⛔ Still beyond max range: ${distance}m >= ${MAX_RANGE_METERS}m (action already taken this arm cycle)")
+                ttsManager?.speak("Beyond max range. ${distance.toInt()} meters.")
+            }
+        }
+        // Approaching the radius — alert only, so the pilot can turn back themselves.
+        else if (distance >= MAX_RANGE_METERS - MAX_RANGE_WARN_MARGIN_M) {
+            if (now - lastMaxRangeWarnTime >= MAX_RANGE_WARN_INTERVAL_MS) {
+                lastMaxRangeWarnTime = now
+                LogUtils.i("MaxRangeFailsafe", "⚠️ Approaching max range: ${distance}m of ${MAX_RANGE_METERS}m")
+                ttsManager?.speak("Approaching max range. ${distance.toInt()} meters.")
+                addNotification(
+                    Notification(
+                        message = "⚠️ Approaching max range: ${String.format(Locale.US, "%.0f", distance)}m of ${String.format(Locale.US, "%.0f", MAX_RANGE_METERS)}m",
+                        type = NotificationType.WARNING
+                    )
+                )
+            }
+        }
+        // NOTE: like the other failsafes, maxRangeActionTriggered only resets on DISARM, so
+        // flying back inside the radius does not re-arm the action mid-flight.
     }
 
     /**
@@ -851,13 +969,23 @@ class SharedViewModel : ViewModel() {
         handleTankEmpty()
     }
 
+    // ═══ SVD (DGCA inspection) build ═══
+    // The SVD flavour ships without the Options page, so the pilot cannot configure the
+    // failsafe actions at all. They are fixed at RTL, and the voltage thresholds are read
+    // back from the flight controller instead of being pushed down — the FC's own
+    // parameters are the single source of truth for the inspection.
+    private val isSvdFlavor = BuildConfig.FLAVOR == "svd"
+    private val svdFixedFailsafeAction = "RTL"
+
     /**
      * Get the user's tank empty action setting from SharedPreferences.
      * Manual flight and Auto missions are configured separately; [isAuto] selects which one.
      * Falls back to the legacy single "tank_empty_action" value for users who haven't
      * re-saved settings since the per-mode split.
+     * On SVD it is fixed at RTL — there is no UI to change it.
      */
     private fun getTankEmptyAction(context: Context, isAuto: Boolean): String {
+        if (isSvdFlavor) return svdFixedFailsafeAction
         val prefs = context.getSharedPreferences("failsafe_options", Context.MODE_PRIVATE)
         val legacy = prefs.getString("tank_empty_action", "HOVER") ?: "HOVER"
         val key = if (isAuto) "tank_empty_action_auto" else "tank_empty_action_manual"
@@ -929,9 +1057,11 @@ class SharedViewModel : ViewModel() {
     }
 
     /**
-     * Get the user's low voltage level 2 action from SharedPreferences
+     * Get the user's low voltage level 2 (critical) action from SharedPreferences.
+     * On SVD it is fixed at RTL — there is no UI to change it.
      */
     private fun getLowVoltLevel2Action(context: Context): String {
+        if (isSvdFlavor) return svdFixedFailsafeAction
         val prefs = context.getSharedPreferences("failsafe_options", Context.MODE_PRIVATE)
         return prefs.getString("low_volt_level_2_action", "HOVER") ?: "HOVER"
     }
@@ -2689,6 +2819,22 @@ class SharedViewModel : ViewModel() {
     // Spray status popup (temporary message that disappears after 2 seconds)
     private val _sprayStatusPopup = MutableStateFlow<String?>(null)
     val sprayStatusPopup: StateFlow<String?> = _sprayStatusPopup.asStateFlow()
+
+    // Failsafe alert popup (top-left, temporary message that disappears after 2 seconds).
+    // Shared by every failsafe trigger — Battery, Geofence, Max Range, Max Altitude — so only
+    // one can be on screen at a time; a new trigger restarts the 2-second window.
+    private val _failsafePopup = MutableStateFlow<String?>(null)
+    val failsafePopup: StateFlow<String?> = _failsafePopup.asStateFlow()
+    private var failsafePopupJob: Job? = null
+
+    fun showFailsafePopup(message: String) {
+        failsafePopupJob?.cancel()
+        failsafePopupJob = viewModelScope.launch {
+            _failsafePopup.value = message
+            delay(2000) // Show for 2 seconds
+            _failsafePopup.value = null
+        }
+    }
 
     // ── Vehicle service alert ─────────────────────────────────────────────────
     // Set to true when backend reports is_limit_reached for the connected drone
@@ -5107,6 +5253,15 @@ class SharedViewModel : ViewModel() {
         // 120 m is the DGCA / most-jurisdictions legal ceiling for this class of drone and
         // matches the value the geofence upload has always used.
         const val DEFAULT_MAX_ALTITUDE_M = 120.0f
+
+        // Max Range failsafe: fixed circular fence, radius from home (metres). This is a
+        // GCS-side-only check — deliberately NOT uploaded to the FC as a FENCE_RADIUS/Circle
+        // zone, because the FC only has one active fence slot and that slot already holds the
+        // mission's rectangular polygon fence (see uploadGeofence). Reusing it here would
+        // silently replace the polygon fence instead of layering on top of it. Monitoring the
+        // distance from home on the GCS side, the same way the altitude ceiling failsafe
+        // monitors FENCE_ALT_MAX, keeps the two fences fully independent.
+        const val MAX_RANGE_METERS = 300.0f
     }
 
     // Current fence configuration uploaded to FC
@@ -5193,6 +5348,9 @@ class SharedViewModel : ViewModel() {
     /**
      * Auto-sync saved failsafe options to the drone immediately after connection.
      * Reads settings from SharedPreferences and pushes BATT voltage/action parameters via MAVLink.
+     *
+     * On SVD the voltage direction is reversed — thresholds are read off the FC rather than
+     * pushed to it, because that build has no Options page to configure them with.
      */
     private fun syncFailsafeOptionsOnConnect() {
         viewModelScope.launch {
@@ -5212,6 +5370,23 @@ class SharedViewModel : ViewModel() {
                 // seed the local setting from whatever the FC already has instead of
                 // overwriting a value someone configured in Mission Planner.
                 syncAltitudeCeilingOnConnect(prefs)
+
+                // ═══ SVD: the FC owns the voltage thresholds ═══
+                // With no Options page there is no GCS-side value that could be more
+                // authoritative than the FC's own parameters, so read them instead of
+                // pushing. The failsafe *actions* are still forced off on the FC — the
+                // GCS performs the RTL itself (see [getLowVoltLevel2Action]).
+                if (isSvdFlavor) {
+                    val readFailures = readFailsafeVoltagesFromFc(prefs)
+                    val actionFailures = disableFcBatteryFailsafeActions()
+                    val svdFailures = readFailures + actionFailures
+                    if (svdFailures.isEmpty()) {
+                        LogUtils.i("OptionsSync", "SVD: failsafe voltages read from FC, FC actions disabled ✓")
+                    } else {
+                        LogUtils.w("OptionsSync", "SVD: failed on ${svdFailures.joinToString()}")
+                    }
+                    return@launch
+                }
 
                 // ═══ Voltage thresholds (43V / 42V default, 6S fallback) ═══
                 // Honor explicitly saved values; otherwise use the 12S defaults, except
@@ -5260,28 +5435,7 @@ class SharedViewModel : ViewModel() {
                     LogUtils.e("OptionsSync", "✗ Failed to set BATT_CRT_VOLT")
                 }
 
-                // BATT_FS_LOW_ACT ← Level 1 action is alert only, set to 0 (None)
-                val r3 = setParameter("BATT_FS_LOW_ACT", 0.0f)
-                if (r3 != null) {
-                    LogUtils.i("OptionsSync", "✓ BATT_FS_LOW_ACT = 0 (alert only)")
-                } else {
-                    failures.add("BATT_FS_LOW_ACT")
-                    LogUtils.e("OptionsSync", "✗ Failed to set BATT_FS_LOW_ACT")
-                }
-
-                // BATT_FS_CRT_ACT ← ALWAYS 0 (None) on the FC.
-                // The GCS handles the critical-voltage action (BRAKE/RTL/LAND) via
-                // handleBatteryVoltageFailsafe. Letting the FC ALSO act caused a dual
-                // failsafe: at the critical voltage the FC would RTL with priority over
-                // the geofence and fly through the fence. This now matches the behavior
-                // of OptionsViewModel.saveAndSync (which already forces 0).
-                val r4 = setParameter("BATT_FS_CRT_ACT", 0.0f)
-                if (r4 != null) {
-                    LogUtils.i("OptionsSync", "✓ BATT_FS_CRT_ACT = 0 (None — GCS handles critical action)")
-                } else {
-                    failures.add("BATT_FS_CRT_ACT")
-                    LogUtils.e("OptionsSync", "✗ Failed to set BATT_FS_CRT_ACT")
-                }
+                failures.addAll(disableFcBatteryFailsafeActions())
 
                 if (failures.isEmpty()) {
                     LogUtils.i("OptionsSync", "All failsafe options synced to drone ✓")
@@ -5292,6 +5446,80 @@ class SharedViewModel : ViewModel() {
                 LogUtils.e("OptionsSync", "Error syncing failsafe options on connect", e)
             }
         }
+    }
+
+    /**
+     * Force both of the FC's own battery failsafe actions to 0 (None).
+     *
+     * Level 1 is alert-only by design. Level 2 (critical) is handled by the GCS via
+     * [handleBatteryVoltageFailsafe]; letting the FC ALSO act caused a dual failsafe where
+     * the FC's RTL took priority over the geofence and flew straight through it.
+     *
+     * Returns the names of the parameters that failed to write.
+     */
+    private suspend fun disableFcBatteryFailsafeActions(): List<String> {
+        val failures = mutableListOf<String>()
+
+        if (setParameter("BATT_FS_LOW_ACT", 0.0f) != null) {
+            LogUtils.i("OptionsSync", "✓ BATT_FS_LOW_ACT = 0 (alert only)")
+        } else {
+            failures.add("BATT_FS_LOW_ACT")
+            LogUtils.e("OptionsSync", "✗ Failed to set BATT_FS_LOW_ACT")
+        }
+
+        if (setParameter("BATT_FS_CRT_ACT", 0.0f) != null) {
+            LogUtils.i("OptionsSync", "✓ BATT_FS_CRT_ACT = 0 (None — GCS handles critical action)")
+        } else {
+            failures.add("BATT_FS_CRT_ACT")
+            LogUtils.e("OptionsSync", "✗ Failed to set BATT_FS_CRT_ACT")
+        }
+
+        return failures
+    }
+
+    /**
+     * SVD only: pull BATT_LOW_VOLT / BATT_CRT_VOLT off the flight controller and cache them
+     * so the GCS-side monitoring watches exactly the thresholds the vehicle is configured
+     * with. Nothing is pushed down.
+     *
+     * A value is only accepted when it is plausible for the pack that is actually connected:
+     * a threshold at or above the live pack voltage would make the GCS fire its critical
+     * action the moment the drone powers up (the 12S-default-on-a-6S-pack case). An
+     * implausible reading is discarded, leaving the cell-count-aware defaults in place.
+     *
+     * Returns the names of the parameters that could not be read or were rejected.
+     */
+    private suspend fun readFailsafeVoltagesFromFc(prefs: android.content.SharedPreferences): List<String> {
+        val failures = mutableListOf<String>()
+        val livePackVoltage = _telemetryState.value.voltage
+
+        // A rejected reading clears the cached key rather than leaving it: the previous
+        // value could have come from a different vehicle on an earlier connect, and the
+        // cell-count-aware default is a safer thing to fall back on than a stale one.
+        fun accept(name: String, key: String, value: Float?) {
+            when {
+                value == null || value <= 0f -> {
+                    failures.add(name)
+                    prefs.edit().remove(key).apply()
+                    LogUtils.w("OptionsSync", "✗ Could not read $name from FC — falling back to the default threshold")
+                }
+                livePackVoltage != null && value >= livePackVoltage -> {
+                    failures.add(name)
+                    prefs.edit().remove(key).apply()
+                    LogUtils.w("OptionsSync", "⚠️ FC $name=${value}V ≥ live pack ${livePackVoltage}V — implausible for this pack, falling back to the default threshold")
+                }
+                else -> {
+                    prefs.edit().putFloat(key, value).apply()
+                    LogUtils.i("OptionsSync", "✓ Read $name = ${value}V from FC")
+                }
+            }
+        }
+
+        accept("BATT_LOW_VOLT", "low_volt_level_1", readParameter("BATT_LOW_VOLT"))
+        delay(100) // small gap between param requests
+        accept("BATT_CRT_VOLT", "low_volt_level_2", readParameter("BATT_CRT_VOLT"))
+
+        return failures
     }
 
     /**
@@ -5482,6 +5710,7 @@ class SharedViewModel : ViewModel() {
                         message = "⚠️ Geofence breach! FC activated ${getCurrentFenceAction()}",
                         type = NotificationType.WARNING
                     ))
+                    showFailsafePopup("Geofence Breached")
                     speak("Geofence breach")
 
                     // Reset geofence triggering flag after FC handles it

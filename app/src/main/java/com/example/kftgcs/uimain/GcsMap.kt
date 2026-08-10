@@ -11,6 +11,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import com.example.kftgcs.R
 import com.example.kftgcs.telemetry.TelemetryState
+import com.example.kftgcs.telemetry.SharedViewModel
 import com.google.android.gms.maps.CameraUpdateFactory
 import com.google.android.gms.maps.model.LatLng
 import com.google.android.gms.maps.model.BitmapDescriptor
@@ -578,6 +579,22 @@ fun GcsMap(
                     Timber.d("Map tiles loaded successfully (attempt ${mapLoadAttempt + 1})")
                 }
             ) {
+        // Max Range failsafe boundary — fixed 300m circular fence centred on home.
+        // Always drawn once home is known; unlike the polygon geofence below, this cannot
+        // be turned off (see SharedViewModel.handleMaxRangeFailsafe / MAX_RANGE_METERS).
+        val maxRangeHomeLat = telemetryState.homeLatitude
+        val maxRangeHomeLon = telemetryState.homeLongitude
+        if (maxRangeHomeLat != null && maxRangeHomeLon != null) {
+            Circle(
+                center = LatLng(maxRangeHomeLat, maxRangeHomeLon),
+                radius = SharedViewModel.MAX_RANGE_METERS.toDouble(),
+                strokeColor = Color(0xFFFF6D00), // Orange
+                strokeWidth = 4f,
+                fillColor = Color(0xFFFF6D00).copy(alpha = 0.04f),
+                zIndex = 0f
+            )
+        }
+
         // Polygon geofence boundary overlay (replaces circular fence)
         if (geofenceEnabled && geofencePolygon.isNotEmpty()) {
             // Draw the polygon boundary

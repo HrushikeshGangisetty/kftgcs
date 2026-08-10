@@ -194,6 +194,8 @@ object AppStrings {
     val time get() = getString(mapOf("en" to "Time", "te" to "సమయం", "hi" to "समय", "mr" to "वेळ", "ta" to "நேரம்", "kn" to "ಸಮಯ", "ml" to "സമയം", "gu" to "સમય", "as" to "সময়", "bn" to "সময়", "pa" to "ਸਮਾਂ"))
     val distance get() = getString(mapOf("en" to "Distance", "te" to "దూరం", "hi" to "दूरी", "mr" to "अंतर", "ta" to "தூரம்", "kn" to "ದೂರ", "ml" to "ദൂരം", "gu" to "અંતર", "as" to "দূৰত্ব", "bn" to "দূরত্ব", "pa" to "ਦੂਰੀ"))
     val consumed get() = getString(mapOf("en" to "Consumed", "te" to "వినియోగించారు", "hi" to "खपत", "mr" to "वापर", "ta" to "நுகர்வு", "kn" to "ಬಳಕೆ", "ml" to "ഉപഭോഗം", "gu" to "વપરાશ", "as" to "ব্যৱহাৰ", "bn" to "ব্যবহার", "pa" to "ਖਪਤ"))
+    // Straight-line distance from the drone to the FC's home/launch point
+    val homeDistance get() = getString(mapOf("en" to "Home Dist", "te" to "హోమ్ దూరం", "hi" to "होम दूरी", "mr" to "होम अंतर", "ta" to "வீட்டு தூரம்", "kn" to "ಹೋಮ್ ದೂರ", "ml" to "ഹോം ദൂരം", "gu" to "હોમ અંતર", "as" to "হোম দূৰত্ব", "bn" to "হোম দূরত্ব", "pa" to "ਹੋਮ ਦੂਰੀ"))
 
     // NEW: Plan Screen
     val addPoint get() = getString(mapOf("en" to "Add Point", "te" to "పాయింట్ జోడించు", "hi" to "बिंदु जोड़ें", "mr" to "बिंदू जोडा", "ta" to "புள்ளி சேர்க்கவும்", "kn" to "ಬಿಂದು ಸೇರಿಸಿ", "ml" to "പോയിന്റ് ചേർക്കുക", "gu" to "પોઈન્ટ ઉમેરો", "as" to "পইণ্ট যোগ কৰক", "bn" to "পয়েন্ট যোগ করুন", "pa" to "ਪੁਆਇੰਟ ਜੋੜੋ"))

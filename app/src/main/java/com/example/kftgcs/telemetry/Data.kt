@@ -204,6 +204,12 @@ data class TelemetryState(
     val latitude : Double?= null,
     val longitude : Double? = null,
 
+    // Home (launch) position reported by the FC via HOME_POSITION (242). This is the same point
+    // RTL flies back to, so the map overlay's "distance to home" matches the vehicle's own idea
+    // of home. Null until the FC has set/reported a home position.
+    val homeLatitude : Double? = null,
+    val homeLongitude : Double? = null,
+
     val mode: String? = null,
     val armed: Boolean = false,
     val armable: Boolean = false,
