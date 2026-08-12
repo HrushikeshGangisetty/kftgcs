@@ -1925,6 +1925,9 @@ class MavlinkTelemetryRepository(
                                     )
                                     // Announce via TTS
                                     sharedViewModel.announceRCBatteryFailsafe(rcBattPct)
+                                    // ...and the popup every other failsafe shows. The RTL
+                                    // announcement that follows appends this as its reason.
+                                    sharedViewModel.showFailsafePopup("RC Battery Failsafe")
                                 } else {
                                     sharedViewModel.addNotification(
                                         Notification(
@@ -1978,17 +1981,31 @@ class MavlinkTelemetryRepository(
                     }
                     sharedViewModel.addNotification(Notification(message, type))
 
-                    // RC (radio) failsafe is only surfaced by the FC via STATUSTEXT — there is
-                    // no dedicated MAVLink status bit polled elsewhere in this repo — so detect
-                    // it here and mirror the popup shown for Battery/Altitude/Max Range/Tank
-                    // Empty. "cleared"/"resolved" messages are excluded so the popup only fires
-                    // on the actual failsafe activation, not its recovery.
-                    val isRcFailsafeActivation = (message.contains("RC Failsafe", ignoreCase = true) ||
-                            message.contains("Radio Failsafe", ignoreCase = true)) &&
-                            !message.contains("clear", ignoreCase = true) &&
-                            !message.contains("resolved", ignoreCase = true)
-                    if (isRcFailsafeActivation) {
-                        sharedViewModel.showFailsafePopup("RC Failsafe")
+                    // ═══ FC-DECLARED FAILSAFES → POPUP ═══
+                    // The GCS owns Battery / Max Altitude / Max Range / Tank Empty and pops those
+                    // up itself. Everything the *flight controller* declares (radio, GCS link,
+                    // EKF, terrain, its own battery failsafe, fence breach) reaches us only as
+                    // STATUSTEXT — there is no status bit for them anywhere else in this repo —
+                    // so they are matched here and given the same popup.
+                    //
+                    // Recovery and pre-arm chatter is excluded so the popup marks the activation
+                    // only: ArduPilot emits "...Failsafe Cleared" / "PreArm: ..." with the same
+                    // keywords, and those are not events the pilot needs a red banner for.
+                    val isRecoveryOrPreArm = message.contains("clear", ignoreCase = true) ||
+                            message.contains("resolved", ignoreCase = true) ||
+                            message.contains("PreArm", ignoreCase = true)
+
+                    if (!isRecoveryOrPreArm) {
+                        // Fence breach has its own entry point: it is also detectable via
+                        // SYS_STATUS bit 8, and notifyFenceBreach de-dupes the two paths. The
+                        // SYS_STATUS path alone was not enough — it only reports while the FC
+                        // holds the fence sensor enabled-and-unhealthy, which short breaches and
+                        // some fence types never do, which is why breaches showed no popup.
+                        if (isFenceMessage && message.contains("breach", ignoreCase = true)) {
+                            sharedViewModel.notifyFenceBreach("STATUSTEXT")
+                        } else if (message.contains("failsafe", ignoreCase = true)) {
+                            sharedViewModel.showFailsafePopup(failsafePopupLabel(message))
+                        }
                     }
                 }
         }
@@ -4754,6 +4771,24 @@ class MavlinkTelemetryRepository(
      * This monitors SYS_STATUS for fence breach flags.
      * Should be called when connection is established.
      */
+    /**
+     * Collapse an ArduPilot failsafe STATUSTEXT into the short label the popup shows.
+     *
+     * The raw wording varies by firmware version and battery index ("Radio Failsafe",
+     * "Battery 1 low failsafe", "EKF Failsafe"), so the known families map to stable labels that
+     * read the same as the GCS-side popups. Anything unrecognised keeps the FC's own wording
+     * (truncated) rather than being dropped — an unknown failsafe still deserves the banner.
+     */
+    private fun failsafePopupLabel(message: String): String = when {
+        message.contains("radio failsafe", ignoreCase = true) ||
+                message.contains("rc failsafe", ignoreCase = true) -> "RC Failsafe"
+        message.contains("gcs failsafe", ignoreCase = true) -> "GCS Link Failsafe"
+        message.contains("ekf", ignoreCase = true) -> "EKF Failsafe"
+        message.contains("terrain", ignoreCase = true) -> "Terrain Failsafe"
+        message.contains("batt", ignoreCase = true) -> "Battery Failsafe"
+        else -> message.trim().take(60)
+    }
+
     fun startFenceMonitoring() {
         // Cancel any previous monitoring coroutine to prevent stale state
         stopFenceMonitoring()
@@ -4791,17 +4826,12 @@ class MavlinkTelemetryRepository(
                         breached = fenceBreached
                     )}
 
-                    // Notify only on new breach detection
+                    // Notify only on new breach detection. Routed through notifyFenceBreach so
+                    // the popup/TTS/notification match every other failsafe and are de-duped
+                    // against the STATUSTEXT path and SharedViewModel's own fenceStatus collector.
                     if (fenceBreached && !previousStatus.breached) {
-                        // Notify user
                         withContext(Dispatchers.Main) {
-                            sharedViewModel.addNotification(
-                                Notification(
-                                    message = "⚠️ Geofence breach! FC is handling...",
-                                    type = NotificationType.WARNING
-                                )
-                            )
-                            sharedViewModel.speak("Geofence breach detected")
+                            sharedViewModel.notifyFenceBreach("SYS_STATUS/repo")
                         }
                     }
                 }

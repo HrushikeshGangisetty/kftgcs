@@ -152,10 +152,26 @@ class SharedViewModel : ViewModel() {
     private var lastMaxRangeLimitTime = 0L
     private val MAX_RANGE_WARN_INTERVAL_MS = 4000L
     private val MAX_RANGE_LIMIT_INTERVAL_MS = 5000L
-    /** Start warning this far inside the radius so the pilot can turn back before hitting it. */
-    private val MAX_RANGE_WARN_MARGIN_M = 30f
-    /** Fire RTL this far inside the radius so the drone's momentum never carries it past the limit. */
-    private val MAX_RANGE_ACTION_MARGIN_M = 4f
+    /** Warn this far inside the RTL trigger point so the pilot can turn back before it fires. */
+    private val MAX_RANGE_WARN_LEAD_M = 25f
+    /**
+     * Smallest internal buffer inside [MAX_RANGE_METERS] where RTL fires — the "10 m internal
+     * fence". Applies when the drone is barely moving; anything faster gets the speed-based
+     * stopping distance below instead.
+     */
+    private val MAX_RANGE_MIN_ACTION_MARGIN_M = 10f
+    /** Upper clamp so a bogus groundspeed reading can't shrink the usable range to nothing. */
+    private val MAX_RANGE_MAX_ACTION_MARGIN_M = 60f
+    /**
+     * Seconds of latency budgeted between crossing the trigger point and RTL actually biting:
+     * telemetry frame age + DO_SET_MODE round trip + the FC's own mode-entry delay.
+     */
+    private val MAX_RANGE_LATENCY_S = 1.0f
+    /**
+     * Conservative horizontal deceleration used to project the drone's stopping distance.
+     * ArduCopter brakes at roughly ATC_ACCEL_*_MAX / WPNAV_ACCEL (≈2.5 m/s² on this airframe).
+     */
+    private val MAX_RANGE_DECEL_MPS2 = 2.5f
 
     init {
         // Setup emergency RTL callback for crash handler
@@ -209,6 +225,47 @@ class SharedViewModel : ViewModel() {
                 }
             }
         }
+
+        // 🏠 RTL ANNOUNCEMENT — popup + TTS on every entry into RTL / Smart RTL, whatever
+        // triggered it (a GCS failsafe, the FC's own failsafe, or the pilot's switch).
+        viewModelScope.launch {
+            _telemetryState
+                .map { it.mode }
+                .distinctUntilChanged()
+                .collect { mode -> handleRtlModeAnnouncement(mode) }
+        }
+    }
+
+    /**
+     * Announce entry into RTL, mirroring the popup + TTS the other failsafes give.
+     *
+     * Watching the heartbeat mode rather than our own [TelemetryRepository.changeMode] calls is
+     * deliberate: RTL also gets entered by the FC itself (radio failsafe, EKF failsafe, GCS link
+     * loss) and by the pilot's mode switch, and the pilot needs to know the drone is coming home
+     * in every one of those cases, not just the ones the GCS initiated.
+     *
+     * When a GCS failsafe caused the RTL its reason is still appended, so replacing the
+     * "Max Range" / "Battery Failsafe" popup a second earlier does not hide *why* it happened.
+     */
+    private fun handleRtlModeAnnouncement(mode: String?) {
+        // Ignore the null → mode settling that happens before a link is up.
+        if (!_telemetryState.value.connected) return
+        val isRtl = mode.equals("RTL", ignoreCase = true) || mode.equals("Smart_RTL", ignoreCase = true)
+        if (!isRtl) return
+
+        val reason = lastFailsafePopupReason?.takeIf {
+            System.currentTimeMillis() - lastFailsafePopupTime <= FAILSAFE_REASON_LINGER_MS
+        }
+        LogUtils.i("RTLAnnounce", "🏠 Entered $mode mode${reason?.let { " (after $it)" } ?: ""} — announcing")
+
+        ttsManager?.speak("RTL Flight Mode")
+        addNotification(
+            Notification(
+                message = if (reason != null) "🏠 RTL Flight Mode — $reason" else "🏠 RTL Flight Mode",
+                type = NotificationType.WARNING
+            )
+        )
+        showFailsafePopup(if (reason != null) "RTL Flight Mode — $reason" else "RTL Flight Mode")
     }
 
     /**
@@ -491,10 +548,13 @@ class SharedViewModel : ViewModel() {
      * the two fences fully independent — a Max Range breach never touches the rectangular
      * fence's state, and vice versa.
      *
-     * Warning zone: within [MAX_RANGE_WARN_MARGIN_M] of the radius → TTS + notification only.
-     * At/beyond the radius: RTL fires ONCE per arm cycle (the failsafe explicitly always uses
-     * RTL, unlike the configurable altitude/battery actions). One-shot for the same reason as
-     * the other failsafes — a pilot who deliberately takes back control must not be fought on
+     * The RTL trigger sits an internal buffer inside the radius (see [maxRangeActionMargin]) so
+     * the drone's momentum never carries it past the limit; [MAX_RANGE_WARN_LEAD_M] before that
+     * is a TTS + notification warning zone so the pilot can turn back first.
+     *
+     * At/beyond the trigger point: RTL fires ONCE per arm cycle (the failsafe explicitly always
+     * uses RTL, unlike the configurable altitude/battery actions). One-shot for the same reason
+     * as the other failsafes — a pilot who deliberately takes back control must not be fought on
      * every telemetry frame.
      */
     private fun handleMaxRangeFailsafe(state: TelemetryState) {
@@ -505,7 +565,9 @@ class SharedViewModel : ViewModel() {
 
         val distance = GeofenceUtils.haversineDistance(LatLng(homeLat, homeLon), LatLng(lat, lon))
         val now = System.currentTimeMillis()
-        val actionThreshold = MAX_RANGE_METERS - MAX_RANGE_ACTION_MARGIN_M
+        val margin = maxRangeActionMargin(state.groundspeed)
+        val actionThreshold = MAX_RANGE_METERS - margin
+        val warnThreshold = actionThreshold - MAX_RANGE_WARN_LEAD_M
 
         if (distance >= actionThreshold) {
 
@@ -516,7 +578,7 @@ class SharedViewModel : ViewModel() {
             if (!maxRangeActionTriggered && _geofenceEnabled.value && _geofenceViolationDetected.value) {
                 if (now - lastMaxRangeLimitTime >= MAX_RANGE_LIMIT_INTERVAL_MS) {
                     lastMaxRangeLimitTime = now
-                    LogUtils.w("MaxRangeFailsafe", "⏸️ Range ${distance}m over action threshold ${actionThreshold}m (limit ${MAX_RANGE_METERS}m) but geofence recovery in progress — deferring RTL (one-shot NOT consumed)")
+                    LogUtils.w("MaxRangeFailsafe", "⏸️ Range ${distance}m over action threshold ${actionThreshold}m (limit ${MAX_RANGE_METERS}m, margin ${margin}m) but geofence recovery in progress — deferring RTL (one-shot NOT consumed)")
                     ttsManager?.speak("Max range exceeded. Returning inside the fence first.")
                 }
                 return
@@ -527,12 +589,12 @@ class SharedViewModel : ViewModel() {
                 maxRangeActionTriggered = true
                 lastMaxRangeLimitTime = now
 
-                LogUtils.i("MaxRangeFailsafe", "⛔ MAX RANGE: ${distance}m >= action threshold ${actionThreshold}m (limit ${MAX_RANGE_METERS}m, ${MAX_RANGE_ACTION_MARGIN_M.toInt()}m margin) — triggering RTL (one-shot), mode=${state.mode}")
+                LogUtils.i("MaxRangeFailsafe", "⛔ MAX RANGE: ${distance}m >= action threshold ${actionThreshold}m (limit ${MAX_RANGE_METERS}m, ${margin}m margin at ${state.groundspeed}m/s) — triggering RTL (one-shot), mode=${state.mode}")
 
                 ttsManager?.speak("Approaching max range. Returning to launch.")
                 addNotification(
                     Notification(
-                        message = "⛔ MAX RANGE: ${String.format(Locale.US, "%.0f", distance)}m ≥ ${String.format(Locale.US, "%.0f", actionThreshold)}m (${MAX_RANGE_ACTION_MARGIN_M.toInt()}m margin below ${String.format(Locale.US, "%.0f", MAX_RANGE_METERS)}m limit) — activating RTL",
+                        message = "⛔ MAX RANGE: ${String.format(Locale.US, "%.0f", distance)}m ≥ ${String.format(Locale.US, "%.0f", actionThreshold)}m (${String.format(Locale.US, "%.0f", margin)}m margin below ${String.format(Locale.US, "%.0f", MAX_RANGE_METERS)}m limit) — activating RTL",
                         type = NotificationType.ERROR
                     )
                 )
@@ -563,11 +625,11 @@ class SharedViewModel : ViewModel() {
                 ttsManager?.speak("Beyond max range. ${distance.toInt()} meters.")
             }
         }
-        // Approaching the radius — alert only, so the pilot can turn back themselves.
-        else if (distance >= MAX_RANGE_METERS - MAX_RANGE_WARN_MARGIN_M) {
+        // Approaching the trigger point — alert only, so the pilot can turn back themselves.
+        else if (distance >= warnThreshold) {
             if (now - lastMaxRangeWarnTime >= MAX_RANGE_WARN_INTERVAL_MS) {
                 lastMaxRangeWarnTime = now
-                LogUtils.i("MaxRangeFailsafe", "⚠️ Approaching max range: ${distance}m of ${MAX_RANGE_METERS}m")
+                LogUtils.i("MaxRangeFailsafe", "⚠️ Approaching max range: ${distance}m of ${MAX_RANGE_METERS}m (RTL at ${actionThreshold}m)")
                 ttsManager?.speak("Approaching max range. ${distance.toInt()} meters.")
                 addNotification(
                     Notification(
@@ -579,6 +641,29 @@ class SharedViewModel : ViewModel() {
         }
         // NOTE: like the other failsafes, maxRangeActionTriggered only resets on DISARM, so
         // flying back inside the radius does not re-arm the action mid-flight.
+    }
+
+    /**
+     * How far inside [MAX_RANGE_METERS] the RTL trigger sits, in metres.
+     *
+     * A fixed buffer does not work: RTL is not instantaneous, so the drone keeps flying outward
+     * for the command latency and then for its braking distance. With the old flat 4 m buffer a
+     * drone cruising at 8 m/s crossed the 300 m limit by ~10 m before it turned around. The
+     * margin therefore tracks speed:
+     *
+     *     margin = v · [MAX_RANGE_LATENCY_S] + v² / (2 · [MAX_RANGE_DECEL_MPS2])
+     *
+     * clamped to [[MAX_RANGE_MIN_ACTION_MARGIN_M], [MAX_RANGE_MAX_ACTION_MARGIN_M]]. At 8 m/s
+     * that is 8 + 12.8 ≈ 21 m, so RTL fires around 279 m and the ~14 m of real-world overshoot
+     * lands well inside 300 m. Hovering or drifting slowly falls back to the 10 m floor.
+     *
+     * groundspeed is used rather than airspeed because the fence is a ground-frame distance from
+     * home; a null/garbage reading degrades to the 10 m floor rather than disabling the failsafe.
+     */
+    private fun maxRangeActionMargin(groundspeed: Float?): Float {
+        val v = groundspeed?.takeIf { it.isFinite() && it > 0f } ?: 0f
+        val stoppingDistance = v * MAX_RANGE_LATENCY_S + (v * v) / (2f * MAX_RANGE_DECEL_MPS2)
+        return stoppingDistance.coerceIn(MAX_RANGE_MIN_ACTION_MARGIN_M, MAX_RANGE_MAX_ACTION_MARGIN_M)
     }
 
     /**
@@ -2837,7 +2922,18 @@ class SharedViewModel : ViewModel() {
     val failsafePopup: StateFlow<String?> = _failsafePopup.asStateFlow()
     private var failsafePopupJob: Job? = null
 
+    // Last failsafe reason and when it fired, so [handleRtlModeAnnouncement] can name the cause
+    // of an RTL that follows within FAILSAFE_REASON_LINGER_MS instead of silently replacing it.
+    private var lastFailsafePopupReason: String? = null
+    private var lastFailsafePopupTime = 0L
+    private val FAILSAFE_REASON_LINGER_MS = 15000L
+
     fun showFailsafePopup(message: String) {
+        // Don't let an RTL announcement overwrite the reason it is meant to be attributed to.
+        if (!message.startsWith("RTL Flight Mode")) {
+            lastFailsafePopupReason = message
+            lastFailsafePopupTime = System.currentTimeMillis()
+        }
         failsafePopupJob?.cancel()
         failsafePopupJob = viewModelScope.launch {
             _failsafePopup.value = message
@@ -5732,20 +5828,19 @@ class SharedViewModel : ViewModel() {
 
                 if (status.breached) {
                     // Just notify - FC is handling everything
-                    LogUtils.w("Geofence", "⚠️ Fence breach detected - FC handling with ${getCurrentFenceAction()}")
                     _geofenceWarningTriggered.value = true
                     geofenceTriggeringModeChange = true
 
-                    addNotification(Notification(
-                        message = "⚠️ Geofence breach! FC activated ${getCurrentFenceAction()}",
-                        type = NotificationType.WARNING
-                    ))
-                    showFailsafePopup("Fence Breached")
-                    speak("Fence Breached")
+                    notifyFenceBreach("SYS_STATUS")
 
-                    // Reset geofence triggering flag after FC handles it
-                    delay(2000)
-                    geofenceTriggeringModeChange = false
+                    // Reset the triggering flag after the FC has had time to act. Launched
+                    // separately rather than delayed inline: this is a StateFlow collector, and
+                    // blocking it for 2s lets a short breach→clear→breach sequence be conflated
+                    // away, which is exactly how a real breach ended up with no popup at all.
+                    viewModelScope.launch {
+                        delay(2000)
+                        geofenceTriggeringModeChange = false
+                    }
                 } else if (_geofenceWarningTriggered.value) {
                     // Breach cleared
                     LogUtils.i("Geofence", "✓ Fence breach cleared - drone back in safe zone")
@@ -5757,6 +5852,40 @@ class SharedViewModel : ViewModel() {
                 }
             }
         }
+    }
+
+    // Fence-breach alert de-dup. The breach reaches us on two independent paths and either one
+    // can be the only one that fires: SYS_STATUS bit 8 (fence sensor enabled + unhealthy) and
+    // the FC's own "Fence breach" STATUSTEXT. Whichever arrives first raises the alert; the
+    // other is swallowed for FENCE_BREACH_DEDUPE_MS so the pilot gets one popup, not two.
+    private var lastFenceBreachAlertTime = 0L
+    private val FENCE_BREACH_DEDUPE_MS = 5000L
+
+    /**
+     * Single entry point for the geofence-breach alert (notification + popup + TTS), matching
+     * what Battery / Max Range / Max Altitude / RC / Tank Empty already do.
+     *
+     * Previously this lived only inside the SYS_STATUS collector, so a breach the FC reported
+     * via STATUSTEXT but never reflected in the SYS_STATUS fence health bit produced no popup
+     * at all. Both paths now land here.
+     */
+    fun notifyFenceBreach(source: String) {
+        val now = System.currentTimeMillis()
+        if (now - lastFenceBreachAlertTime < FENCE_BREACH_DEDUPE_MS) {
+            LogUtils.d("Geofence", "Fence breach from $source suppressed — already alerted ${now - lastFenceBreachAlertTime}ms ago")
+            return
+        }
+        lastFenceBreachAlertTime = now
+
+        LogUtils.w("Geofence", "⚠️ Fence breach detected via $source - FC handling with ${getCurrentFenceAction()}")
+        addNotification(Notification(
+            message = "⚠️ Geofence breach! FC activated ${getCurrentFenceAction()}",
+            type = NotificationType.WARNING
+        ))
+        showFailsafePopup("Fence Breached")
+        // Callers include the STATUSTEXT collector, which runs off the main thread; viewModelScope
+        // is Main.immediate, so this keeps TTS on the same thread the old call site used.
+        viewModelScope.launch { speak("Fence Breached") }
     }
 
     /**
@@ -6070,6 +6199,7 @@ class SharedViewModel : ViewModel() {
         _geofenceViolationDetected.value = false
         _geofenceWarningTriggered.value = false
         geofenceTriggeringModeChange = false
+        lastFenceBreachAlertTime = 0L
         _localFenceStatus.value = FenceStatus()
         // Cancel any pending fence uploads
         fenceUploadJob?.cancel()
