@@ -10,6 +10,7 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import com.example.kftgcs.R
+import com.example.kftgcs.location.rememberPhoneLocation
 import com.example.kftgcs.telemetry.TelemetryState
 import com.example.kftgcs.telemetry.SharedViewModel
 import com.google.android.gms.maps.CameraUpdateFactory
@@ -162,8 +163,17 @@ private fun createMarkerWithText(
     return BitmapDescriptorFactory.fromBitmap(bitmap)
 }
 
-// Helper function to create small rounded label for area/dimension display
-private fun createSmallLabelMarker(text: String, backgroundColor: Int = android.graphics.Color.WHITE): BitmapDescriptor {
+// Helper function to create small rounded label for area/dimension display.
+//
+// [bottomSpacerPx] adds transparent space below the pill. Anchored at (0.5, 1.0) that lifts the
+// visible label off the marker position by exactly that many pixels - which is how the geofence
+// edge lengths stay clear of the "+" buttons sitting on the same midpoints. Baking the gap into
+// the bitmap keeps the anchor inside the [0,1] range the Maps SDK documents.
+private fun createSmallLabelMarker(
+    text: String,
+    backgroundColor: Int = android.graphics.Color.WHITE,
+    bottomSpacerPx: Int = 0
+): BitmapDescriptor {
     val paint = android.graphics.Paint().apply {
         isAntiAlias = true
         textSize = 28f
@@ -176,19 +186,19 @@ private fun createSmallLabelMarker(text: String, backgroundColor: Int = android.
 
     val paddingH = 16
     val paddingV = 10
-    val width = textBounds.width() + paddingH * 2
-    val height = textBounds.height() + paddingV * 2
+    val width = (textBounds.width() + paddingH * 2).coerceAtLeast(40)
+    val labelHeight = (textBounds.height() + paddingV * 2).coerceAtLeast(30)
 
-    val bitmap = Bitmap.createBitmap(width.coerceAtLeast(40), height.coerceAtLeast(30), Bitmap.Config.ARGB_8888)
+    val bitmap = Bitmap.createBitmap(width, labelHeight + bottomSpacerPx, Bitmap.Config.ARGB_8888)
     val canvas = Canvas(bitmap)
 
-    // Draw rounded rectangle background
+    // Draw rounded rectangle background (only over the label itself, not the spacer)
     val bgPaint = android.graphics.Paint().apply {
         isAntiAlias = true
         color = backgroundColor
         style = android.graphics.Paint.Style.FILL
     }
-    val rect = android.graphics.RectF(0f, 0f, bitmap.width.toFloat(), bitmap.height.toFloat())
+    val rect = android.graphics.RectF(0f, 0f, width.toFloat(), labelHeight.toFloat())
     canvas.drawRoundRect(rect, 8f, 8f, bgPaint)
 
     // Draw border
@@ -203,8 +213,58 @@ private fun createSmallLabelMarker(text: String, backgroundColor: Int = android.
     // Draw text
     paint.color = android.graphics.Color.BLACK
     paint.textAlign = android.graphics.Paint.Align.CENTER
-    val textY = bitmap.height / 2f + textBounds.height() / 2f - textBounds.bottom
-    canvas.drawText(text, bitmap.width / 2f, textY, paint)
+    val textY = labelHeight / 2f + textBounds.height() / 2f - textBounds.bottom
+    canvas.drawText(text, width / 2f, textY, paint)
+
+    return BitmapDescriptorFactory.fromBitmap(bitmap)
+}
+
+// Helper function to create the "+" button drawn at the midpoint of every geofence edge.
+// Tapping one splits that edge, so a 4-sided fence can be reshaped into a 5- or 6-sided one.
+private fun createAddVertexMarker(): BitmapDescriptor {
+    val size = 64
+    val bitmap = Bitmap.createBitmap(size, size, Bitmap.Config.ARGB_8888)
+    val canvas = Canvas(bitmap)
+    val center = size / 2f
+    val radius = center - 5f
+
+    // Green reads as "add" and stands clear of the lemon-yellow fence line it sits on.
+    val fillPaint = android.graphics.Paint().apply {
+        isAntiAlias = true
+        color = android.graphics.Color.rgb(76, 175, 80) // Material Green 500
+        style = android.graphics.Paint.Style.FILL
+    }
+    canvas.drawCircle(center, center, radius, fillPaint)
+
+    // White border for visibility over satellite imagery
+    val borderPaint = android.graphics.Paint().apply {
+        isAntiAlias = true
+        color = android.graphics.Color.WHITE
+        style = android.graphics.Paint.Style.STROKE
+        strokeWidth = 4f
+    }
+    canvas.drawCircle(center, center, radius, borderPaint)
+
+    // Thin dark outline for contrast on light backgrounds
+    val outlinePaint = android.graphics.Paint().apply {
+        isAntiAlias = true
+        color = android.graphics.Color.DKGRAY
+        style = android.graphics.Paint.Style.STROKE
+        strokeWidth = 1.5f
+    }
+    canvas.drawCircle(center, center, radius + 2f, outlinePaint)
+
+    // The plus glyph
+    val plusPaint = android.graphics.Paint().apply {
+        isAntiAlias = true
+        color = android.graphics.Color.WHITE
+        style = android.graphics.Paint.Style.STROKE
+        strokeWidth = 7f
+        strokeCap = android.graphics.Paint.Cap.ROUND
+    }
+    val arm = size * 0.20f
+    canvas.drawLine(center - arm, center, center + arm, center, plusPaint)
+    canvas.drawLine(center, center - arm, center, center + arm, plusPaint)
 
     return BitmapDescriptorFactory.fromBitmap(bitmap)
 }
@@ -310,9 +370,16 @@ private fun createSmallResumeMarker(): BitmapDescriptor {
 
 // Helper function to create RC marker icon for phone GPS location
 private fun createRCMarker(): BitmapDescriptor {
-    val size = 80 // Size for RC marker
+    val size = 40 // Halved from 80 — the marker was overpowering the map
+    // Every stroke width, text size and inset below is expressed relative to `size` so the
+    // whole marker scales as one piece. They used to be hardcoded absolutes, which meant
+    // shrinking the bitmap alone left a 4px border and 32px text on a 40px circle.
+    val scale = size / 80f
     val bitmap = Bitmap.createBitmap(size, size, Bitmap.Config.ARGB_8888)
     val canvas = Canvas(bitmap)
+
+    val borderInset = 4f * scale
+    val outlineInset = 1f * scale
 
     // Draw outer circle with green color
     val outerPaint = android.graphics.Paint().apply {
@@ -320,37 +387,37 @@ private fun createRCMarker(): BitmapDescriptor {
         color = android.graphics.Color.rgb(76, 175, 80) // Material Green 500
         style = android.graphics.Paint.Style.FILL
     }
-    canvas.drawCircle(size / 2f, size / 2f, size / 2f - 4, outerPaint)
+    canvas.drawCircle(size / 2f, size / 2f, size / 2f - borderInset, outerPaint)
 
     // Draw white border for visibility
     val borderPaint = android.graphics.Paint().apply {
         isAntiAlias = true
         color = android.graphics.Color.WHITE
         style = android.graphics.Paint.Style.STROKE
-        strokeWidth = 4f
+        strokeWidth = 4f * scale
     }
-    canvas.drawCircle(size / 2f, size / 2f, size / 2f - 4, borderPaint)
+    canvas.drawCircle(size / 2f, size / 2f, size / 2f - borderInset, borderPaint)
 
     // Draw dark outline for contrast
     val outlinePaint = android.graphics.Paint().apply {
         isAntiAlias = true
         color = android.graphics.Color.DKGRAY
         style = android.graphics.Paint.Style.STROKE
-        strokeWidth = 1.5f
+        strokeWidth = 1.5f * scale
     }
-    canvas.drawCircle(size / 2f, size / 2f, size / 2f - 1, outlinePaint)
+    canvas.drawCircle(size / 2f, size / 2f, size / 2f - outlineInset, outlinePaint)
 
     // Draw "RC" text
     val textPaint = android.graphics.Paint().apply {
         isAntiAlias = true
         color = android.graphics.Color.WHITE
-        textSize = 32f
+        textSize = 32f * scale
         typeface = android.graphics.Typeface.create(android.graphics.Typeface.DEFAULT, android.graphics.Typeface.BOLD)
         textAlign = android.graphics.Paint.Align.CENTER
     }
 
     // Add text shadow for better readability
-    textPaint.setShadowLayer(2f, 1f, 1f, android.graphics.Color.BLACK)
+    textPaint.setShadowLayer(2f * scale, 1f * scale, 1f * scale, android.graphics.Color.BLACK)
 
     // Center the text vertically
     val textBounds = android.graphics.Rect()
@@ -364,10 +431,10 @@ private fun createRCMarker(): BitmapDescriptor {
         isAntiAlias = true
         color = android.graphics.Color.rgb(76, 175, 80)
         style = android.graphics.Paint.Style.STROKE
-        strokeWidth = 2f
+        strokeWidth = 2f * scale
         alpha = 128
     }
-    canvas.drawCircle(size / 2f, size / 2f, size / 2f - 1, pulsePaint)
+    canvas.drawCircle(size / 2f, size / 2f, size / 2f - outlineInset, pulsePaint)
 
     return BitmapDescriptorFactory.fromBitmap(bitmap)
 }
@@ -436,6 +503,9 @@ fun GcsMap(
     // Geofence point selection
     selectedGeofencePointIndex: Int? = null,
     onGeofencePointClick: (index: Int) -> Unit = {},
+    // Tapping the "+" on the midpoint of geofence edge [edgeIndex] (the edge running from
+    // vertex edgeIndex to the next one). Insert [midPoint] at edgeIndex + 1 to add a side.
+    onGeofenceEdgeAddPoint: (edgeIndex: Int, midPoint: LatLng) -> Unit = { _, _ -> },
     // Geofence adjustment mode
     geofenceAdjustmentEnabled: Boolean = false,
     // Show grid info (area at center, dimensions on edges)
@@ -454,9 +524,9 @@ fun GcsMap(
     obstacleEditingEnabled: Boolean = false,
     // Resume point location - shows "R" marker where drone paused
     resumePointLocation: LatLng? = null,
-    // RC Mode - Phone GPS location for RC marker
+    // Explicit position for the RC marker (the pilot's phone). Normally left null: the map
+    // then falls back to the live phone GPS so the RC marker is always on screen.
     phoneLocation: LatLng? = null,
-    isRCMode: Boolean = false,
     // Manual resume point (grey = uploading, green = uploaded)
     manualResumePointPending: LatLng? = null,
     manualResumePointUploaded: LatLng? = null,
@@ -467,6 +537,11 @@ fun GcsMap(
 ) {
     val context = LocalContext.current
     val cameraState = cameraPositionState ?: rememberCameraPositionState()
+
+    // Pilot ("RC") position from the phone's own GPS. Tracked for as long as a map is on
+    // screen, so the RC marker is drawn on every map without the caller wiring anything up.
+    val livePhoneLocation = rememberPhoneLocation()
+    val rcLocation = phoneLocation ?: livePhoneLocation
 
     // --- Deferred map loading to avoid "referer is null" race condition ---
     // The Maps SDK sometimes starts rendering before its internal HTTP client
@@ -529,6 +604,7 @@ fun GcsMap(
     val resumeMarker = remember { createSmallResumeMarker() }
     val resumeMarkerGrey = remember { createSmallResumeMarkerGrey() }
     val rcMarker = remember { createRCMarker() }
+    val addVertexMarker = remember { createAddVertexMarker() }
 
     val lat = telemetryState.latitude
     val lon = telemetryState.longitude
@@ -665,6 +741,35 @@ fun GcsMap(
                             )
                         }
                     }
+
+                    // "+" button on the midpoint of every edge. Tapping one splits that edge,
+                    // so the pilot can turn the default 4-sided fence into a 5- or 6-sided one
+                    // and then drag the new corner into place. Edge `index` runs from vertex
+                    // `index` to the next vertex, so the new corner goes in at index + 1 —
+                    // which keeps the polygon's winding order intact (and, for the closing
+                    // edge, appends to the end).
+                    geofencePolygon.forEachIndexed { index, point ->
+                        val nextPoint = geofencePolygon[(index + 1) % geofencePolygon.size]
+                        val edgeMidPoint = LatLng(
+                            (point.latitude + nextPoint.latitude) / 2,
+                            (point.longitude + nextPoint.longitude) / 2
+                        )
+
+                        key("geofence_edge_add_$index") {
+                            Marker(
+                                state = MarkerState(position = edgeMidPoint),
+                                title = "Add fence corner",
+                                snippet = "Tap to split edge ${index + 1}",
+                                icon = addVertexMarker,
+                                anchor = Offset(0.5f, 0.5f),
+                                zIndex = 9f, // Above the edge labels, below the corner markers
+                                onClick = {
+                                    onGeofenceEdgeAddPoint(index, edgeMidPoint)
+                                    true
+                                }
+                            )
+                        }
+                    }
                 }
 
                 // ===== GEOFENCE MEASUREMENTS =====
@@ -716,16 +821,24 @@ fun GcsMap(
                         val midLon = (point.longitude + nextPoint.longitude) / 2
                         val midPoint = LatLng(midLat, midLon)
 
+                        // While the fence is editable an "add corner" button sits on this same
+                        // midpoint, so lift the length label clear of it. The "+" is 64px tall
+                        // and centred, reaching 32px above the point; 44px of spacer leaves a
+                        // small gap above that.
+                        val labelLiftPx = if (geofenceAdjustmentEnabled) 44 else 0
+
                         // Create distance label marker with white background for contrast
-                        val distanceLabelIcon = remember(distanceText, index) {
-                            createSmallLabelMarker(distanceText, android.graphics.Color.WHITE)
+                        val distanceLabelIcon = remember(distanceText, index, labelLiftPx) {
+                            createSmallLabelMarker(distanceText, android.graphics.Color.WHITE, labelLiftPx)
                         }
 
                         Marker(
                             state = MarkerState(position = midPoint),
                             title = "Edge ${index + 1}: $distanceText",
                             icon = distanceLabelIcon,
-                            anchor = Offset(0.5f, 0.5f),
+                            // Bottom-anchored when lifted, so the transparent spacer baked into
+                            // the bitmap becomes the gap above the "+".
+                            anchor = if (geofenceAdjustmentEnabled) Offset(0.5f, 1.0f) else Offset(0.5f, 0.5f),
                             zIndex = 7f // Below area marker and geofence markers
                         )
                     }
@@ -1344,11 +1457,19 @@ fun GcsMap(
             )
         }
 
-        // ===== RC MODE MARKER =====
-        // Show RC marker at phone's GPS location when in RC mode
-        if (isRCMode && phoneLocation != null) {
+        // ===== RC MARKER =====
+        // The pilot's own position, from the phone's GPS. Always shown once a fix exists —
+        // the same way the drone marker is always shown once the drone reports a fix.
+        rcLocation?.let { rcPosition ->
+            val rcMarkerState = rememberMarkerState(
+                key = "rc_marker",
+                position = rcPosition
+            )
+            LaunchedEffect(rcPosition) {
+                rcMarkerState.position = rcPosition
+            }
             Marker(
-                state = MarkerState(position = phoneLocation),
+                state = rcMarkerState,
                 title = "RC (Phone GPS)",
                 snippet = "Your current location",
                 icon = rcMarker,

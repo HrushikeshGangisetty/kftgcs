@@ -191,6 +191,9 @@ data class TelemetryState(
     //Speeds
     val airspeed: Float? = null,
     val groundspeed: Float? = null,
+    // Vertical speed in m/s from VFR_HUD.climb; positive = climbing. Feeds the altitude
+    // ceiling failsafe's action margin so a fast climb triggers the action earlier.
+    val climbRate: Float? = null,
     //Battery
     val voltage: Float? = null,
     val batteryPercent: Int? = null,
@@ -203,6 +206,13 @@ data class TelemetryState(
     //Latitude and Longitude
     val latitude : Double?= null,
     val longitude : Double? = null,
+
+    // System.currentTimeMillis() when the last GLOBAL_POSITION_INT was parsed. The
+    // altitude-ceiling and max-range failsafes need to know how OLD the fix they are
+    // acting on is: when the telemetry link saturates, position can degrade from 10Hz to
+    // 1-2Hz, and a margin sized for a fresh fix then lets the drone overshoot. Null until
+    // the first position message arrives.
+    val positionReceivedAtMs: Long? = null,
 
     // Home (launch) position reported by the FC via HOME_POSITION (242). This is the same point
     // RTL flies back to, so the map overlay's "distance to home" matches the vehicle's own idea
@@ -246,9 +256,16 @@ data class TelemetryState(
     val currentWaypoint: Int? = null,
     val missionPaused: Boolean = false,
     val pausedAtWaypoint: Int? = null,
-    // Last waypoint when in AUTO mode (Mission Planner's lastautowp equivalent)
-    // This tracks the waypoint number during mission execution to pre-fill resume dialog
+    // Last waypoint when in AUTO mode (Mission Planner's lastautowp equivalent).
+    // This is the mission item the FC is flying TOWARDS - i.e. the same thing currentWaypoint
+    // means, remembered across a mode change so pause/resume knows where the mission was
+    // interrupted. It must never be set from MISSION_ITEM_REACHED, which reports the item
+    // just COMPLETED (one behind); resuming from that seq makes the drone fly back to the
+    // START of the line it was half way along. See lastReachedWaypoint below.
     val lastAutoWaypoint: Int = -1,
+    // Highest mission item the FC has reported as REACHED (MISSION_ITEM_REACHED). Always one
+    // behind lastAutoWaypoint while a mission runs normally.
+    val lastReachedWaypoint: Int = -1,
 
     // Drone identification from OpenDroneID BASIC_ID message (uasId field - SERIAL_NUMBER)
     val droneUid: String? = null,  // Primary UID: OpenDroneID serial number, else AUTOPILOT_VERSION chip UID (uid2) hex

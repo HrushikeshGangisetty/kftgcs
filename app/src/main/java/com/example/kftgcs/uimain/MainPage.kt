@@ -196,6 +196,23 @@ fun MainPage(
                     selectedGeofencePointIndex = index
                     Toast.makeText(context, "Geofence point ${index + 1} selected - drag to adjust", Toast.LENGTH_SHORT).show()
                 },
+                // Tapping the "+" on an edge adds a corner there, so the fence can go from
+                // 4 sides to 5, 6, ... The new corner starts on the edge and is dragged
+                // into place with the same handles as every other corner.
+                onGeofenceEdgeAddPoint = { edgeIndex, midPoint ->
+                    if (edgeIndex in geofencePolygon.indices) {
+                        val updatedPolygon = geofencePolygon.toMutableList().apply {
+                            add(edgeIndex + 1, midPoint)
+                        }
+                        telemetryViewModel.updateGeofencePolygonManually(updatedPolygon)
+                        selectedGeofencePointIndex = edgeIndex + 1
+                        Toast.makeText(
+                            context,
+                            "Corner added - fence now has ${updatedPolygon.size} sides",
+                            Toast.LENGTH_SHORT
+                        ).show()
+                    }
+                },
                 geofenceAdjustmentEnabled = geofenceEnabled,
                 // Obstacle zones for display (no editing on main page)
                 obstacles = obstacles,

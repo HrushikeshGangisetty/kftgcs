@@ -125,8 +125,11 @@ class OptionsViewModel(application: Application) : AndroidViewModel(application)
             // Read FENCE_ALT_MAX → maxAltitude (the altitude ceiling failsafe)
             val altMax = sharedViewModel.readParameter(PARAM_FENCE_ALT_MAX)
             if (altMax != null && altMax > 0f) {
-                _options.value = _options.value.copy(maxAltitude = altMax)
-                LogUtils.i(TAG, "✓ Read $PARAM_FENCE_ALT_MAX = $altMax from drone")
+                // Add the safety offset back so the pilot sees the ceiling they set, not the
+                // biased value stored on the FC.
+                val ceiling = altMax + sharedViewModel.FC_ALT_FENCE_SAFETY_OFFSET_M
+                _options.value = _options.value.copy(maxAltitude = ceiling)
+                LogUtils.i(TAG, "✓ Read $PARAM_FENCE_ALT_MAX = ${altMax} m → ceiling ${ceiling} m")
             } else {
                 failures.add(PARAM_FENCE_ALT_MAX)
                 LogUtils.e(TAG, "✗ Failed to read $PARAM_FENCE_ALT_MAX from drone")
@@ -275,9 +278,14 @@ class OptionsViewModel(application: Application) : AndroidViewModel(application)
             // enforces the ceiling itself (SharedViewModel.handleAltitudeFailsafe); this
             // write just keeps the FC's own limit correct as a second layer.
             if (current.maxAltitudeEnabled && current.maxAltitude > 0f) {
-                val r5 = sharedViewModel.setParameter(PARAM_FENCE_ALT_MAX, current.maxAltitude)
+                // Written slightly BELOW the pilot's ceiling: ArduPilot arrests the climb
+                // after detecting the breach and coasts past FENCE_ALT_MAX, so a verbatim
+                // write exceeds the stated limit. See SharedViewModel.getFcAltitudeFenceMax().
+                val fcLimit = (current.maxAltitude - sharedViewModel.FC_ALT_FENCE_SAFETY_OFFSET_M)
+                    .coerceAtLeast(1f)
+                val r5 = sharedViewModel.setParameter(PARAM_FENCE_ALT_MAX, fcLimit)
                 if (r5 != null) {
-                    LogUtils.i(TAG, "✓ $PARAM_FENCE_ALT_MAX = ${current.maxAltitude} m")
+                    LogUtils.i(TAG, "✓ $PARAM_FENCE_ALT_MAX = $fcLimit m (ceiling ${current.maxAltitude} m)")
                 } else {
                     results.add(PARAM_FENCE_ALT_MAX)
                     LogUtils.e(TAG, "✗ Failed to set $PARAM_FENCE_ALT_MAX")

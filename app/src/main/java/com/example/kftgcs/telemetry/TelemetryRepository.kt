@@ -21,6 +21,7 @@ import com.example.kftgcs.fence.FenceZone
 import com.example.kftgcs.grid.GridUtils
 import com.google.android.gms.maps.model.LatLng
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.async
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.*
@@ -123,6 +124,33 @@ class MavlinkTelemetryRepository(
     // When populated, this overrides the SYS_STATUS voltage which caps at 65.535V.
     private var battStatusVoltage: Float? = null
 
+    // ── Partial cell-sum detection (see resolvePackVoltage) ─────────────────────────────
+    // How many cells went into the last battStatusVoltage sum. When the FC omits
+    // voltagesExt on a >10S pack, this drops below expectedCellCount and the sum is a
+    // fraction of the true pack voltage — a 12S pack reporting only 10 cells reads ~36.7V
+    // instead of ~44V, which lands at/below the 42V critical threshold and fired an RTL on
+    // a healthy battery.
+    private var battStatusCellCount: Int = 0
+
+    // True when the FC is using the MAVLink "whole pack total in voltages[0]" convention
+    // rather than per-cell reporting. Such a frame legitimately has one populated slot, so
+    // the cell-count guard must not treat it as a 1-of-N partial sum.
+    private var battStatusIsPackTotal: Boolean = false
+
+    // Largest plausible cell count observed on this link. Learned rather than configured
+    // because the fleet mixes 6S and 12S. Only ever increases: the failure mode is always
+    // MISSING cells, never extra ones, so the maximum seen on a healthy frame is the truth.
+    private var expectedCellCount: Int = 0
+
+    // EMA of the RESOLVED pack voltage. Applied on the output of resolvePackVoltage so both
+    // the BATTERY_STATUS and SYS_STATUS paths are smoothed identically — previously only the
+    // SYS_STATUS fallback was filtered, leaving the 10Hz primary path able to single-frame
+    // trip the critical failsafe on motor-spinup sag.
+    private var smoothedPackVoltage: Float? = null
+    // 0.25 ≈ a 0.4s time-constant at 10Hz: fast enough to track a real discharge, slow
+    // enough that one bad frame moves the output by a quarter of its error.
+    private val PACK_VOLTAGE_ALPHA = 0.25f
+
     // Track if disconnection was intentional (user-initiated)
     private var intentionalDisconnect = false
 
@@ -148,10 +176,6 @@ class MavlinkTelemetryRepository(
     val authStatusFlow: StateFlow<AuthResult> = _authStatus.asStateFlow()
     private val lastAuthAttemptTime = AtomicLong(0L)
     @Volatile private var activeAuthJob: kotlinx.coroutines.Job? = null
-
-    // Rate limiting for state updates to reduce Bluetooth buffer pressure
-    private var lastStateUpdateTime = 0L
-    private val MIN_UPDATE_INTERVAL_MS = 50L // 20Hz max update rate (increased from 10Hz for smoother UI)
 
     // For total distance tracking
     private val positionHistory = mutableListOf<Pair<Double, Double>>()
@@ -180,6 +204,11 @@ class MavlinkTelemetryRepository(
 
     // RC Battery failsafe tracking
     private var rcBatteryFailsafeTriggered = false
+    // When the RC battery reading first went critical (0 = not currently critical). The
+    // reading must hold for RC_BATT_DEBOUNCE_MS before RTL fires — see the RADIO_STATUS
+    // collector for why a single 0 is not trustworthy on this field.
+    private var rcBattCriticalSince = 0L
+    private val RC_BATT_DEBOUNCE_MS = 3000L
 
     // GCS-side battery-voltage failsafe flag, driven by SharedViewModel's voltage failsafe.
     private var voltageFailsafeActive = false
@@ -235,6 +264,15 @@ class MavlinkTelemetryRepository(
     // BATTERY_STATUS slot, so this is the real rate BATT2 gets — the number to watch when
     // chasing flow "lag" and to confirm the SET_MESSAGE_INTERVAL(147) request is honored.
     private var lastBatt2FrameTime: Long = 0L
+
+    // ═══ Mission progress source arbitration ═══
+    // MISSION_CURRENT (the item being flown TO) and MISSION_ITEM_REACHED (the item just
+    // completed) both describe mission progress but are one apart, so mixing them corrupts
+    // the resume point. MISSION_CURRENT wins whenever the FC is sending it; this timestamp
+    // says whether it still is. @Volatile: written on the MISSION_CURRENT collector, read on
+    // the MISSION_ITEM_REACHED one.
+    @Volatile private var lastMissionCurrentAtMs = 0L
+    private val MISSION_CURRENT_STALE_MS = 5000L
 
     // AUTO mode spray tracking
     // In AUTO mode, sprayer is controlled by DO_SET_SERVO, DO_SPRAYER, or ArduPilot Sprayer library
@@ -479,20 +517,39 @@ class MavlinkTelemetryRepository(
                 }
             }
 
+            // ══ Stream rate budget ══════════════════════════════════════════════════════════
+            // A 57600-baud SiK radio carries ~4.5-4.8 kB/s of MAVLink payload one-way. The
+            // previous table asked for ~4.6 kB/s, which fit only because DISTANCE_SENSOR was
+            // silent on most aircraft. On FCs running the radar Lua script both rangefinder
+            // instances go live, the request tips past link capacity, and ArduPilot starts
+            // deferring lower-priority streams — GLOBAL_POSITION_INT (5Hz) lost against 30Hz
+            // BATTERY_STATUS and 20Hz ATTITUDE/VFR_HUD. Position then arrived at 1-2Hz, and the
+            // altitude-ceiling failsafe acted on a fix up to a second old: the ~1m overshoot.
+            //
+            // So: raise the one stream the failsafes depend on, and cut the ones that only feed
+            // human-readable UI. New budget ≈2.6 kB/s (~55% utilisation) with both rangefinders
+            // live — position throughput doubles while total traffic nearly halves.
             setMessageRate(1u, 4f)     // SYS_STATUS - 4Hz for fast battery voltage monitoring
             setMessageRate(24u, 0.5f)  // GPS_RAW_INT - reduced from 1Hz for Bluetooth
-            setMessageRate(33u, 5f)    // GLOBAL_POSITION_INT - increased to 5Hz for smoother position updates
-            setMessageRate(74u, 20f)   // VFR_HUD - 20Hz (50ms) for INSTANT speed updates (pilot critical)
-            setMessageRate(30u, 20f)   // ATTITUDE - 20Hz (50ms) for smooth yaw updates (critical for nose position)
+            // GLOBAL_POSITION_INT is the SOLE source for the altitude-ceiling, max-range and
+            // distance-to-home failsafes. 10Hz halves worst-case sampling staleness vs 5Hz
+            // (0.2m instead of 0.4m of unseen climb at 2 m/s) and gives the age-aware action
+            // margin a fresh fix to work from.
+            setMessageRate(33u, 10f)   // GLOBAL_POSITION_INT - RAISED 5→10Hz (safety-critical)
+            // VFR_HUD/ATTITUDE drive a numeric speed readout and the heading arrow. 10Hz is
+            // already past what a human resolves on a text field, and Compose recomposition
+            // smooths the arrow — 20Hz was spending ~800 B/s each for no perceptible gain.
+            setMessageRate(74u, 10f)   // VFR_HUD - LOWERED 20→10Hz
+            setMessageRate(30u, 10f)   // ATTITUDE - LOWERED 20→10Hz
             // BATTERY_STATUS carries BATT2 (flow sensor) and BATT3 (tank level) alongside the
             // main pack. ArduPilot's send_battery_status() emits only ONE instance per scheduled
             // tick and round-robins across the configured monitors, so the requested rate is
-            // SHARED across them: with 3 monitors (main/flow/level), the old 8Hz request gave the
-            // BATT2 flow sensor only ~2.7Hz (~375ms between updates) — the source of the spray-flow
-            // lag and the apparent transient 0s. Requesting 30Hz yields ~10Hz per instance, which
-            // matches AP_BattMonitor's 10Hz internal update (the freshest BATT2 data possible) and
-            // also shrinks the 5-sample flow filter's effective smoothing window from ~1.8s to ~0.5s.
-            setMessageRate(147u, 30f)  // BATTERY_STATUS - 30Hz total ≈ 10Hz per instance (flow/level/main)
+            // SHARED across them: with 3 monitors (main/flow/level), 12Hz yields ~4Hz per
+            // instance. That still resolves the 5-sample flow filter well (~1.25s window) and
+            // is ample for pack voltage now that resolvePackVoltage() applies an EMA and the
+            // critical failsafe debounces — neither of which needs 10Hz to be trustworthy.
+            // The old 30Hz request alone was ~2 kB/s, the single largest consumer on the link.
+            setMessageRate(147u, 12f)  // BATTERY_STATUS - LOWERED 30→12Hz ≈ 4Hz per instance
             setMessageRate(65u, 1f)    // RC_CHANNELS - reduced from 2Hz for Bluetooth
 
             // Request RADIO_STATUS for RC battery monitoring
@@ -510,7 +567,21 @@ class MavlinkTelemetryRepository(
             // the FC multiplexes two rangefinder instances (terrain + forward) onto this one
             // message ID and round-robins between them, so ask for double the desired per-sensor
             // rate.
-            setMessageRate(132u, 10f) // DISTANCE_SENSOR - ~5Hz per instance (terrain/forward)
+            //
+            // 8Hz total ≈ 4Hz per instance (~250ms), against the 1500ms
+            // SENSOR_STALE_AFTER_MS watchdog that clears each reading independently.
+            //
+            // Sizing rule: the budget that matters is PER INSTANCE, not the aggregate. A
+            // previous attempt at 4Hz total looked like it had 3x headroom but actually gave
+            // each instance only ~500ms — and since ArduPilot rounds SET_MESSAGE_INTERVAL to
+            // its scheduler loop and round-robins instances, the real gap drifted past 1500ms
+            // and the terrain/obstacle widgets blanked to "N/A". 250ms nominal leaves ~6x
+            // margin, which survives that jitter.
+            //
+            // Still well below the old 10Hz: this stream appears ONLY on Lua-equipped FCs,
+            // which is what made the fence overshoot look like a Lua bug rather than a
+            // link-budget one.
+            setMessageRate(132u, 8f) // DISTANCE_SENSOR - 10→8Hz, ~4Hz per instance
 
             // Request AUTOPILOT_VERSION for drone identification
             val autopilotVersionCmd = CommandLong(
@@ -575,15 +646,90 @@ class MavlinkTelemetryRepository(
     }
 
     /**
-     * Throttled state update for high-frequency messages (GPS, VFR_HUD, etc.)
-     * Limits update rate to prevent Bluetooth buffer overflow
+     * Learn the pack's cell count from frames that are demonstrably trustworthy.
+     *
+     * A frame counts as evidence when the cell-sum agrees with SYS_STATUS within 10%, or
+     * when SYS_STATUS is saturated (>=65V) and so cannot corroborate a genuinely larger
+     * pack. The count only ever increases, because the failure mode is always MISSING
+     * cells — an FC never invents extra ones — so the maximum ever seen on a healthy frame
+     * is the real pack size.
+     *
+     * Deliberately NOT gated on `armed`: a 12S FC populates voltagesExt from power-up, so
+     * learning on the ground gives the guard authority before the first arm. Gating on arm
+     * would leave expectedCellCount at 0 (guard inert) during motor spin-up, which is
+     * exactly when the sag that triggers a false failsafe occurs.
      */
-    private fun throttledStateUpdate(update: TelemetryState.() -> TelemetryState) {
-        val now = System.currentTimeMillis()
-        if (now - lastStateUpdateTime >= MIN_UPDATE_INTERVAL_MS) {
-            _state.update(update)
-            lastStateUpdateTime = now
+    private fun learnCellCount() {
+        if (battStatusIsPackTotal) return
+        val n = battStatusCellCount
+        if (n <= 0 || n > 14) return          // 14 = MAVLink's max (voltages + voltagesExt)
+        val sum = battStatusVoltage ?: return
+        val sys = smoothedVoltage
+        val corroborated = sys == null || sys >= 65.0f || sum >= sys * 0.90f
+        if (corroborated && n > expectedCellCount) {
+            LogUtils.i("VoltageDbg", "Learned expectedCellCount=$n (was $expectedCellCount, sum=${sum}V sys=${sys}V)")
+            expectedCellCount = n
         }
+    }
+
+    /**
+     * Single point of truth for pack voltage, called from BOTH the BATTERY_STATUS and
+     * SYS_STATUS collectors.
+     *
+     * Previously the partial-cell-sum guard lived only inside the SYS_STATUS collector at
+     * 4Hz, while BATTERY_STATUS wrote the raw sum straight to state at ~10Hz — so the
+     * guarded value was overwritten by an unguarded one most of the time. Routing both
+     * through here means a bad sum can never reach the failsafe from one path while being
+     * rejected on the other.
+     *
+     * Rejection ORDER matters. The cell-count test must run before the ratio test, because
+     * a 10-of-12 partial sum is only 17% low and slips straight past a 20% ratio guard —
+     * that is precisely why the original guard never caught this bug.
+     */
+    private fun resolvePackVoltage(): Float? {
+        val cellSum = battStatusVoltage
+        val sys = smoothedVoltage
+
+        val resolved = when {
+            cellSum == null -> sys
+
+            // Fewer cells than we have confidently seen before ⇒ the FC dropped cells from
+            // this frame and the sum is a fraction of the true pack voltage.
+            !battStatusIsPackTotal && expectedCellCount > 0 &&
+                battStatusCellCount in 1 until expectedCellCount -> {
+                LogUtils.w("VoltageDbg",
+                    "⚠️ REJECT partial cell-sum ${cellSum}V from $battStatusCellCount cells " +
+                    "(expected $expectedCellCount) — using SYS_STATUS ${sys}V")
+                sys
+            }
+
+            sys == null -> cellSum
+            // SYS_STATUS is a UShort and saturates at 65.535V; above that the cell-sum is
+            // the only source that can be right, so never fall back to the cap.
+            sys >= 65.0f -> cellSum
+
+            // Ratio backstop for partial sums we have no cell-count evidence for (e.g. the
+            // very first frames, before expectedCellCount is learned). Tightened from 0.80:
+            // 10/12 = 0.833 passed the old threshold, making it unable to catch a 12S pack
+            // missing its voltagesExt cells. 0.90 catches that while still tolerating the
+            // few-percent disagreement normal between a shunt reading and a cell-tap sum.
+            cellSum < sys * 0.90f -> {
+                LogUtils.w("VoltageDbg",
+                    "⚠️ cell-sum ${cellSum}V is >10% below SYS_STATUS ${sys}V — " +
+                    "possible partial cell-sum. Using SYS_STATUS.")
+                sys
+            }
+
+            else -> cellSum
+        } ?: return null
+
+        // EMA on the resolved value, so a single sagged frame moves the output by only a
+        // fraction of its error regardless of which source produced it.
+        val prev = smoothedPackVoltage
+        val out = if (prev == null) resolved
+                  else PACK_VOLTAGE_ALPHA * resolved + (1 - PACK_VOLTAGE_ALPHA) * prev
+        smoothedPackVoltage = out
+        return out
     }
 
     fun start() {
@@ -837,7 +983,11 @@ class MavlinkTelemetryRepository(
                             groundspeed = hud.groundspeed.takeIf { v -> v >= 0f },
                             formattedAirspeed = formatSpeed(hud.airspeed.takeIf { v -> v >= 0f }),
                             formattedGroundspeed = formatSpeed(hud.groundspeed.takeIf { v -> v >= 0f }),
-                            heading = normalizedHeading
+                            heading = normalizedHeading,
+                            // Vertical speed, used by the altitude-ceiling failsafe to size its
+                            // action margin: the faster the climb, the further below the ceiling
+                            // it must act to stop in time.
+                            climbRate = hud.climb
                         )
                     }
                 }
@@ -953,27 +1103,33 @@ class MavlinkTelemetryRepository(
 
                     val currentArmed = state.value.armed
 
-                    // Announce armed/disarmed state transitions via TTS
+                    // Announce armed/disarmed state transitions via TTS.
+                    // NOTE: the voltage EMA reset on arm deliberately does NOT live here any
+                    // more — it moved to the HEARTBEAT collector's arm transition. Hanging it
+                    // off this stream meant the reset depended on the very telemetry that
+                    // degrades when the link saturates.
                     if (currentArmed && !previousArmedState) {
-                        // Drone just armed - announce it and reset EMA so a pre-arm or
-                        // motor-spinup dip can't anchor the smoothed voltage for the whole flight.
                         sharedViewModel.announceDroneArmed()
-                        smoothedVoltage = null
-                        LogUtils.d("VoltageDbg", "ARM detected — smoothedVoltage reset to null")
                     } else if (!currentArmed && previousArmedState) {
-                        // Drone just disarmed - announce it
                         sharedViewModel.announceDroneDisarmed()
                     }
 
                     // Update state with position data only
                     // NOTE: Flight tracking removed - now handled by UnifiedFlightTracker
-                    // Use throttled update for high-frequency GLOBAL_POSITION_INT messages
-                    throttledStateUpdate {
-                        copy(
+                    //
+                    // NOT throttled. throttledStateUpdate shared ONE global timestamp across
+                    // every caller, so an unrelated high-rate message could consume the window
+                    // and cause a position sample to be DROPPED (not deferred) — after which
+                    // the altitude/range failsafes evaluated a stale fix. Position is now the
+                    // most safety-critical field in the state, so it goes straight through, on
+                    // the same reasoning VFR_HUD already documents above.
+                    _state.update {
+                        it.copy(
                             altitudeMsl = altAMSLm,
                             altitudeRelative = relAltM,
                             latitude = lat,
-                            longitude = lon
+                            longitude = lon,
+                            positionReceivedAtMs = System.currentTimeMillis()
                         )
                     }
 
@@ -1027,29 +1183,45 @@ class MavlinkTelemetryRepository(
                         // monitored — in that case summing voltages[0] alone gives the correct
                         // pack total, so the logic still works.
                         val validMain = b.voltages.filter { it.toInt() != 0xFFFF && it.toInt() > 0 }
-                        // voltagesExt uses 0 (not 0xFFFF) as the "not supported" sentinel
-                        val validExt  = b.voltagesExt.filter { it.toInt() != 0 }
+                        // The spec's "not supported" sentinel for voltagesExt is 0, but builds
+                        // have been seen emitting 0xFFFF here as well. Filtering only 0 let a
+                        // 0xFFFF slot add 65.535V to the total — inflating the pack reading and
+                        // MASKING a genuinely low battery, the inverse of the false-trigger bug.
+                        val validExt  = b.voltagesExt.filter { it.toInt() != 0xFFFF && it.toInt() > 0 }
 
                         val allValid = validMain + validExt
+                        val sumV = allValid.sumOf { it.toLong() }.toFloat() / 1000f
+
+                        // MAVLink also allows the FC to report the WHOLE pack total in
+                        // voltages[0] with every other slot at the sentinel. One populated slot
+                        // holding more than any single cell could (>= 15V) is that convention,
+                        // not a 1-of-N partial sum — flag it so the cell-count guard in
+                        // resolvePackVoltage() does not reject such frames forever.
+                        val isPackTotal = allValid.size == 1 && sumV >= 15f
+
+                        if (allValid.isNotEmpty()) {
+                            battStatusVoltage = sumV
+                            battStatusCellCount = allValid.size
+                            battStatusIsPackTotal = isPackTotal
+                        }
+
+                        learnCellCount()
+                        val resolved = resolvePackVoltage()
 
                         // Diagnostic log — shows raw cell data in logcat under tag "VoltageDbg"
                         LogUtils.d("VoltageDbg",
                             "BATT_STATUS id=0 | voltages=${b.voltages.toList()} | " +
                             "voltagesExt=${b.voltagesExt.toList()} | " +
-                            "validMain=${validMain.size} validExt=${validExt.size} | " +
-                            "sum=${allValid.sumOf { it.toLong() } / 1000f}V"
+                            "sum=${sumV}V cells=${allValid.size} expected=$expectedCellCount " +
+                            "packTotal=$isPackTotal sys=${smoothedVoltage}V → resolved=${resolved}V"
                         )
-
-                        if (allValid.isNotEmpty()) {
-                            battStatusVoltage = allValid.sumOf { it.toLong() }.toFloat() / 1000f
-                        }
 
                         _state.update { s ->
                             s.copy(
                                 currentA = currentA,
-                                // Prefer BATTERY_STATUS cell-sum (no 65.5V overflow); SYS_STATUS
-                                // handler fills voltage when battStatusVoltage is unavailable.
-                                voltage = battStatusVoltage ?: s.voltage
+                                // resolvePackVoltage() arbitrates between this cell-sum and the
+                                // SYS_STATUS fallback; never write the raw sum directly.
+                                voltage = resolved ?: s.voltage
                             )
                         }
                     }
@@ -1609,6 +1781,13 @@ class MavlinkTelemetryRepository(
                     // Arm/Disarm Notifications
                     if (lastArmed != null && armed != lastArmed) {
                         if (armed) {
+                            // Reset the voltage smoothing on arm so a pre-arm or motor-spinup
+                            // dip cannot anchor the filters for the whole flight. Driven off
+                            // HEARTBEAT rather than GLOBAL_POSITION_INT because the heartbeat
+                            // is the one stream that survives link saturation.
+                            smoothedVoltage = null
+                            smoothedPackVoltage = null
+                            LogUtils.d("VoltageDbg", "ARM detected — voltage smoothing reset")
                             sharedViewModel.addNotification(Notification(AppStrings.droneArmed, NotificationType.SUCCESS))
                         } else {
                             sharedViewModel.addNotification(Notification(AppStrings.droneDisarmed, NotificationType.INFO))
@@ -1652,11 +1831,9 @@ class MavlinkTelemetryRepository(
                             // 2. User selected Automatic mode (not Manual mode)
                             val isLoiterOrBrake = mode.equals("Loiter", ignoreCase = true) || mode.equals("Brake", ignoreCase = true)
                             if (isLoiterOrBrake && !sharedViewModel.isGeofenceTriggeringModeChange && sharedViewModel.isPauseResumeEnabled()) {
-                                // Get the current waypoint as the resume point
-                                val resumeWaypoint = state.value.lastAutoWaypoint.takeIf { it > 0 }
-                                    ?: state.value.currentWaypoint
-                                    ?: 1
-
+                                // Resume continues from the item the drone was flying TOWARDS,
+                                // never from one it had already reached.
+                                val resumeWaypoint = currentMissionTargetSeq()
 
                                 // Trigger the "Add Resume Here" popup in SharedViewModel
                                 sharedViewModel.onModeChangedToLoiterFromAuto(resumeWaypoint)
@@ -1842,32 +2019,15 @@ class MavlinkTelemetryRepository(
                         null
                     }
 
-                    // ── Sanity guard ─────────────────────────────────────────────────────────
-                    // If battStatusVoltage is more than 20% below the SYS_STATUS value it is
-                    // likely a partial cell-sum (e.g. FC not sending voltagesExt yet, or an
-                    // edge-case mid-message). In that situation fall back to the SYS_STATUS
-                    // value and log a warning so we can diagnose it from logcat.
-                    // Exception: SYS_STATUS caps at 65.535V — for packs above that limit the
-                    // cell-sum is the ONLY correct source, so the guard is skipped when
-                    // vBattSmoothed is at/near that cap (>= 65.0V).
-                    val resolvedVoltage = when {
-                        battStatusVoltage == null -> vBattSmoothed
-                        vBattSmoothed == null     -> battStatusVoltage
-                        vBattSmoothed >= 65.0f    -> battStatusVoltage  // avoid cap fallback for 65V+ packs
-                        battStatusVoltage!! < vBattSmoothed * 0.80f -> {
-                            LogUtils.w("VoltageDbg",
-                                "⚠️ battStatusVoltage (${battStatusVoltage}V) is >20% below " +
-                                "SYS_STATUS (${vBattSmoothed}V) — possible partial cell-sum. " +
-                                "Using SYS_STATUS. Check voltagesExt in logcat."
-                            )
-                            vBattSmoothed
-                        }
-                        else -> battStatusVoltage
-                    }
+                    // Arbitration now lives in resolvePackVoltage(), shared with the
+                    // BATTERY_STATUS collector. Keeping a second copy of the guard here was the
+                    // bug: this one ran at 4Hz while the unguarded BATTERY_STATUS path wrote
+                    // the same field at 10Hz and won most of the time.
+                    val resolvedVoltage = resolvePackVoltage()
 
                     LogUtils.d("VoltageDbg",
                         "SYS_STATUS vRaw=${vBattRaw}V smooth=${vBattSmoothed}V " +
-                        "battStat=${battStatusVoltage}V → display=${resolvedVoltage}V"
+                        "battStat=${battStatusVoltage}V → resolved=${resolvedVoltage}V"
                     )
 
                     val pct = if (s.batteryRemaining.toInt() == -1) null else s.batteryRemaining.toInt()
@@ -1877,7 +2037,10 @@ class MavlinkTelemetryRepository(
                     val healthy = (s.onboardControlSensorsHealth.value and SENSOR_3D_GYRO) != 0u
                     val armable = present && enabled && healthy
                     _state.update { it.copy(
-                        voltage = resolvedVoltage,
+                        // Keep the last good value if this resolve produced nothing — writing
+                        // an unconditional null here could blank out a valid BATTERY_STATUS
+                        // reading whenever SYS_STATUS reports its 0xFFFF sentinel.
+                        voltage = resolvedVoltage ?: it.voltage,
                         batteryPercent = pct,
                         armable = armable
                     ) }
@@ -1899,10 +2062,35 @@ class MavlinkTelemetryRepository(
                     }
 
                     // Enhanced logging for RC battery verification
-
-                    // â•â•â• RC BATTERY FAILSAFE â•â•â•
                     // Trigger RTL if RC battery is critically low (0% or below) and drone is armed
-                    if (rcBattPct != null && rcBattPct <= 0 && state.value.armed && !rcBatteryFailsafeTriggered) {
+                    // Fires on <= 1% rather than <= 0%, and only when the reading has been
+                    // sustained. RADIO_STATUS.remnoise is the remote RF NOISE FLOOR on a
+                    // standard SiK radio — the field is repurposed as a battery level only by
+                    // the specific RC hardware this app ships with. A clean link legitimately
+                    // reports noise 0, so treating a bare 0 as "battery empty" would command
+                    // an unprovoked RTL on any vehicle whose radio reports true noise. A real
+                    // battery drains through 5→3→2→1 and stays there; a noise floor that
+                    // momentarily touches 0 does not, so the dwell requirement separates them.
+                    // Captured non-null so the failsafe block below can use the percentage
+                    // without a smart-cast (rcBattSustained hides the null check from the
+                    // compiler, unlike the original inline `rcBattPct != null && ...` test).
+                    val rcBattCriticalPct = rcBattPct?.takeIf { it <= 1 }
+                    if (rcBattCriticalPct != null) {
+                        if (rcBattCriticalSince == 0L) {
+                            rcBattCriticalSince = System.currentTimeMillis()
+                            LogUtils.w("RCBattery", "⏳ RC battery reads ${rcBattCriticalPct}% — confirming over ${RC_BATT_DEBOUNCE_MS}ms before RTL")
+                        }
+                    } else {
+                        if (rcBattCriticalSince != 0L) {
+                            LogUtils.i("RCBattery", "RC battery recovered to ${rcBattPct}% — RTL no longer pending")
+                        }
+                        rcBattCriticalSince = 0L
+                    }
+                    val rcBattSustained = rcBattCriticalSince != 0L &&
+                        (System.currentTimeMillis() - rcBattCriticalSince) >= RC_BATT_DEBOUNCE_MS
+
+                    if (rcBattSustained && rcBattCriticalPct != null &&
+                        state.value.armed && !rcBatteryFailsafeTriggered) {
 
                         // Mark failsafe as triggered to prevent multiple RTL commands
                         rcBatteryFailsafeTriggered = true
@@ -1924,7 +2112,7 @@ class MavlinkTelemetryRepository(
                                         )
                                     )
                                     // Announce via TTS
-                                    sharedViewModel.announceRCBatteryFailsafe(rcBattPct)
+                                    sharedViewModel.announceRCBatteryFailsafe(rcBattCriticalPct)
                                     // ...and the popup every other failsafe shows. The RTL
                                     // announcement that follows appends this as its reason.
                                     sharedViewModel.showFailsafePopup("RC Battery Failsafe")
@@ -1943,6 +2131,7 @@ class MavlinkTelemetryRepository(
                     // Reset failsafe flag when battery recovers and drone is disarmed
                     else if (!state.value.armed && rcBatteryFailsafeTriggered) {
                         rcBatteryFailsafeTriggered = false
+                        rcBattCriticalSince = 0L
                         updateFailsafeState()
                     }
 
@@ -2026,11 +2215,14 @@ class MavlinkTelemetryRepository(
                 .filterIsInstance<MissionCurrent>()
                 .collect { missionCurrent ->
                     val currentSeq = missionCurrent.seq.toInt()
-                    
+
                     // Capture current mode for consistent checks
                     val currentMode = state.value.mode
 
-                    // DEBUG LOG: Track mode and waypoint updates
+                    // MISSION_CURRENT is the authoritative navigation target: the item the FC
+                    // is flying TO. Note the time so MISSION_ITEM_REACHED below knows it is
+                    // only needed as a fallback.
+                    lastMissionCurrentAtMs = System.currentTimeMillis()
 
                     // Update current waypoint in state
                     _state.update { it.copy(currentWaypoint = currentSeq) }
@@ -2082,19 +2274,26 @@ class MavlinkTelemetryRepository(
                     // Capture current mode for consistent checks
                     val currentMode = state.value.mode
 
-                    // DEBUG LOG: Track waypoint reached
+                    // Record what has been completed. This seq is one BEHIND the navigation
+                    // target, so it must never be written to currentWaypoint/lastAutoWaypoint
+                    // while MISSION_CURRENT is arriving: pause/resume reads those as "where
+                    // the mission was interrupted" and would send the drone back to the start
+                    // of the line it had already flown half of.
+                    _state.update { it.copy(lastReachedWaypoint = reachedSeq) }
 
-                    // Update current waypoint in state (as fallback if MISSION_CURRENT not available)
-                    _state.update { it.copy(currentWaypoint = reachedSeq) }
-
-                    // Track last AUTO waypoint (Mission Planner protocol)
-                    // Only update lastAutoWaypoint when in AUTO mode and waypoint is non-zero
-                    if (currentMode?.equals("Auto", ignoreCase = true) == true && reachedSeq != 0) {
-                        _state.update { it.copy(lastAutoWaypoint = reachedSeq) }
+                    // Fallback only, for firmware that does not emit MISSION_CURRENT. The
+                    // target is the item AFTER the one just reached, so the two sources agree
+                    // on what currentWaypoint means.
+                    val missionCurrentIsLive =
+                        System.currentTimeMillis() - lastMissionCurrentAtMs < MISSION_CURRENT_STALE_MS
+                    if (!missionCurrentIsLive) {
+                        val targetSeq = reachedSeq + 1
+                        _state.update { it.copy(currentWaypoint = targetSeq) }
+                        if (currentMode?.equals("Auto", ignoreCase = true) == true) {
+                            _state.update { it.copy(lastAutoWaypoint = targetSeq) }
+                        }
+                        sharedViewModel.updateCurrentWaypoint(targetSeq)
                     }
-
-                    // Update SharedViewModel
-                    sharedViewModel.updateCurrentWaypoint(reachedSeq)
 
                     // ═══ FIX: Reset spray detection when mission-end items reached ═══
                     // When the drone reaches the final mission items (DO_SPRAYER(0) + RTL/LAND/LOITER),
@@ -2772,22 +2971,25 @@ class MavlinkTelemetryRepository(
     }
 
     /**
-     * Change vehicle mode (ArduPilot: param1=1, param2=customMode)
-     * Waits for Heartbeat confirmation.
+     * Change vehicle mode (ArduPilot: param1=1, param2=customMode).
+     * Waits for Heartbeat confirmation, RETRYING the command if it does not take.
+     *
+     * Every GCS-side failsafe actuates through this one function — battery, altitude
+     * ceiling, max range, tank empty, RC battery, obstacle, link loss. It used to send
+     * DO_SET_MODE exactly ONCE and then poll for 8s. Because [sendCommand] swallows send
+     * exceptions and MAVLink COMMAND_LONG is unacknowledged/unreliable, a single dropped
+     * packet on a busy or marginal link meant the failsafe silently did nothing: the caller
+     * logged a failure, the one-shot latch was already consumed, and nothing ever retried.
+     * With BATT_FS_CRT_ACT forced to 0 there is no FC-side fallback either.
+     *
+     * So: re-send on a fixed cadence for the whole timeout window. The FC ignores a
+     * DO_SET_MODE that asks for the mode it is already in, so re-sending is harmless.
      */
     suspend fun changeMode(customMode: UInt): Boolean {
-        sendCommand(
-            MavCmd.DO_SET_MODE,
-            1f,                   // param1: MAV_MODE_FLAG_CUSTOM_MODE_ENABLED (always 1 for ArduPilot)
-            customMode.toFloat(), // param2: custom mode (e.g., 3u for AUTO)
-            0f, 0f, 0f, 0f, 0f
-        )
-        // Wait for Heartbeat to confirm mode change - increased timeout for Bluetooth/real hardware
-        val timeoutMs = 8000L // Increased from 5s to 8s for real hardware reliability
-        val start = System.currentTimeMillis()
         val expectedMode = when (customMode) {
             3u -> "Auto"
             0u -> "Stabilize"
+            4u -> "Guided"
             5u -> "Loiter"
             6u -> "RTL"
             9u -> "Land"
@@ -2795,12 +2997,50 @@ class MavlinkTelemetryRepository(
             17u -> "Brake"
             else -> "Unknown"
         }
+
+        // "Unknown" would match nothing, so a mode we cannot name could never be confirmed
+        // and would burn the full timeout before reporting failure. Fail fast and loudly
+        // instead — this is a programming error, not a link problem.
+        if (expectedMode == "Unknown") {
+            LogUtils.e("ModeChange", "✗ changeMode($customMode): unmapped mode, cannot confirm — refusing to guess")
+            return false
+        }
+
+        val timeoutMs = 8000L      // real-hardware/Bluetooth allowance
+        val resendEveryMs = 1000L  // ~8 attempts across the window
+        val pollEveryMs = 200L
+
+        val start = System.currentTimeMillis()
+        var lastSendAt = 0L
+        var attempts = 0
+
         while (System.currentTimeMillis() - start < timeoutMs) {
+            val now = System.currentTimeMillis()
+            if (now - lastSendAt >= resendEveryMs) {
+                lastSendAt = now
+                attempts++
+                sendCommand(
+                    MavCmd.DO_SET_MODE,
+                    1f,                   // param1: MAV_MODE_FLAG_CUSTOM_MODE_ENABLED (always 1 for ArduPilot)
+                    customMode.toFloat(), // param2: custom mode (e.g., 3u for AUTO)
+                    0f, 0f, 0f, 0f, 0f
+                )
+                if (attempts > 1) {
+                    LogUtils.w("ModeChange", "↻ $expectedMode not confirmed yet — resending DO_SET_MODE (attempt $attempts)")
+                }
+            }
+
+            // Confirm against the heartbeat's reported mode.
             if (state.value.mode?.contains(expectedMode, ignoreCase = true) == true) {
+                if (attempts > 1) {
+                    LogUtils.i("ModeChange", "✓ $expectedMode confirmed after $attempts attempts (${System.currentTimeMillis() - start}ms)")
+                }
                 return true
             }
-            delay(200)
+            delay(pollEveryMs)
         }
+
+        LogUtils.e("ModeChange", "✗ $expectedMode NOT confirmed after $attempts attempts / ${timeoutMs}ms — vehicle mode is ${state.value.mode}")
         return false
     }
 
@@ -3055,7 +3295,16 @@ class MavlinkTelemetryRepository(
             watchdogJob.cancel()
 
             if (success) {
-            } else {
+                // Progress tracked for the previous mission means nothing against the new one -
+                // and a stale (larger) lastReachedWaypoint would push the next resume past the
+                // end of this mission. Sequence numbering restarts, so clear it.
+                _state.update {
+                    it.copy(
+                        currentWaypoint = null,
+                        lastAutoWaypoint = -1,
+                        lastReachedWaypoint = -1
+                    )
+                }
             }
 
             return success
@@ -3706,9 +3955,15 @@ class MavlinkTelemetryRepository(
             stopFenceMonitoring()
             // Mark this as an intentional disconnect to prevent auto-reconnect
             intentionalDisconnect = true
-            // Reset voltage smoothing state
+            // Reset voltage smoothing and the learned cell count. Cleared here rather than on
+            // disarm because a battery swap requires a power cycle, which drops the link —
+            // clearing on arm instead would throw away the guard's evidence every flight.
             smoothedVoltage = null
+            smoothedPackVoltage = null
             battStatusVoltage = null
+            battStatusCellCount = 0
+            battStatusIsPackTotal = false
+            expectedCellCount = 0
             // Attempt to close the TCP connection gracefully
             connection.close()
         } catch (e: Exception) {
@@ -3890,6 +4145,28 @@ class MavlinkTelemetryRepository(
     }
 
     /**
+     * The mission item the drone is flying TOWARDS — the sequence a resume has to continue from.
+     *
+     * Resuming from an item the drone has already reached is what sends it back to the start of
+     * the line it was half way along, so this never returns a sequence at or below
+     * [TelemetryState.lastReachedWaypoint].
+     */
+    fun currentMissionTargetSeq(): Int {
+        val snapshot = state.value
+        val target = snapshot.lastAutoWaypoint.takeIf { it > 0 }
+            ?: snapshot.currentWaypoint
+            ?: 1
+        return maxOf(target, snapshot.lastReachedWaypoint + 1).coerceAtLeast(1)
+    }
+
+    /**
+     * True for mission items that carry a real target position (and therefore a usable
+     * altitude). DO_* items are stored with x/y/z all zero, so they must never be used as the
+     * altitude reference for an inserted waypoint — that would put it at ground level.
+     */
+    private fun MissionItemInt.hasPosition(): Boolean = x != 0 || y != 0
+
+    /**
      * Filter waypoints for resume mission (mid-flight).
      *
      * For MID-FLIGHT RESUME (drone already flying):
@@ -3953,8 +4230,15 @@ class MavlinkTelemetryRepository(
             // Will insert DO_SPRAYER(1) in resumed mission to restore spray
         }
 
-        // Find the target waypoint to get its altitude if resumeAltitude is not provided
-        val targetWaypoint = allWaypoints.find { it.seq.toInt() == resumeWaypointSeq }
+        // Altitude for the inserted resume waypoint: the next real waypoint the drone will fly
+        // to. Looked up by "first positional item at or after the resume seq" rather than by
+        // exact seq, because the resume seq can legitimately land on a DO_SPRAYER /
+        // DO_CHANGE_SPEED item — those store z = 0, which would drop the resume waypoint to
+        // ground level. Falls back to the last known positional item, then to 50 m.
+        val targetWaypoint = allWaypoints
+            .filter { it.seq.toInt() >= resumeWaypointSeq && it.hasPosition() && it.z > 0f }
+            .minByOrNull { it.seq.toInt() }
+            ?: allWaypoints.filter { it.hasPosition() && it.z > 0f }.maxByOrNull { it.seq.toInt() }
         val effectiveAltitude = resumeAltitude ?: targetWaypoint?.z ?: 50f
 
         for (waypoint in allWaypoints) {
@@ -4555,13 +4839,60 @@ class MavlinkTelemetryRepository(
     }
 
     /**
-     * Set a fence-related parameter on the flight controller
+     * Set a fence-related parameter on the flight controller, retrying if it is not
+     * confirmed.
+     *
+     * Two things made this fragile enough to lose a whole geofence:
+     *
+     *  1. It gave up after ONE unacknowledged PARAM_SET, and [configureFenceParameters]
+     *     aborts the entire fence on the first failure. FENCE_TYPE — the parameter that
+     *     actually switches the polygon on — is third in that chain, so a single dropped
+     *     ack left the fence uploaded but NOT enforcing, and the drone flew straight
+     *     through it.
+     *  2. The ack was matched on paramId WITHOUT stripping MAVLink's NUL padding.
+     *     PARAM_VALUE.param_id is a fixed 16-byte field, so "FENCE_TYPE" arrives as
+     *     "FENCE_TYPE\u0000...". readParameter() strips this; here it did not, so a valid
+     *     ack could be ignored. Any concurrent parameter activity (the connect-time
+     *     failsafe reads run on the same 2s timescale as the fence upload debounce) makes
+     *     both failure modes far more likely, since PARAM_VALUE traffic is interleaved.
      */
     private suspend fun setFenceParameter(paramId: String, value: Float): Boolean {
+        val attempts = 3
+        repeat(attempts) { attempt ->
+            val confirmed = trySetFenceParameterOnce(paramId, value)
+            if (confirmed) {
+                if (attempt > 0) {
+                    Timber.i("Geofence: ✓ $paramId=$value confirmed on attempt ${attempt + 1}")
+                }
+                return true
+            }
+            Timber.w("Geofence: ↻ $paramId=$value not confirmed (attempt ${attempt + 1}/$attempts)")
+            delay(300)
+        }
+        Timber.e("Geofence: ✗ $paramId=$value FAILED after $attempts attempts")
+        return false
+    }
+
+    /** One PARAM_SET + ack round trip for [setFenceParameter]. */
+    private suspend fun trySetFenceParameterOnce(paramId: String, value: Float): Boolean {
         return suspendCancellableCoroutine { continuation ->
             val job = AppScope.launch {
                 try {
-                    // Send PARAM_SET
+                    // Start listening BEFORE the write, so a fast ack cannot arrive in the
+                    // gap between sending and subscribing.
+                    val ackDeferred = async {
+                        withTimeoutOrNull(3000) {
+                            mavFrame
+                                .filter { it.systemId == fcuSystemId }
+                                .map { it.message }
+                                .filterIsInstance<ParamValue>()
+                                // Strip MAVLink's fixed-width NUL padding before comparing.
+                                .first { it.paramId.trim().replace("\u0000", "") == paramId }
+                        }
+                    }
+                    // Give the collector a moment to attach.
+                    delay(50)
+
                     val paramSet = ParamSet(
                         targetSystem = fcuSystemId,
                         targetComponent = fcuComponentId,
@@ -4571,21 +4902,8 @@ class MavlinkTelemetryRepository(
                     )
                     connection.trySendUnsignedV2(gcsSystemId, gcsComponentId, paramSet)
 
-                    // Wait for PARAM_VALUE acknowledgment
-                    val ack = withTimeoutOrNull(3000) {
-                        mavFrame
-                            .filter { it.systemId == fcuSystemId }
-                            .map { it.message }
-                            .filterIsInstance<ParamValue>()
-                            .first { it.paramId == paramId }
-                    }
-
-                    if (ack != null && ack.paramValue == value) {
-                        continuation.resume(true)
-                    } else {
-                        continuation.resume(false)
-                    }
-
+                    val ack = ackDeferred.await()
+                    continuation.resume(ack != null && ack.paramValue == value)
                 } catch (e: Exception) {
                     continuation.resume(false)
                 }

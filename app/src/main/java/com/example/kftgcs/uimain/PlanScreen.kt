@@ -1,18 +1,11 @@
 package com.example.kftgcs.uimain
 
-import android.Manifest
-import android.content.pm.PackageManager
 import android.net.Uri
-import android.os.Looper
 import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.core.content.ContextCompat
-import com.google.android.gms.location.LocationCallback
-import com.google.android.gms.location.LocationRequest
-import com.google.android.gms.location.LocationResult
-import com.google.android.gms.location.LocationServices
-import com.google.android.gms.location.Priority
+import com.example.kftgcs.location.PhoneLocationProvider
+import com.example.kftgcs.location.rememberPhoneLocation
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.ui.text.input.KeyboardType
@@ -183,20 +176,9 @@ fun PlanScreen(
     // ===== RC MODE STATE (Phone GPS) =====
     // Flag to indicate if we're in RC mode (using phone GPS for boundary points)
     var isRCMode by remember { mutableStateOf(false) }
-    // Phone's current GPS location
-    var phoneLocation by remember { mutableStateOf<LatLng?>(null) }
-    // FusedLocationProviderClient for phone GPS
-    val fusedLocationClient = remember { LocationServices.getFusedLocationProviderClient(context) }
-    // Location callback for continuous updates
-    val locationCallback = remember {
-        object : LocationCallback() {
-            override fun onLocationResult(locationResult: LocationResult) {
-                locationResult.lastLocation?.let { location ->
-                    phoneLocation = LatLng(location.latitude, location.longitude)
-                }
-            }
-        }
-    }
+    // Phone's current GPS location. Shared with the map's RC marker via PhoneLocationProvider,
+    // so there is a single location subscription rather than one per screen.
+    val phoneLocation = rememberPhoneLocation()
 
     // ===== CLEAR PREVIOUS MISSION DATA ON ENTRY =====
     // When PlanScreen opens, clear obstacles from SharedViewModel to start fresh
@@ -205,45 +187,13 @@ fun PlanScreen(
         telemetryViewModel.setObstacles(emptyList())
     }
 
-    // ===== RC MODE LOCATION UPDATES =====
-    // Start/stop phone GPS location updates when RC mode is enabled/disabled
+    // ===== RC MODE PERMISSION CHECK =====
+    // Location updates themselves are owned by PhoneLocationProvider (started for as long as
+    // this screen is composed). RC mode only needs to refuse to turn on without permission.
     LaunchedEffect(isRCMode) {
-        if (isRCMode) {
-            val hasLocationPermission = ContextCompat.checkSelfPermission(
-                context,
-                Manifest.permission.ACCESS_FINE_LOCATION
-            ) == PackageManager.PERMISSION_GRANTED
-
-            if (hasLocationPermission) {
-                val locationRequest = LocationRequest.Builder(
-                    Priority.PRIORITY_HIGH_ACCURACY,
-                    1000L // Update every 1 second
-                ).setMinUpdateIntervalMillis(500L).build()
-
-                try {
-                    fusedLocationClient.requestLocationUpdates(
-                        locationRequest,
-                        locationCallback,
-                        Looper.getMainLooper()
-                    )
-                } catch (e: SecurityException) {
-                    LogUtils.e("PlanScreen", "Location permission denied: ${e.message}")
-                }
-            } else {
-                Toast.makeText(context, "Location permission required for RC mode", Toast.LENGTH_SHORT).show()
-                isRCMode = false
-            }
-        } else {
-            // Stop location updates when RC mode is disabled
-            fusedLocationClient.removeLocationUpdates(locationCallback)
-            phoneLocation = null
-        }
-    }
-
-    // Cleanup location updates when composable is disposed
-    DisposableEffect(Unit) {
-        onDispose {
-            fusedLocationClient.removeLocationUpdates(locationCallback)
+        if (isRCMode && !PhoneLocationProvider.hasPermission(context)) {
+            Toast.makeText(context, "Location permission required for RC mode", Toast.LENGTH_SHORT).show()
+            isRCMode = false
         }
     }
 
@@ -612,7 +562,32 @@ fun PlanScreen(
             if (hasStartedPlanning && !isPlanSaved) {
                 FloatingActionButton(
                     onClick = {
-                        if (isGridSurveyMode) {
+                        // A selected geofence corner takes priority: selecting one clears the
+                        // waypoint/polygon selections, so at most one of the three is ever set.
+                        // This is what makes a "+" tap reversible - and lets a 6-sided fence be
+                        // taken back down to 5 or 4.
+                        val selectedFenceIndex = selectedGeofencePointIndex
+                        val currentFence = if (hasStartedPlanning) localGeofencePolygon else geofencePolygon
+                        if (selectedFenceIndex != null && selectedFenceIndex in currentFence.indices) {
+                            if (currentFence.size <= 3) {
+                                Toast.makeText(context, "A geofence needs at least 3 corners", Toast.LENGTH_SHORT).show()
+                            } else {
+                                val updatedFence = currentFence.toMutableList().apply {
+                                    removeAt(selectedFenceIndex)
+                                }
+                                if (hasStartedPlanning) {
+                                    localGeofencePolygon = updatedFence
+                                } else {
+                                    telemetryViewModel.updateGeofencePolygonManually(updatedFence)
+                                }
+                                selectedGeofencePointIndex = null
+                                Toast.makeText(
+                                    context,
+                                    "Corner removed - fence now has ${updatedFence.size} sides",
+                                    Toast.LENGTH_SHORT
+                                ).show()
+                            }
+                        } else if (isGridSurveyMode) {
                             // Handle deletion of selected polygon point
                             selectedPolygonPointIndex?.let { index ->
                                 if (index in surveyPolygon.indices) {
@@ -775,6 +750,30 @@ fun PlanScreen(
                     selectedPolygonPointIndex = null // Clear polygon selection
                     Toast.makeText(context, "Geofence point ${index + 1} selected - drag to adjust", Toast.LENGTH_SHORT).show()
                 },
+                // Tapping the "+" on an edge adds a corner there, so the fence can go from
+                // 4 sides to 5, 6, ... The new corner starts on the edge and is dragged into
+                // place with the same handles as every other corner.
+                onGeofenceEdgeAddPoint = { edgeIndex, midPoint ->
+                    val currentFence = if (hasStartedPlanning) localGeofencePolygon else geofencePolygon
+                    if (edgeIndex in currentFence.indices) {
+                        val updatedFence = currentFence.toMutableList().apply {
+                            add(edgeIndex + 1, midPoint)
+                        }
+                        if (hasStartedPlanning) {
+                            localGeofencePolygon = updatedFence
+                        } else {
+                            telemetryViewModel.updateGeofencePolygonManually(updatedFence)
+                        }
+                        selectedGeofencePointIndex = edgeIndex + 1
+                        selectedWaypointIndex = null
+                        selectedPolygonPointIndex = null
+                        Toast.makeText(
+                            context,
+                            "Corner added - fence now has ${updatedFence.size} sides",
+                            Toast.LENGTH_SHORT
+                        ).show()
+                    }
+                },
                 // Enable geofence adjustment when geofence is enabled
                 geofenceAdjustmentEnabled = geofenceEnabled,
                 // Show area and dimensions for grid survey mode
@@ -807,10 +806,8 @@ fun PlanScreen(
                     }
                 },
                 // Enable obstacle editing in plan screen
-                obstacleEditingEnabled = true,
-                // RC Mode parameters for phone GPS location marker
-                phoneLocation = phoneLocation,
-                isRCMode = isRCMode
+                obstacleEditingEnabled = true
+                // The RC marker needs no parameter: GcsMap reads the same PhoneLocationProvider.
             )
 
             // Geofence adjustment helper text
