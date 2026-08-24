@@ -50,9 +50,11 @@ android {
         }
         create("svd") {
             dimension = "brand"
+            // applicationId stays com.svd.gcs — the app is already published on
+            // Play under it. Only the displayed name changes.
             applicationId = "com.svd.gcs"
             // Override app name without touching main strings.xml.
-            resValue("string", "app_name", "SVD")
+            resValue("string", "app_name", "KGCS")
         }
     }
 

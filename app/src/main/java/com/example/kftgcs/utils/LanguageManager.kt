@@ -229,6 +229,7 @@ object AppStrings {
     val lastName get() = getString(mapOf("en" to "Last Name", "te" to "చివరి పేరు", "hi" to "अंतिम नाम", "mr" to "आडनाव", "ta" to "கடைசி பெயர்", "kn" to "ಕೊನೆಯ ಹೆಸರು", "ml" to "അവസാന പേര്", "gu" to "છેલ્લું નામ", "as" to "শেষ নাম", "bn" to "শেষ নাম", "pa" to "ਆਖਰੀ ਨਾਮ"))
     val companyName get() = getString(mapOf("en" to "Company Name", "te" to "కంపెనీ పేరు", "hi" to "कंपनी का नाम", "mr" to "कंपनीचे नाव", "ta" to "நிறுவனத்தின் பெயர்", "kn" to "ಕಂಪನಿ ಹೆಸರು", "ml" to "കമ്പനിയുടെ പേര്", "gu" to "કંપનીનું નામ", "as" to "কোম্পানীৰ নাম", "bn" to "কোম্পানির নাম", "pa" to "ਕੰਪਨੀ ਦਾ ਨਾਮ"))
     val selectCompany get() = getString(mapOf("en" to "Select Company", "te" to "కంపెనీని ఎంచుకోండి", "hi" to "कंपनी चुनें", "mr" to "कंपनी निवडा", "ta" to "நிறுவனத்தைத் தேர்ந்தெடுக்கவும்", "kn" to "ಕಂಪನಿ ಆಯ್ಕೆಮಾಡಿ", "ml" to "കമ്പനി തിരഞ്ഞെടുക്കുക", "gu" to "કંપની પસંદ કરો", "as" to "কোম্পানী বাছনি কৰক", "bn" to "কোম্পানি নির্বাচন করুন", "pa" to "ਕੰਪਨੀ ਚੁਣੋ"))
+    val signupKey get() = getString(mapOf("en" to "Signup Key", "te" to "సైన్అప్ కీ", "hi" to "साइनअप कुंजी", "mr" to "साइनअप की", "ta" to "பதிவு விசை", "kn" to "ಸೈನ್ ಅಪ್ ಕೀ", "ml" to "സൈൻ അപ്പ് കീ", "gu" to "સાઇનઅપ કી", "as" to "চাইনআপ কী", "bn" to "সাইনআপ কী", "pa" to "ਸਾਈਨਅੱਪ ਕੁੰਜੀ"))
     val email get() = getString(mapOf("en" to "Email", "te" to "ఇమెయిల్", "hi" to "ईमेल", "mr" to "ईमेल", "ta" to "மின்னஞ்சல்", "kn" to "ಇಮೇಲ್", "ml" to "ഇമെയിൽ", "gu" to "ઈમેલ", "as" to "ইমেইল", "bn" to "ইমেইল", "pa" to "ਈਮੇਲ"))
     val mobileNumber get() = getString(mapOf("en" to "Mobile Number", "te" to "మొబైల్ నంబర్", "hi" to "मोबाइल नंबर", "mr" to "मोबाइल नंबर", "ta" to "கைபேசி எண்", "kn" to "ಮೊಬೈಲ್ ಸಂಖ್ಯೆ", "ml" to "മൊബൈൽ നമ്പർ", "gu" to "મોબાઇલ નંબર", "as" to "মোবাইল নম্বৰ", "bn" to "মোবাইল নম্বর", "pa" to "ਮੋਬਾਈਲ ਨੰਬਰ"))
     val password get() = getString(mapOf("en" to "Password", "te" to "పాస్‌వర్డ్", "hi" to "पासवर्ड", "mr" to "पासवर्ड", "ta" to "கடவுச்சொல்", "kn" to "ಪಾಸ್‌ವರ್ಡ್", "ml" to "പാസ്‌വേഡ്", "gu" to "પાસવર્ડ", "as" to "পাছৱৰ্ড", "bn" to "পাসওয়ার্ড", "pa" to "ਪਾਸਵਰਡ"))
@@ -347,8 +348,8 @@ object AppStrings {
     val undoneActionWarning get() = getString(mapOf("en" to "⚠️ This action cannot be undone.", "te" to "⚠️ ఈ చర్యను రద్దు చేయలేము.", "hi" to "⚠️ यह क्रिया पूर्ववत नहीं की जा सकती।", "mr" to "⚠️ ही क्रिया पूर्ववत केली जाऊ शकत नाही.", "ta" to "⚠️ இந்த செயலை மாற்ற முடியாது.", "kn" to "⚠️ ಈ ಕ್ರಿಯೆಯನ್ನು ರದ್ದುಮಾಡಲು ಸಾಧ್ಯವಿಲ್ಲ.", "ml" to "⚠️ ഈ പ്രവർത്തി പഴയപടിയാക്കാൻ കഴിയില്ല.", "gu" to "⚠️ આ ક્રિયા પૂર્વવત કરી શકાતી નથી.", "as" to "⚠️ এই কাৰ্যটো পূৰ্বৱৎ কৰিব নোৱাৰি।", "bn" to "⚠️ এই কাজটি পূর্বাবস্থায় ফেরানো যাবে না।", "pa" to "⚠️ ਇਹ ਕਾਰਵਾਈ ਵਾਪਸ ਨਹੀਂ ਕੀਤੀ ਜਾ ਸਕਦੀ।"))
 
     // TopNavBar Strings
-    // White-label home title: svd flavor shows "SCDGcs", everything else keeps "KFTGcs".
-    val pavamanAviation get() = if (BuildConfig.FLAVOR == "svd") "SVDGcs"
+    // White-label home title: svd flavor shows "KGCS", everything else keeps "KFTGcs".
+    val pavamanAviation get() = if (BuildConfig.FLAVOR == "svd") "KGCS"
         else getString(mapOf("en" to "KFTGcs", "te" to "పవమాన్ ఏవియేషన్", "hi" to "KFTGcs", "mr" to "KFTGcs", "ta" to "KFTGcs", "kn" to "KFTGcs", "ml" to "KFTGcs", "gu" to "KFTGcs", "as" to "KFTGcs", "bn" to "KFTGcs", "pa" to "KFTGcs"))
     val menu get() = getString(mapOf("en" to "Menu", "te" to "మెనూ", "hi" to "मेन्यू", "mr" to "मेन्यू", "ta" to "மெனு", "kn" to "ಮೆನು", "ml" to "മെനു", "gu" to "મેનુ", "as" to "মেনু", "bn" to "মেনু", "pa" to "ਮੀਨੂ"))
     val home get() = getString(mapOf("en" to "Home", "te" to "హోమ్", "hi" to "होम", "mr" to "होम", "ta" to "முகப்பு", "kn" to "ಹೋಮ್", "ml" to "ഹോം", "gu" to "હોમ", "as" to "হোম", "bn" to "হোম", "pa" to "ਹੋਮ"))

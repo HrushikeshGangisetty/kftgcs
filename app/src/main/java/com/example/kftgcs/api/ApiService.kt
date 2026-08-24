@@ -583,13 +583,17 @@ object ApiService {
 // Request models
 // @SerializedName annotations ensure field names survive R8/ProGuard obfuscation in release builds
 data class PilotRegisterRequest(
-    @SerializedName("company_name") val company_name: String,
     @SerializedName("first_name") val first_name: String,
     @SerializedName("last_name") val last_name: String,
     @SerializedName("email") val email: String,
     @SerializedName("mobile_no") val mobile_no: String,
     @SerializedName("password") val password: String,
-    @SerializedName("re_password") val re_password: String
+    @SerializedName("re_password") val re_password: String,
+    // Exactly one of these is sent. Gson omits nulls, so a company registration
+    // carries no signup_key and a signup-key registration carries no
+    // company_name — each selects the matching branch of /api/pilot-register.
+    @SerializedName("company_name") val company_name: String? = null,
+    @SerializedName("signup_key") val signup_key: String? = null
 )
 
 data class VerifyOtpRequest(
@@ -624,7 +628,11 @@ data class PilotResetPasswordRequest(
 data class PilotRegisterResponse(
     @SerializedName("message") val message: String,
     @SerializedName("id") val id: Int,
-    @SerializedName("status_code") val status_code: Int
+    @SerializedName("status_code") val status_code: Int,
+    // Only returned by the signup-key branch, which verifies the account
+    // outright — no OTP is issued, so the client must skip OTP verification.
+    @SerializedName("registration_type") val registration_type: String? = null,
+    @SerializedName("verified") val verified: Boolean? = null
 )
 
 data class PilotLoginResponse(

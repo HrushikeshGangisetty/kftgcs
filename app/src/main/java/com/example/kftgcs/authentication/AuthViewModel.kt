@@ -113,10 +113,17 @@ class AuthViewModel : ViewModel() {
         email: String,
         mobileNumber: String,
         password: String,
-        rePassword: String
+        rePassword: String,
+        signupKey: String?
     ): String? {
-        // Company name validation
-        if (companyName.isEmpty()) return "Please select a company name"
+        // Signup-key registrations identify the pilot's company from the
+        // pre-provisioned account, so no company is collected or checked.
+        if (signupKey != null) {
+            if (signupKey.isBlank()) return "Signup key is required"
+        } else {
+            // Company name validation
+            if (companyName.isEmpty()) return "Please select a company name"
+        }
         // Name validation
         if (firstName.isEmpty()) return "First name is required"
         if (firstName.length > 50) return "First name is too long (max 50 characters)"
@@ -214,9 +221,10 @@ class AuthViewModel : ViewModel() {
         email: String,
         mobileNumber: String,
         password: String,
-        rePassword: String
+        rePassword: String,
+        signupKey: String? = null
     ) {
-        val validationError = validateSignupInput(companyName, firstName, lastName, email, mobileNumber, password, rePassword)
+        val validationError = validateSignupInput(companyName, firstName, lastName, email, mobileNumber, password, rePassword, signupKey)
         if (validationError != null) {
             _authState.value = AuthState.Error(validationError)
             return
@@ -227,7 +235,8 @@ class AuthViewModel : ViewModel() {
         viewModelScope.launch {
             try {
                 val request = PilotRegisterRequest(
-                    company_name = companyName,
+                    company_name = companyName.takeIf { it.isNotBlank() },
+                    signup_key = signupKey,
                     first_name = firstName,
                     last_name = lastName,
                     email = email,
@@ -240,7 +249,14 @@ class AuthViewModel : ViewModel() {
                     is ApiResponse.Success -> {
                         _registrationEmail.value = email
                         SessionManager.saveUserDetails(context, firstName, lastName)
-                        _authState.value = AuthState.RegistrationSuccess(response.data.message)
+                        // A signup-key registration comes back already verified,
+                        // so there is no OTP to collect — the caller sends the
+                        // user straight to login instead of the OTP screen.
+                        _authState.value = if (response.data.verified == true) {
+                            AuthState.RegistrationVerified(response.data.message)
+                        } else {
+                            AuthState.RegistrationSuccess(response.data.message)
+                        }
                     }
                     is ApiResponse.Error -> {
                         _authState.value = AuthState.Error(response.message)
@@ -408,6 +424,8 @@ sealed class AuthState {
     object Loading : AuthState()
     data class Error(val message: String) : AuthState()
     data class RegistrationSuccess(val message: String) : AuthState()
+    /** Registration completed and already verified — no OTP step required. */
+    data class RegistrationVerified(val message: String) : AuthState()
     data class OtpVerified(val message: String) : AuthState()
     data class OtpResent(val message: String) : AuthState()
     // Forgot-password flow states

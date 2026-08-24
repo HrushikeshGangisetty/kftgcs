@@ -54,9 +54,9 @@ import com.example.kftgcs.navigation.Screen
 import com.example.kftgcs.utils.AppStrings
 import java.net.URLEncoder
 
-// SVD white-label build ships a single fixed company. Hide the company picker
-// and always submit this name so the value the backend expects is unchanged.
-private const val SVD_COMPANY_NAME = "SRI VIGNESHWARA DRONES PVT LTD"
+// SVD pilots are pre-provisioned by their admin and receive an assigned mail ID
+// plus a signup key. They register with those instead of picking a company, and
+// the backend verifies them outright — so no company picker and no OTP step.
 private val isSvdFlavor = BuildConfig.FLAVOR == "svd"
 
 private val textFieldColors
@@ -92,8 +92,11 @@ fun SignupPage(
     var rePassword by remember { mutableStateOf("") }
     var expanded by remember { mutableStateOf(false) }
 
+    // Assigned signup key — SVD builds only
+    var signupKey by remember { mutableStateOf("") }
+
     // Company name dropdown state
-    var selectedCompanyName by remember { mutableStateOf(if (isSvdFlavor) SVD_COMPANY_NAME else "") }
+    var selectedCompanyName by remember { mutableStateOf("") }
     var companyDropdownExpanded by remember { mutableStateOf(false) }
 
     val companyNames by authViewModel.companyNames.observeAsState(emptyList())
@@ -103,7 +106,7 @@ fun SignupPage(
     val authState by authViewModel.authState.observeAsState()
     val context = LocalContext.current
 
-    // Fetch company names when the page loads (not needed for the fixed-company SVD build)
+    // Fetch company names when the page loads (SVD collects no company at all)
     LaunchedEffect(Unit) {
         if (!isSvdFlavor) {
             authViewModel.fetchCompanyNames()
@@ -121,6 +124,14 @@ fun SignupPage(
                     navController.navigate("otp_verification/$encodedEmail") {
                         popUpTo(Screen.Signup.route) { inclusive = false }
                     }
+                }
+            }
+            is AuthState.RegistrationVerified -> {
+                // Account is already verified — skip OTP and go straight to login.
+                Toast.makeText(context, state.message, Toast.LENGTH_LONG).show()
+                authViewModel.resetAuthState()
+                navController.navigate(Screen.Login.route) {
+                    popUpTo(Screen.Signup.route) { inclusive = true }
                 }
             }
             is AuthState.Error -> {
@@ -281,6 +292,20 @@ fun SignupPage(
 
                 Spacer(modifier = Modifier.height(8.dp))
 
+                // Signup Key — SVD only; validated against the mail ID by the backend
+                if (isSvdFlavor) {
+                    OutlinedTextField(
+                        value = signupKey,
+                        onValueChange = { signupKey = it },
+                        label = { Text(text = AppStrings.signupKey, color = Color.Black) },
+                        textStyle = blackTextStyle,
+                        colors = textFieldColors,
+                        singleLine = true
+                    )
+
+                    Spacer(modifier = Modifier.height(8.dp))
+                }
+
                 // Mobile Number with Country Code
                 MobileNumberField(
                     countryCode = countryCode,
@@ -371,10 +396,13 @@ fun SignupPage(
                                 selectedCompanyName,
                                 firstName,
                                 lastName,
-                                email,
+                                // The backend matches the assigned address exactly,
+                                // so strip whitespace an autofill may have added.
+                                email.trim(),
                                 fullMobileNumber,
                                 password,
-                                rePassword
+                                rePassword,
+                                signupKey = signupKey.trim().takeIf { isSvdFlavor }
                             )
                         }
                     ) {
