@@ -14,6 +14,7 @@ import androidx.compose.material.icons.filled.Thermostat
 import androidx.compose.material.icons.filled.Air
 import androidx.compose.material.icons.filled.Landscape
 import androidx.compose.material.icons.filled.Home
+import androidx.compose.material.icons.filled.Error
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -26,6 +27,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.navigation.NavController
 import com.example.kftgcs.navigation.Screen
+import com.example.kftgcs.utils.AppStrings
 
 @Composable
 fun BarometerCalibrationScreen(
@@ -33,6 +35,42 @@ fun BarometerCalibrationScreen(
     navController: NavController
 ) {
     val uiState by viewModel.uiState.collectAsState()
+
+    // Completion popup, matching the pattern the other calibration screens use.
+    // The TTS announcement is fired from the ViewModel alongside this flag.
+    if (uiState.showCompletionDialog) {
+        val success = uiState.completionSuccess
+        AlertDialog(
+            onDismissRequest = { viewModel.dismissCompletionDialog() },
+            icon = {
+                Icon(
+                    imageVector = if (success) Icons.Filled.CheckCircle else Icons.Filled.Error,
+                    contentDescription = null,
+                    tint = if (success) Color(0xFF4CAF50) else MaterialTheme.colorScheme.error,
+                    modifier = Modifier.size(48.dp)
+                )
+            },
+            title = {
+                Text(
+                    text = if (success) AppStrings.barometerCalibrationCompleteTitle
+                    else AppStrings.barometerCalibrationFailedTitle,
+                    fontWeight = FontWeight.Bold
+                )
+            },
+            text = {
+                Text(
+                    text = if (success) AppStrings.barometerCalibrationCompleteMessage
+                    else AppStrings.barometerCalibrationFailedMessage,
+                    textAlign = TextAlign.Center
+                )
+            },
+            confirmButton = {
+                Button(onClick = { viewModel.dismissCompletionDialog() }) {
+                    Text(AppStrings.ok)
+                }
+            }
+        )
+    }
 
     Box(
         modifier = Modifier

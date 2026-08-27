@@ -862,8 +862,12 @@ fun StatusPanel(
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis
                 )
-                // Format mission timer
-                val timeStr = telemetryState.missionElapsedSec?.let { sec ->
+                // Format mission timer.
+                // Falls back to lastMissionElapsedSec so the FINAL time of the mission that just
+                // ended stays on the bar (missionElapsedSec is nulled the moment the flight stops).
+                // It is cleared only when the next mission starts, so acknowledging the completion
+                // dialog no longer blanks the field.
+                val timeStr = (telemetryState.missionElapsedSec ?: telemetryState.lastMissionElapsedSec)?.let { sec ->
                     val m = (sec % 3600) / 60
                     val s = sec % 60
                     "%02d:%02d".format(m, s)

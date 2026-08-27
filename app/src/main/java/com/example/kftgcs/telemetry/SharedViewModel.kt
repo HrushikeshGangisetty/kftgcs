@@ -1806,7 +1806,14 @@ class SharedViewModel : ViewModel() {
             totalSprayedDistanceMeters = if (isActive || completed) sprayedDistanceMeters else null,
             totalSprayedAcres = if (isActive || completed) sprayedAcres else null,
             missionCompleted = completed,
-            lastMissionElapsedSec = if (completed) elapsedSeconds else _telemetryState.value.lastMissionElapsedSec
+            // Holds the FINAL time of the last mission so the bottom-bar timer keeps showing it
+            // after the flight ends. A new flight (isActive, elapsed reset to 0) clears the stale
+            // carry-over; otherwise the previous mission's time is preserved.
+            lastMissionElapsedSec = when {
+                completed -> elapsedSeconds
+                isActive && elapsedSeconds == 0L -> null
+                else -> _telemetryState.value.lastMissionElapsedSec
+            }
         )
 
         // NOTE: Mission waypoints are NO LONGER automatically cleared when mission completes.
@@ -2334,7 +2341,15 @@ class SharedViewModel : ViewModel() {
                         val preserveMissionElapsedSec = if (preserveMissionActive) currentState.missionElapsedSec else repoState.missionElapsedSec
                         val preserveTotalDistanceMeters = if (preserveMissionActive) currentState.totalDistanceMeters else repoState.totalDistanceMeters
                         val preserveMissionCompleted = currentState.missionCompleted
-                        val preserveLastMissionElapsedSec = currentState.lastMissionElapsedSec ?: repoState.lastMissionElapsedSec
+                        // While a mission is running the VM is authoritative: a deliberate clear at
+                        // flight start must NOT be resurrected by the repo's stale copy (the repo only
+                        // maintains this on the AUTO path, so after a manual flight it holds a value
+                        // from an older mission). Outside an active mission the repo may still fill in.
+                        val preserveLastMissionElapsedSec = if (preserveMissionActive) {
+                            currentState.lastMissionElapsedSec
+                        } else {
+                            currentState.lastMissionElapsedSec ?: repoState.lastMissionElapsedSec
+                        }
                         val preserveMissionCompletedHandled = currentState.missionCompletedHandled
 
                         repoState.copy(

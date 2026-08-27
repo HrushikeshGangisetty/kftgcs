@@ -24,7 +24,11 @@ data class BarometerCalibrationUiState(
     val progress: Int = 0,
     val isStopped: Boolean = false,
     val isFlatSurface: Boolean = true,
-    val isWindGood: Boolean = true
+    val isWindGood: Boolean = true,
+    // Shown once the calibration reaches a terminal state, mirroring the completion popup the
+    // other calibration screens show (see CalibrationScreen's reboot dialog).
+    val showCompletionDialog: Boolean = false,
+    val completionSuccess: Boolean = true
 )
 
 class BarometerCalibrationViewModel(
@@ -90,7 +94,8 @@ class BarometerCalibrationViewModel(
                     statusText = "Starting barometer calibration...",
                     isCalibrating = true,
                     progress = 0,
-                    isStopped = false
+                    isStopped = false,
+                    showCompletionDialog = false
                 )
             }
 
@@ -145,12 +150,36 @@ class BarometerCalibrationViewModel(
                         }
 
                         val success = awaitFinalOutcome(finalOutcomeTimeoutMs)
-                        if (success == true) {
-                            _uiState.update { it.copy(statusText = "Barometer calibration successful", isCalibrating = false, progress = 100) }
-                        } else if (success == false) {
-                            _uiState.update { it.copy(statusText = "Barometer calibration failed", isCalibrating = false) }
+                        if (_uiState.value.isStopped) {
+                            stopStatusListener()
+                            return@launch
+                        }
+                        if (success == false) {
+                            _uiState.update {
+                                it.copy(
+                                    statusText = "Barometer calibration failed",
+                                    isCalibrating = false,
+                                    showCompletionDialog = true,
+                                    completionSuccess = false
+                                )
+                            }
+                            sharedViewModel.announceCalibrationFinished(isSuccess = false)
                         } else {
-                            _uiState.update { it.copy(statusText = "No explicit success received after ACK (${lastAckText ?: "unknown"}). Assuming completion if STATUSTEXT not received.", isCalibrating = false, progress = 100) }
+                            val statusMsg = if (success == true) {
+                                "Barometer calibration successful"
+                            } else {
+                                "No explicit success received after ACK (${lastAckText ?: "unknown"}). Assuming completion if STATUSTEXT not received."
+                            }
+                            _uiState.update {
+                                it.copy(
+                                    statusText = statusMsg,
+                                    isCalibrating = false,
+                                    progress = 100,
+                                    showCompletionDialog = true,
+                                    completionSuccess = true
+                                )
+                            }
+                            sharedViewModel.announceCalibrationFinished(isSuccess = true)
                         }
 
                         stopStatusListener()
@@ -172,22 +201,56 @@ class BarometerCalibrationViewModel(
 
                 // Await final outcome from STATUSTEXT
                 val success = awaitFinalOutcome(finalOutcomeTimeoutMs)
-                if (success == true) {
-                    _uiState.update { it.copy(statusText = "Barometer calibration successful", isCalibrating = false, progress = 100) }
-                    // Announce success
-                    sharedViewModel.announceCalibrationFinished(isSuccess = true)
-                } else if (success == false) {
-                    _uiState.update { it.copy(statusText = "Barometer calibration failed", isCalibrating = false) }
+                // The user may have pressed Stop while we were waiting; that path already set its
+                // own terminal state, so don't overwrite it or announce a completion they cancelled.
+                if (_uiState.value.isStopped) {
+                    stopStatusListener()
+                    return@launch
+                }
+                if (success == false) {
+                    _uiState.update {
+                        it.copy(
+                            statusText = "Barometer calibration failed",
+                            isCalibrating = false,
+                            showCompletionDialog = true,
+                            completionSuccess = false
+                        )
+                    }
                     // Announce failure
                     sharedViewModel.announceCalibrationFinished(isSuccess = false)
                 } else {
-                    // Timeout: assume completion but inform user no explicit success was received
-                    _uiState.update { it.copy(statusText = "Assuming barometer calibration completed (no explicit success received)", isCalibrating = false, progress = 100) }
+                    // success == true, or a timeout with no explicit STATUSTEXT. ArduPilot frequently
+                    // completes a baro calibration without emitting a matching STATUSTEXT, so the
+                    // timeout is treated as completion here — same as the status text already said.
+                    // Both cases announce and pop up, so completion is never silent.
+                    val statusMsg = if (success == true) {
+                        "Barometer calibration successful"
+                    } else {
+                        "Assuming barometer calibration completed (no explicit success received)"
+                    }
+                    _uiState.update {
+                        it.copy(
+                            statusText = statusMsg,
+                            isCalibrating = false,
+                            progress = 100,
+                            showCompletionDialog = true,
+                            completionSuccess = true
+                        )
+                    }
+                    // Announce success (localized via TextToSpeechManager's calibration_success)
+                    sharedViewModel.announceCalibrationFinished(isSuccess = true)
                 }
 
                 stopStatusListener()
             } catch (e: Exception) {
-                _uiState.update { it.copy(statusText = "Error: ${e.message}", isCalibrating = false) }
+                _uiState.update {
+                    it.copy(
+                        statusText = "Error: ${e.message}",
+                        isCalibrating = false,
+                        showCompletionDialog = true,
+                        completionSuccess = false
+                    )
+                }
                 // Announce failure
                 sharedViewModel.announceCalibrationFinished(isSuccess = false)
                 stopStatusListener()
@@ -207,6 +270,10 @@ class BarometerCalibrationViewModel(
             _uiState.update { it.copy(statusText = "Calibration stopped.", isStopped = true, isCalibrating = false) }
             stopStatusListener()
         }
+    }
+
+    fun dismissCompletionDialog() {
+        _uiState.update { it.copy(showCompletionDialog = false) }
     }
 
     private fun startStatusListener() {

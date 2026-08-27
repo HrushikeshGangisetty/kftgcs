@@ -298,6 +298,13 @@ class MavlinkTelemetryRepository(
     // One-shot guards so the field warnings fire once per spray pass, not every BATT2 tick.
     private var sensorFaultWarned = false       // "no flow ever seen" warning (reset each PRIMING)
     private var configInvalidWarned = false     // "monitoring inactive" warning (reset when sprayer off)
+
+    // One-shot guard for the "Spray system configured correctly" notification.
+    // validateSprayConfiguration() runs on EVERY BATT2_*/BATT3_* PARAM_VALUE, and the FC re-sends
+    // that whole block on each param refresh, so notifying on each valid pass spammed the panel with
+    // the same line many times in a row. Notify only on the transition into the valid state; reset
+    // when configuration goes invalid (or on disconnect) so a genuine re-configuration notifies again.
+    private var sprayConfigValidNotified = false
     private var lastZeroFlowWarnTime = 0L       // debounce for the raw-0-while-enabled warning
     private val ZERO_FLOW_WARN_INTERVAL_MS = 10000L
 
@@ -4088,17 +4095,21 @@ class MavlinkTelemetryRepository(
             )
         }
 
-        // Log final validation status
+        // Notify only on the transition into "configured correctly", not on every param refresh.
         if (parametersReceived) {
             if (configurationValid) {
-
-                sharedViewModel.addNotification(
-                    Notification(
-                        "Spray system configured correctly",
-                        NotificationType.SUCCESS
+                if (!sprayConfigValidNotified) {
+                    sprayConfigValidNotified = true
+                    sharedViewModel.addNotification(
+                        Notification(
+                            "Spray system configured correctly",
+                            NotificationType.SUCCESS
+                        )
                     )
-                )
+                }
             } else {
+                // Configuration went invalid — re-arm so a later fix notifies again.
+                sprayConfigValidNotified = false
             }
         }
     }
