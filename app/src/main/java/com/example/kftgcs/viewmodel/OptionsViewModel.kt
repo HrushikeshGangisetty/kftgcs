@@ -272,11 +272,13 @@ class OptionsViewModel(application: Application) : AndroidViewModel(application)
 
             // FENCE_ALT_MAX ← maxAltitude (the altitude ceiling failsafe)
             //
-            // FENCE_ENABLE / FENCE_TYPE are deliberately NOT touched here: they belong to
-            // the geofence upload flow, and switching the fence on for a drone flying
-            // without a geofence would change its pre-arm and breach behaviour. The GCS
-            // enforces the ceiling itself (SharedViewModel.handleAltitudeFailsafe); this
-            // write just keeps the FC's own limit correct as a second layer.
+            // FENCE_ENABLE is deliberately NOT touched here: it belongs to the geofence
+            // upload flow, and switching the fence on for a drone flying without a geofence
+            // would change its pre-arm and breach behaviour. FENCE_TYPE is likewise not
+            // touched here — SharedViewModel.syncFenceParametersOnConnect owns it and only
+            // ORs bits in. The GCS enforces the ceiling itself
+            // (SharedViewModel.handleAltitudeFailsafe); this write just keeps the FC's own
+            // limit correct as a second layer.
             if (current.maxAltitudeEnabled && current.maxAltitude > 0f) {
                 // Written slightly BELOW the pilot's ceiling: ArduPilot arrests the climb
                 // after detecting the breach and coasts past FENCE_ALT_MAX, so a verbatim

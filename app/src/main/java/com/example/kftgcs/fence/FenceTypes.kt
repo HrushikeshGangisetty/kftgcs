@@ -33,27 +33,60 @@ sealed class FenceZone {
 }
 
 /**
- * Complete fence configuration
+ * Complete fence configuration.
+ *
+ * Deliberately carries no `action` or `margin`: FENCE_ACTION and FENCE_MARGIN are
+ * operator-owned parameters that the GCS reads but never writes (DGCA requires the
+ * vehicle to behave according to the parameters actually set on it). They used to
+ * live here and were stamped onto the FC on every upload — see
+ * MavlinkTelemetryRepository.configureFenceParameters.
  */
 data class FenceConfiguration(
     val zones: List<FenceZone>,
     val altitudeMin: Float? = null,  // Meters AGL
     val altitudeMax: Float? = null,  // Meters AGL
-    val action: FenceAction = FenceAction.BRAKE,
-    val margin: Float = 3.0f  // Safety margin in meters
+    /**
+     * Home-centred cylinder radius (FENCE_RADIUS), metres. Null leaves the FC's value alone.
+     *
+     * Normally null: the radius is operator-owned, like the action and margin. Set it only
+     * where the GCS genuinely intends to overwrite the pilot's configured limit.
+     */
+    val circleRadiusMeters: Float? = null,
+    /**
+     * Set the home-cylinder bit in FENCE_TYPE without touching FENCE_RADIUS — i.e. "keep the
+     * range fence switched on at whatever radius the operator chose".
+     */
+    val armCircleFence: Boolean = false
 )
 
 /**
- * Fence actions - what FC does when fence is breached
- * These map directly to ArduPilot FENCE_ACTION parameter values
+ * Fence actions — what the FC does when a fence is breached.
+ *
+ * Values map directly to ArduPilot's FENCE_ACTION parameter. Taken verbatim from
+ * AC_Fence.cpp:
+ *
+ *     @Values{Copter}: 0:Report Only,1:RTL or Land,2:Always Land,
+ *                      3:SmartRTL or RTL or Land,4:Brake or Land,5:SmartRTL or Land
+ *
+ * Note there is NO "loiter" action in ArduPilot. The behaviour pilots describe as
+ * loitering at the fence is BRAKE (4) — a braked stop-and-hold — so that is what
+ * [pilotLabel] calls it. The previous version of this enum had 2 labelled
+ * "Hold position (LOITER)" and a non-existent GUIDED(3); both were wrong, and 2 in
+ * particular would have told a pilot "LOITER" while the drone landed.
  */
-enum class FenceAction(val value: Float) {
-    REPORT_ONLY(0f),   // Just report, no action
-    RTL(1f),           // Return to launch
-    HOLD(2f),          // Hold position (LOITER)
-    GUIDED(3f),        // Switch to GUIDED mode
-    BRAKE(4f),         // Emergency brake (recommended for spray drones)
-    SMART_RTL(5f)      // SmartRTL - retrace path home
+enum class FenceAction(val value: Float, val pilotLabel: String) {
+    REPORT_ONLY(0f, "Report Only"),
+    RTL(1f, "RTL"),
+    ALWAYS_LAND(2f, "Land"),
+    SMART_RTL(3f, "Smart RTL"),
+    BRAKE(4f, "Loiter"),
+    SMART_RTL_LAND(5f, "Smart RTL");
+
+    companion object {
+        /** Maps a raw FENCE_ACTION param value to an action, or null if unrecognised. */
+        fun fromParam(value: Float?): FenceAction? =
+            value?.let { v -> entries.firstOrNull { it.value == v } }
+    }
 }
 
 /**

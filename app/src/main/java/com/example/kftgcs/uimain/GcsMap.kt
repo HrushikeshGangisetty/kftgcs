@@ -488,6 +488,10 @@ fun GcsMap(
     // Geofence parameters - now using polygon instead of circle
     geofencePolygon: List<LatLng> = emptyList(),
     geofenceEnabled: Boolean = false,
+    // Home-centred range cylinder as configured on the FC (FENCE_RADIUS), and whether the
+    // FC actually has it armed (FENCE_TYPE bit 1). Null radius / false = don't draw it.
+    rangeFenceRadiusMeters: Float? = null,
+    rangeFenceArmed: Boolean = false,
     // Waypoint drag callback
     onWaypointDrag: (index: Int, newPosition: LatLng) -> Unit = { _, _ -> },
     // Waypoint selection
@@ -655,15 +659,17 @@ fun GcsMap(
                     Timber.d("Map tiles loaded successfully (attempt ${mapLoadAttempt + 1})")
                 }
             ) {
-        // Max Range failsafe boundary — fixed 300m circular fence centred on home.
-        // Always drawn once home is known; unlike the polygon geofence below, this cannot
-        // be turned off (see SharedViewModel.handleMaxRangeFailsafe / MAX_RANGE_METERS).
+        // Max range boundary — the FC's home-centred cylinder fence (FENCE_RADIUS).
+        // Drawn from the radius actually read off the vehicle, and only when the FC has the
+        // circle bit armed, so the ring on the map is never a promise the FC isn't keeping.
         val maxRangeHomeLat = telemetryState.homeLatitude
         val maxRangeHomeLon = telemetryState.homeLongitude
-        if (maxRangeHomeLat != null && maxRangeHomeLon != null) {
+        val rangeRadius = rangeFenceRadiusMeters
+        if (rangeFenceArmed && rangeRadius != null && rangeRadius > 0f &&
+            maxRangeHomeLat != null && maxRangeHomeLon != null) {
             Circle(
                 center = LatLng(maxRangeHomeLat, maxRangeHomeLon),
-                radius = SharedViewModel.MAX_RANGE_METERS.toDouble(),
+                radius = rangeRadius.toDouble(),
                 strokeColor = Color(0xFFFF6D00), // Orange
                 strokeWidth = 4f,
                 fillColor = Color(0xFFFF6D00).copy(alpha = 0.04f),

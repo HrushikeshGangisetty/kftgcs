@@ -69,6 +69,9 @@ fun PlanScreen(
     val fenceRadius by telemetryViewModel.fenceRadius.collectAsState()
     val geofenceEnabled by telemetryViewModel.geofenceEnabled.collectAsState()
     val geofencePolygon by telemetryViewModel.geofencePolygon.collectAsState()
+    // FC-side home cylinder (FENCE_RADIUS / FENCE_TYPE bit 1) — drawn only when armed.
+    val rangeFenceRadius by telemetryViewModel.fenceRadiusMeters.collectAsState()
+    val rangeFenceArmed by telemetryViewModel.rangeFenceArmed.collectAsState()
     val sprayRate by telemetryViewModel.sprayRate.collectAsState()
     val context = LocalContext.current
     val uploadProgress by telemetryViewModel.missionUploadProgress.collectAsState()
@@ -671,6 +674,8 @@ fun PlanScreen(
                 } else emptyList(),
                 geofencePolygon = if (hasStartedPlanning) localGeofencePolygon else geofencePolygon,
                 geofenceEnabled = geofenceEnabled,
+                rangeFenceRadiusMeters = rangeFenceRadius,
+                rangeFenceArmed = rangeFenceArmed,
                 // Handle waypoint dragging (disabled when plan is saved)
                 onWaypointDrag = { index, newPosition ->
                     if (!isPlanSaved && index in points.indices) {

@@ -1,4 +1,4 @@
-﻿package com.example.kftgcs.telemetry
+package com.example.kftgcs.telemetry
 
 import com.divpundir.mavlink.adapters.coroutines.tryConnect
 import com.divpundir.mavlink.adapters.coroutines.trySendUnsignedV2
@@ -55,6 +55,29 @@ object MavMode {
     const val BRAKE: UInt = 17u // BRAKE mode - immediately stops all horizontal movement
     // Add other modes as needed
 }
+
+/**
+ * FENCE_TYPE bitmask bits, verbatim from ArduPilot AC_Fence.cpp:
+ *
+ *     @Bitmask{Copter, Plane, Sub}: 0:Max altitude,1:Circle Centered on Home,
+ *                                   2:Inclusion/Exclusion Circles+Polygons,3:Min altitude
+ *
+ * These fences are independent and combine freely — a Copter running FENCE_TYPE=7
+ * enforces the altitude ceiling, the home-centred cylinder (FENCE_RADIUS) AND the
+ * uploaded inclusion polygon simultaneously. The home cylinder is a separate fence
+ * from any circle in the inclusion/exclusion list.
+ */
+const val FENCE_TYPE_ALT_MAX = 1
+const val FENCE_TYPE_CIRCLE = 2
+const val FENCE_TYPE_POLYGON = 4
+const val FENCE_TYPE_ALT_MIN = 8
+
+/**
+ * MAV_SYS_STATUS_GEOFENCE — the geofence bit in SYS_STATUS onboard_control_sensors_*.
+ * 0x100000 (bit 20), from MAVLink common.xml. One flag for ALL fence types: it cannot
+ * distinguish a circle breach from a polygon or altitude breach.
+ */
+const val MAV_SYS_STATUS_GEOFENCE: UInt = 0x100000u
 
 // MAVLink command IDs for mission items
 object MavCmdId {
@@ -2163,7 +2186,17 @@ class MavlinkTelemetryRepository(
                     // from a previous session. Suppress these to prevent false warnings and
                     // confusion about why the drone won't arm.
                     val isFenceMessage = message.contains("fence", ignoreCase = true)
-                    if (isFenceMessage && !sharedViewModel.geofenceEnabled.value) {
+
+                    // ...but NOT the home-centred range cylinder. That fence is armed on
+                    // connect (FENCE_RADIUS + FENCE_TYPE bit 1) independently of the GCS's
+                    // polygon toggle, so its breach messages are always genuine. Suppressing
+                    // them with the polygon's would silently swallow a real 300m breach
+                    // whenever the mission geofence happened to be switched off.
+                    val isRangeFenceMessage = message.contains("circle", ignoreCase = true) ||
+                            message.contains("radius", ignoreCase = true)
+
+                    if (isFenceMessage && !isRangeFenceMessage &&
+                        !sharedViewModel.geofenceEnabled.value) {
                         // GCS geofence is off but FC is sending fence messages - stale fence data
                         // Log it but don't show to user as a notification
                         Timber.w("Fence STATUSTEXT suppressed (geofence disabled in GCS): %s", message)
@@ -2198,7 +2231,18 @@ class MavlinkTelemetryRepository(
                         // holds the fence sensor enabled-and-unhealthy, which short breaches and
                         // some fence types never do, which is why breaches showed no popup.
                         if (isFenceMessage && message.contains("breach", ignoreCase = true)) {
-                            sharedViewModel.notifyFenceBreach("STATUSTEXT")
+                            // ArduPilot names the fence in the text ("Polygon breached",
+                            // "Circle breached", "Max Alt breached"), which SYS_STATUS bit 8
+                            // cannot tell us — it is one flag for every fence type. Pass the
+                            // name through so the pilot is told WHICH boundary was crossed.
+                            val which = when {
+                                message.contains("circle", ignoreCase = true) -> "Range"
+                                message.contains("polygon", ignoreCase = true) -> "Polygon"
+                                message.contains("max alt", ignoreCase = true) -> "Max Altitude"
+                                message.contains("min alt", ignoreCase = true) -> "Min Altitude"
+                                else -> null
+                            }
+                            sharedViewModel.notifyFenceBreach("STATUSTEXT", which)
                         } else if (message.contains("failsafe", ignoreCase = true)) {
                             sharedViewModel.showFailsafePopup(failsafePopupLabel(message))
                         }
@@ -4432,8 +4476,16 @@ class MavlinkTelemetryRepository(
                 }
                 Timber.i("Geofence: Step 3 OK - fence parameters configured")
 
-                // Step 4: Enable fence
+                // Step 4: Enable fence.
+                //
+                // Bounce through 0 first. AC_Fence::update() only rebuilds its live
+                // _enabled_fences mask when FENCE_ENABLE *changes value*, so on a vehicle
+                // whose fence is already enabled, writing 1 over 1 is a no-op and the
+                // FENCE_TYPE we just set in step 3 never reaches the mask the checks
+                // actually consult (get_enabled_fences() == _enabled_fences & present()).
                 delay(500)
+                enableFence(false)
+                delay(300)
                 val enabled = enableFence(true)
 
                 if (!enabled) {
@@ -4701,42 +4753,54 @@ class MavlinkTelemetryRepository(
     }
 
     /**
-     * Configure fence parameters on flight controller
+     * Configure fence parameters on the flight controller.
+     *
+     * FENCE_ACTION and FENCE_MARGIN are deliberately NOT written here. They are
+     * operator-owned: DGCA requires the vehicle to act on the parameters actually set
+     * on it, and this function used to stamp FENCE_ACTION=4 (Brake or Land) and
+     * FENCE_MARGIN=3 onto the FC on every single fence upload, silently reverting
+     * whatever the operator had configured. The GCS now reads both and reports them
+     * (see SharedViewModel.syncFenceParametersOnConnect / getCurrentFenceAction).
      */
     private suspend fun configureFenceParameters(config: FenceConfiguration): Boolean {
         try {
-            // Set fence action (what happens on breach)
-            if (!setFenceParameter("FENCE_ACTION", config.action.value)) {
-                return false
+            // Set the home-centred cylinder radius (FENCE_RADIUS) before enabling its bit,
+            // so the fence never goes live at a stale radius.
+            config.circleRadiusMeters?.let { radius ->
+                if (!setFenceParameter("FENCE_RADIUS", radius)) {
+                    return false
+                }
+                delay(200)
             }
-            delay(200)
 
-            // Set fence margin (safety buffer)
-            if (!setFenceParameter("FENCE_MARGIN", config.margin)) {
-                return false
-            }
-            delay(200)
-
-            // Set fence type bitfield
-            // Bit 0 (1) = Max altitude fence
-            // Bit 1 (2) = Circle fence
-            // Bit 2 (4) = Polygon fence
-            var fenceType = 0
+            // Set fence type bitmask. READ-MODIFY-WRITE, never recomputed from zero:
+            // this used to start at 0 and OR in only the bits the current config implied,
+            // which meant every mission-fence upload cleared the home-cylinder bit and
+            // silently disarmed the 300m range fence.
+            val currentType = readFenceParameter("FENCE_TYPE")?.toInt() ?: 0
+            var fenceType = currentType
             config.zones.forEach { zone ->
                 when (zone) {
-                    is FenceZone.Polygon -> fenceType = fenceType or 4  // Bit 2 = polygon
-                    is FenceZone.Circle -> fenceType = fenceType or 2   // Bit 1 = circle
+                    is FenceZone.Polygon -> fenceType = fenceType or FENCE_TYPE_POLYGON
+                    is FenceZone.Circle -> fenceType = fenceType or FENCE_TYPE_CIRCLE
                     else -> {}
                 }
             }
+            if (config.circleRadiusMeters != null || config.armCircleFence) {
+                fenceType = fenceType or FENCE_TYPE_CIRCLE
+            }
             if (config.altitudeMax != null || config.altitudeMin != null) {
-                fenceType = fenceType or 1  // Bit 0 = altitude
+                fenceType = fenceType or FENCE_TYPE_ALT_MAX
             }
 
-            if (!setFenceParameter("FENCE_TYPE", fenceType.toFloat())) {
-                return false
+            if (fenceType != currentType) {
+                if (!setFenceParameter("FENCE_TYPE", fenceType.toFloat())) {
+                    return false
+                }
+                delay(200)
+            } else {
+                Timber.i("Geofence: FENCE_TYPE already $currentType, no write needed")
             }
-            delay(200)
 
             // Set altitude limits if provided
             if (config.altitudeMax != null) {
@@ -4867,7 +4931,7 @@ class MavlinkTelemetryRepository(
      *     failsafe reads run on the same 2s timescale as the fence upload debounce) makes
      *     both failure modes far more likely, since PARAM_VALUE traffic is interleaved.
      */
-    private suspend fun setFenceParameter(paramId: String, value: Float): Boolean {
+    suspend fun setFenceParameter(paramId: String, value: Float): Boolean {
         val attempts = 3
         repeat(attempts) { attempt ->
             val confirmed = trySetFenceParameterOnce(paramId, value)
@@ -4882,6 +4946,48 @@ class MavlinkTelemetryRepository(
         }
         Timber.e("Geofence: ✗ $paramId=$value FAILED after $attempts attempts")
         return false
+    }
+
+    /**
+     * Read one fence parameter from the FC, or null if it does not answer.
+     *
+     * Same subscribe-before-send discipline as [trySetFenceParameterOnce], and the same
+     * NUL-padding strip: PARAM_VALUE.param_id is a fixed 16-byte field, so "FENCE_TYPE"
+     * arrives as "FENCE_TYPE\u0000...".
+     */
+    suspend fun readFenceParameter(paramId: String, timeoutMs: Long = 3000L): Float? {
+        return try {
+            val valueDeferred = AppScope.async {
+                withTimeoutOrNull(timeoutMs) {
+                    mavFrame
+                        .filter { it.systemId == fcuSystemId }
+                        .map { it.message }
+                        .filterIsInstance<ParamValue>()
+                        .first { it.paramId.trim().replace("\u0000", "") == paramId }
+                }
+            }
+            // Give the collector a moment to attach before the request goes out.
+            delay(50)
+
+            val request = ParamRequestRead(
+                targetSystem = fcuSystemId,
+                targetComponent = fcuComponentId,
+                paramId = paramId,
+                paramIndex = -1
+            )
+            connection.trySendUnsignedV2(gcsSystemId, gcsComponentId, request)
+
+            val result = valueDeferred.await()?.paramValue
+            if (result == null) {
+                Timber.w("Geofence: no response reading $paramId")
+            } else {
+                Timber.i("Geofence: read $paramId = $result")
+            }
+            result
+        } catch (e: Exception) {
+            Timber.e(e, "Geofence: failed reading $paramId")
+            null
+        }
     }
 
     /** One PARAM_SET + ack round trip for [setFenceParameter]. */
@@ -5129,17 +5235,29 @@ class MavlinkTelemetryRepository(
                 .map { it.message }
                 .filterIsInstance<SysStatus>()
                 .collect { sysStatus ->
-                    // Check fence breach bit in onboard_control_sensors_health
-                    // Bit 8 (0x100) = FENCE
-                    val fenceHealthy = (sysStatus.onboardControlSensorsHealth.value and 0x100u) != 0u
-                    val fenceEnabled = (sysStatus.onboardControlSensorsEnabled.value and 0x100u) != 0u
+                    // Check the fence bit in onboard_control_sensors_health.
+                    //
+                    // MAV_SYS_STATUS_GEOFENCE is bit 20 (0x100000), per MAVLink common.xml.
+                    // This previously masked 0x100, which is MAV_SYS_STATUS_SENSOR_LASER_POSITION
+                    // — the rangefinder/proximity health bit. On an airframe with a proximity
+                    // sensor that reports unhealthy (e.g. "PreArm: PRX1: No Data"), that read as
+                    // a permanent fence breach: the popup fired the moment the fence went live
+                    // at arming, while the FC never actually breached anything or changed mode.
+                    val fenceHealthy = (sysStatus.onboardControlSensorsHealth.value and MAV_SYS_STATUS_GEOFENCE) != 0u
+                    val fenceEnabled = (sysStatus.onboardControlSensorsEnabled.value and MAV_SYS_STATUS_GEOFENCE) != 0u
                     val fenceBreached = fenceEnabled && !fenceHealthy
 
-                    // IMPORTANT: Only report breach if GCS geofence is actually enabled.
-                    // The FC may have stale fence data from a previous session.
-                    // If geofence is disabled in GCS, ignore FC fence status to prevent
-                    // false "approaching polygon fence" warnings and arm blocks.
-                    val gcsGeofenceEnabled = sharedViewModel.geofenceEnabled.value
+                    // IMPORTANT: Only report breach if a fence we actually armed is active.
+                    // The FC may have stale fence data from a previous session, so with the
+                    // polygon off we ignore FC fence status to prevent false "approaching
+                    // polygon fence" warnings and arm blocks.
+                    //
+                    // The home-centred range cylinder counts too: it is armed on connect
+                    // independently of the polygon toggle, and SYS_STATUS bit 8 is a single
+                    // flag for ALL fence types. Gating on the polygon alone would discard a
+                    // genuine 300m breach whenever the mission geofence was switched off.
+                    val gcsGeofenceEnabled = sharedViewModel.geofenceEnabled.value ||
+                            sharedViewModel.rangeFenceArmed.value
                     if (!gcsGeofenceEnabled) {
                         // GCS says geofence is off - ensure we report clean state
                         if (_fenceStatus.value.enabled || _fenceStatus.value.breached) {
@@ -5180,6 +5298,44 @@ class MavlinkTelemetryRepository(
     /**
      * Clear all fence data from flight controller
      */
+    /**
+     * Remove the polygon/inclusion fence items from the FC WITHOUT disabling the fence.
+     *
+     * [clearGeofenceFromFC] also sets FENCE_ENABLE=0, which is right when the pilot turns the
+     * geofence off, but wrong for clearing a stale polygon at connect: that would disarm the
+     * home-centred range cylinder along with it. Here we clear only the stored fence items,
+     * leaving FENCE_ENABLE and FENCE_TYPE as configured.
+     */
+    suspend fun clearFenceItemsOnly(): Boolean {
+        return withContext(Dispatchers.IO) {
+            try {
+                val clearCmd = MissionClearAll(
+                    targetSystem = fcuSystemId,
+                    targetComponent = fcuComponentId,
+                    missionType = MavEnumValue.of(MavMissionType.FENCE)
+                )
+                connection.trySendUnsignedV2(gcsSystemId, gcsComponentId, clearCmd)
+
+                val ack = withTimeoutOrNull(5000) {
+                    mavFrame
+                        .filter { it.systemId == fcuSystemId }
+                        .map { it.message }
+                        .filterIsInstance<MissionAck>()
+                        .first { it.missionType.value == MavMissionType.FENCE.value }
+                }
+
+                val ok = ack?.type?.value == MavMissionResult.MAV_MISSION_ACCEPTED.value
+                if (ok) {
+                    // The polygon is gone, so any polygon breach it was reporting is stale.
+                    _fenceStatus.value = FenceStatus()
+                }
+                ok
+            } catch (e: Exception) {
+                false
+            }
+        }
+    }
+
     suspend fun clearGeofenceFromFC(): Boolean {
         return withContext(Dispatchers.IO) {
             try {

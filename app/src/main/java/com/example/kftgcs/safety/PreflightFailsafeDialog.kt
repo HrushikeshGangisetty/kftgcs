@@ -62,6 +62,12 @@ fun PreflightFailsafeDialog(
                 SummaryRow("Critical Voltage", formatVolts(summary.criticalVoltage))
                 SummaryRow("Tank Empty Action", summary.tankEmptyAction)
                 SummaryRow("Battery Failsafe Action", summary.batteryFailsafeAction)
+                // Fence rows read straight off the vehicle's FENCE_* parameters, so the
+                // pilot confirms what the FC will ACTUALLY do on a breach — the GCS does
+                // not set FENCE_ACTION or FENCE_MARGIN.
+                SummaryRow("Fence Action", summary.fenceAction)
+                SummaryRow("Max Range", summary.fenceRadius)
+                SummaryRow("Fence Margin", summary.fenceMargin)
             }
         },
         confirmButton = {

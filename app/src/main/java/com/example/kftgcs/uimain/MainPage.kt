@@ -73,6 +73,9 @@ fun MainPage(
     val gridWaypoints by telemetryViewModel.gridWaypoints.collectAsState()
     val geofenceEnabled by telemetryViewModel.geofenceEnabled.collectAsState()
     val geofencePolygon by telemetryViewModel.geofencePolygon.collectAsState()
+    // FC-side home cylinder (FENCE_RADIUS / FENCE_TYPE bit 1) — drawn only when armed.
+    val rangeFenceRadius by telemetryViewModel.fenceRadiusMeters.collectAsState()
+    val rangeFenceArmed by telemetryViewModel.rangeFenceArmed.collectAsState()
     val obstacles by telemetryViewModel.obstacles.collectAsState()
     val clearDronePathTrigger by telemetryViewModel.clearDronePathTrigger.collectAsState()
 
@@ -102,7 +105,7 @@ fun MainPage(
     // Collect spray status popup
     val sprayStatusPopup by telemetryViewModel.sprayStatusPopup.collectAsState()
 
-    // Collect failsafe alert popup (Battery Failsafe / Geofence Breached / Max Range / Max Altitude)
+    // Collect failsafe alert popup (Battery Failsafe / Fence Breached / Max Altitude)
     val failsafePopup by telemetryViewModel.failsafePopup.collectAsState()
 
     // Collect vehicle service alert state
@@ -181,6 +184,8 @@ fun MainPage(
                 heading = telemetryState.heading,
                 geofencePolygon = geofencePolygon,
                 geofenceEnabled = geofenceEnabled,
+                rangeFenceRadiusMeters = rangeFenceRadius,
+                rangeFenceArmed = rangeFenceArmed,
                 // Geofence adjustment parameters
                 onGeofencePointDrag = { index, newPosition ->
                     // Update the geofence polygon when user drags a vertex
