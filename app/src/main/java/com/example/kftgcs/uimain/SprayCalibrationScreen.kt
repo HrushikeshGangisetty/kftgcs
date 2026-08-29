@@ -74,6 +74,7 @@ fun SprayCalibrationScreen(
             ConfigurationStatusCard(
                 sprayEnabled = sprayTelemetry.sprayEnabled,
                 rc7Value = sprayTelemetry.rc7Value,
+                sprayRcChannel = sprayTelemetry.sprayRcChannel,
                 configurationValid = sprayTelemetry.configurationValid,
                 configurationError = sprayTelemetry.configurationError,
                 tankLevel = sprayTelemetry.tankLevelPercent,
@@ -148,6 +149,7 @@ fun SprayCalibrationScreen(
 private fun ConfigurationStatusCard(
     sprayEnabled: Boolean,
     rc7Value: Int?,
+    sprayRcChannel: Int,
     configurationValid: Boolean,
     configurationError: String?,
     tankLevel: Int?,
@@ -183,7 +185,7 @@ private fun ConfigurationStatusCard(
 
             rc7Value?.let {
                 StatusRow(
-                    label = "RC7 PWM",
+                    label = "RC$sprayRcChannel PWM",
                     value = "$it",
                     valueColor = Color.White
                 )

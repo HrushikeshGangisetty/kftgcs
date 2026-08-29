@@ -353,7 +353,7 @@ private fun MissingBanner(missingCount: Int, onRetry: () -> Unit) {
         verticalAlignment = Alignment.CenterVertically
     ) {
         Text(
-            "$missingCount parameter${if (missingCount == 1) "" else "s"} not received — telemetry link dropped them.",
+            "$missingCount parameter${if (missingCount == 1) "" else "s"} not received. Tap Retry to re-request them.",
             color = Amber, fontSize = 12.sp, modifier = Modifier.weight(1f)
         )
         TextButton(onClick = onRetry, contentPadding = PaddingValues(horizontal = 8.dp)) {

@@ -73,20 +73,37 @@ class FullParamListViewModel(
         private const val TAG = "FullParamListVM"
         /** Idle gap after the last received PARAM_VALUE before we stop waiting for more. */
         private const val RECEIVE_TIMEOUT_MS = 4000L
-        /** Absolute cap on one fetch, so the screen can never sit on the spinner forever. */
-        private const val HARD_TIMEOUT_MS = 180_000L
+        /**
+         * Absolute cap on one fetch, so the screen can never sit on the spinner forever.
+         *
+         * Covers the initial download plus up to [MAX_GAP_FILL_PASSES] chunked gap-fill passes.
+         * At 180s a large gap ran out of budget mid-recovery and the list stayed incomplete; the
+         * pass-made-no-progress bailout in [fillGaps] is what ends a hopeless fetch early, so this
+         * only needs to be generous enough not to cut a working recovery short.
+         */
+        private const val HARD_TIMEOUT_MS = 300_000L
         /** How often the accumulated params are pushed to the UI while downloading. */
         private const val PUBLISH_INTERVAL_MS = 250L
         /** Passes of index-targeted re-requests for params the FC never delivered. */
-        private const val MAX_GAP_FILL_PASSES = 3
+        private const val MAX_GAP_FILL_PASSES = 5
         /**
-         * Skip gap filling when more than this fraction of the list is missing —
-         * that means the link is broken, not lossy, and firing a thousand
-         * PARAM_REQUEST_READs would only make it worse.
+         * Skip gap filling only when nearly the whole list is missing — that means the link is
+         * down, not lossy, and firing a thousand PARAM_REQUEST_READs would only make it worse.
+         *
+         * This was 0.5, which turned out to be far too eager to give up: the common failure is
+         * losing a third of the list to buffer overflow (see MAV_FRAME_BUFFER_CAPACITY in
+         * TelemetryRepository), which is exactly the case gap filling exists to repair.
          */
-        private const val GAP_FILL_MAX_MISSING_FRACTION = 0.5f
-        /** Spacing between gap-fill requests so the link isn't flooded. */
+        private const val GAP_FILL_MAX_MISSING_FRACTION = 0.9f
+        /**
+         * Spacing between gap-fill requests so the link isn't flooded.
+         *
+         * Gap fill re-requests one param per message, and sending them faster than the FC can
+         * answer just overflows the receive path again — recreating the loss it is trying to fix.
+         */
         private const val GAP_FILL_REQUEST_SPACING_MS = 25L
+        /** Chunk size for gap-fill requests; after each chunk we wait for the replies to land. */
+        private const val GAP_FILL_CHUNK_SIZE = 100
     }
 
     private val _state = MutableStateFlow(FullParamListState())
@@ -314,15 +331,28 @@ class FullParamListViewModel(
             }
 
             pass++
+            val sizeBeforePass = collected.size
             _state.update { it.copy(isFillingGaps = true) }
             LogUtils.d(TAG, "🔁 Gap-fill pass $pass: re-requesting ${missing.size} params")
 
-            for (index in missing) {
+            // Send in chunks and let each chunk's replies arrive before queueing the next.
+            // Firing all of them back to back is what overwhelmed the receive path and made a
+            // large gap unrecoverable — the retries dropped as many params as they recovered.
+            for (chunk in missing.chunked(GAP_FILL_CHUNK_SIZE)) {
                 if (System.currentTimeMillis() >= deadline) break
-                sharedViewModel.requestParameterByIndex(index)
-                delay(GAP_FILL_REQUEST_SPACING_MS)
+                for (index in chunk) {
+                    if (System.currentTimeMillis() >= deadline) break
+                    sharedViewModel.requestParameterByIndex(index)
+                    delay(GAP_FILL_REQUEST_SPACING_MS)
+                }
+                awaitStreamIdle(collected, expectedTotal, lastReceivedAt, deadline)
             }
-            awaitStreamIdle(collected, expectedTotal, lastReceivedAt, deadline)
+
+            // Nothing new arrived this pass — the FC isn't answering, so more passes won't help.
+            if (collected.size == sizeBeforePass) {
+                LogUtils.d(TAG, "⚠ Gap-fill pass $pass recovered nothing — giving up")
+                return
+            }
         }
     }
 

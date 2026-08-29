@@ -212,4 +212,11 @@ dependencies {
 
     // Google Play In-App Updates — "new version available" prompt (FLEXIBLE flow)
     implementation(libs.play.app.update)
+
+    // Media3 / ExoPlayer — live RTSP camera feed (SIYI A8 mini / ZT6 via MK15 air unit).
+    // Android's built-in MediaPlayer cannot decode these streams; it connects and
+    // then buffers forever, so ExoPlayer's RTSP source is required.
+    implementation(libs.androidx.media3.exoplayer)
+    implementation(libs.androidx.media3.exoplayer.rtsp)
+    implementation(libs.androidx.media3.ui)
 }

@@ -454,9 +454,12 @@ fun TopNavBar(
 
         // Spray rate slider popup
         if (showSpraySlider) {
-            // Get RC7-based spray enabled status from telemetry
+            // Get RC-switch-based spray enabled status from telemetry. The channel is whichever
+            // one has RCx_OPTION = 15 (Sprayer), so label it with the resolved number rather than
+            // assuming RC7.
             val rc7SprayEnabled = telemetryState.sprayTelemetry.sprayEnabled
             val rc7Value = telemetryState.sprayTelemetry.rc7Value
+            val sprayChannelLabel = "RC${telemetryState.sprayTelemetry.sprayRcChannel}"
 
             Popup(
                 onDismissRequest = { showSpraySlider = false },
@@ -482,13 +485,13 @@ fun TopNavBar(
 
                         HorizontalDivider(color = Color.White.copy(alpha = 0.3f))
 
-                        // RC7 Status Display
+                        // Sprayer switch status display
                         Row(
                             modifier = Modifier.fillMaxWidth(),
                             verticalAlignment = Alignment.CenterVertically
                         ) {
                             Text(
-                                "RC7 Status:",
+                                "$sprayChannelLabel Status:",
                                 color = Color.White,
                                 modifier = Modifier.weight(1f)
                             )
@@ -499,7 +502,7 @@ fun TopNavBar(
                             )
                         }
                         Text(
-                            "RC7 PWM: ${rc7Value ?: "N/A"}",
+                            "$sprayChannelLabel PWM: ${rc7Value ?: "N/A"}",
                             color = Color.Gray,
                             style = MaterialTheme.typography.bodySmall
                         )
@@ -508,7 +511,7 @@ fun TopNavBar(
 
                         // Spray Rate Slider
                         // Written to the FC as SPRAY_PUMP_RATE 1:1.
-                        // Slider is always functional regardless of RC7 status.
+                        // Slider is always functional regardless of the sprayer switch status.
                         Column(modifier = Modifier.padding(vertical = 4.dp)) {
                             Row(verticalAlignment = Alignment.CenterVertically) {
                                 Text(AppStrings.sprayRate, color = Color.White, modifier = Modifier.weight(1f))

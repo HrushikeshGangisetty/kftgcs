@@ -25,9 +25,14 @@ data class SprayField(
     val options: Map<Int, String> = emptyMap()
 )
 
+// NOTE: SpraySettingsScreen slices this list by fixed index ranges (0..3, 3..6, 6..9) to lay out
+// its three columns, so keep the entries in this order and keep the size at 9.
 val SPRAY_FIELDS = listOf(
     SprayField("SPRAY_ENABLE", "Enable Spraying", 0f, 1f, mapOf(0 to "Disable", 1 to "Enable")),
-    SprayField("RC7_OPTION", "RC Switch", 0f, 102f),
+    // This screen configures the sprayer switch on RC7 (set it to 15 = Sprayer). Spray MONITORING
+    // does not depend on this field — TelemetryRepository resolves whichever channel has
+    // RCx_OPTION = 15, so an airframe wired to RC6 is still monitored correctly.
+    SprayField("RC7_OPTION", "RC7 Switch (15 = Sprayer)", 0f, 102f),
     SprayField("BRD_PWM_COUNT", "BRD PWM Count", 0f, 8f),
     SprayField("SERVO9_FUNCTION", "Servo9 Function [AUX 1]", 0f, 130f),
     SprayField("SERVO9_MIN", "PWM Min", 500f, 2200f),

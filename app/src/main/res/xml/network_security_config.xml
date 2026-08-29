@@ -42,6 +42,15 @@
         <domain includeSubdomains="true">192.168.1.1</domain>
         <domain includeSubdomains="true">192.168.4.1</domain>
 
+        <!-- SIYI MK15 air unit / camera subnet (A8 mini, ZT6 RTSP video) -->
+        <domain includeSubdomains="true">192.168.144.25</domain>
+        <domain includeSubdomains="true">192.168.144.10</domain>
+        <domain includeSubdomains="true">192.168.144.11</domain>
+        <domain includeSubdomains="true">192.168.144.12</domain>
+
+        <!-- HereLink / generic transmitter AP gateway -->
+        <domain includeSubdomains="true">192.168.43.1</domain>
+
         <!-- Class B private network (172.16.x.x - 172.31.x.x) -->
         <domain includeSubdomains="true">172.16.0.1</domain>
     </domain-config>

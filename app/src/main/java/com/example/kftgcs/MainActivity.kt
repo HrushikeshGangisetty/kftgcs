@@ -2,6 +2,7 @@ package com.example.kftgcs
 
 import android.Manifest
 import android.content.Intent
+import android.content.pm.ActivityInfo
 import android.hardware.usb.UsbManager
 import android.os.Build
 import android.os.Bundle
@@ -86,6 +87,11 @@ class MainActivity : ComponentActivity() {
         installSplashScreen()
 
         super.onCreate(savedInstanceState)
+
+        // The GCS is a landscape-only app: the map, telemetry rail and camera PiP
+        // all assume a wide viewport. Set at runtime as well as in the manifest so
+        // the lock survives on devices that relax the manifest attribute.
+        requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
 
         // If launched/resumed via a USB device attach, flag it so the UI can show the USB tab.
         handleUsbAttachIntent(intent)

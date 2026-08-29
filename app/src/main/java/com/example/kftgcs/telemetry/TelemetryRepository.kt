@@ -24,6 +24,7 @@ import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.async
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.channels.BufferOverflow
 import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
@@ -124,6 +125,27 @@ enum class SprayerState {
     DEBOUNCING_EMPTY,     // Flow dropped to ~0; confirming it's empty (not an air bubble)
     TANK_EMPTY_LOCKED     // Confirmed empty; alert fired once, await sprayer-off to reset
 }
+
+/**
+ * Frames buffered between the mavlink reader and the shared fan-out.
+ *
+ * Sized to absorb a full parameter-list burst (the largest sustained burst the FC produces) plus
+ * ordinary telemetry, so a slow collector cannot push back far enough to make the library's
+ * DROP_OLDEST buffer discard frames.
+ */
+private const val MAV_FRAME_BUFFER_CAPACITY = 2048
+
+/**
+ * PARAM_VALUE messages buffered for [MavlinkTelemetryRepository.paramValue] subscribers.
+ *
+ * Must exceed the FC's total parameter count — a full list arrives as one uninterrupted burst and
+ * anything that doesn't fit is lost, since ArduPilot sends the list only once per request. 4096
+ * leaves headroom above the ~1440 params seen on current airframes.
+ */
+private const val PARAM_VALUE_BUFFER_CAPACITY = 4096
+
+/** Matches RC1_OPTION .. RC16_OPTION, capturing the channel number. */
+private val RC_OPTION_PARAM_REGEX = Regex("""^RC(\d{1,2})_OPTION$""")
 
 class MavlinkTelemetryRepository(
     private val provider: MavConnectionProvider,
@@ -331,6 +353,46 @@ class MavlinkTelemetryRepository(
     private var lastZeroFlowWarnTime = 0L       // debounce for the raw-0-while-enabled warning
     private val ZERO_FLOW_WARN_INTERVAL_MS = 10000L
 
+    // ── Sprayer switch channel discovery (RCx_OPTION = 15) ──
+    // Last known RCx_OPTION value per channel, so the resolved spray channel can be recomputed when
+    // any one of them changes (including a channel being un-assigned from Sprayer).
+    private val rcOptionValues = mutableMapOf<Int, Int>()
+
+    /**
+     * Record one RCx_OPTION value and re-resolve which RC channel drives the sprayer.
+     *
+     * The lowest channel with option [RC_OPTION_SPRAYER] wins (ties are a misconfiguration; picking
+     * deterministically beats flapping between them). When no channel claims the sprayer we keep the
+     * historical [DEFAULT_SPRAY_RC_CHANNEL] so existing RC7 installs behave exactly as before.
+     */
+    private fun handleRcOptionParam(channel: Int, option: Int) {
+        val previous = rcOptionValues.put(channel, option)
+        if (previous == option) return   // unchanged (the FC re-sends the whole block on refresh)
+
+        val resolved = rcOptionValues.filterValues { it == RC_OPTION_SPRAYER }.keys.minOrNull()
+        val newChannel = resolved ?: DEFAULT_SPRAY_RC_CHANNEL
+        val current = state.value.sprayTelemetry
+
+        if (current.sprayRcChannel == newChannel && current.sprayRcChannelResolved == (resolved != null)) {
+            return
+        }
+
+        if (resolved != null) {
+            LogUtils.i("SprayControl", "Sprayer switch resolved to RC$newChannel (RC${newChannel}_OPTION=$RC_OPTION_SPRAYER)")
+        } else {
+            LogUtils.w("SprayControl", "No RCx_OPTION=$RC_OPTION_SPRAYER found — falling back to RC$DEFAULT_SPRAY_RC_CHANNEL for spray monitoring")
+        }
+
+        _state.update { st ->
+            st.copy(
+                sprayTelemetry = st.sprayTelemetry.copy(
+                    sprayRcChannel = newChannel,
+                    sprayRcChannelResolved = resolved != null
+                )
+            )
+        }
+    }
+
     /**
      * Reset all AUTO mode spray detection state.
      * Called when spray is explicitly disabled (e.g., mode change from Auto)
@@ -409,9 +471,14 @@ class MavlinkTelemetryRepository(
     private val _servoOutputRaw = MutableSharedFlow<ServoOutputRaw>(replay = 1, extraBufferCapacity = 10)
     val servoOutputRaw: SharedFlow<ServoOutputRaw> = _servoOutputRaw.asSharedFlow()
 
-    // PARAM_VALUE flow for parameter reading
-    // Buffer capacity set high to handle PARAM_REQUEST_LIST bulk responses (hundreds of params)
-    private val _paramValue = MutableSharedFlow<ParamValue>(replay = 0, extraBufferCapacity = 1024)
+    // PARAM_VALUE flow for parameter reading.
+    // Buffer must hold an entire PARAM_REQUEST_LIST response: the FC streams the list once, so a
+    // message that doesn't fit is never re-sent. 1024 was below the ~1440 params on current
+    // airframes, which silently truncated the Full Param List download.
+    private val _paramValue = MutableSharedFlow<ParamValue>(
+        replay = 0,
+        extraBufferCapacity = PARAM_VALUE_BUFFER_CAPACITY
+    )
     val paramValue: SharedFlow<ParamValue> = _paramValue.asSharedFlow()
 
     // ════════════════════════════════════════════════════════════════
@@ -832,9 +899,32 @@ class MavlinkTelemetryRepository(
             }
         }
 
-        // Shared message stream
+        // Shared message stream.
+        //
+        // The buffer here is load-bearing, not a micro-optimisation. Two facts collide:
+        //
+        //  1. The mavlink library's own connection flow is built with extraBufferCapacity = 128
+        //     and BufferOverflow.DROP_OLDEST, so its socket reader NEVER blocks — when consumers
+        //     fall behind it silently discards frames. Dropped frames are gone for good.
+        //  2. A bare shareIn(replay = 0) has NO buffer, so it emits at the pace of the slowest of
+        //     the ~40 collectors below.
+        //
+        // Together those meant a PARAM_REQUEST_LIST burst (1000+ PARAM_VALUEs back to back)
+        // outran the fan-out, overflowed the library's 128-frame buffer, and lost hundreds of
+        // params — on TCP, where the link itself cannot drop anything. ArduPilot streams the
+        // parameter list exactly once, so the Full Param List screen stalled around 960/1440 and
+        // no amount of refreshing recovered it.
+        //
+        // Buffering decouples the fan-out from the reader so a momentarily slow collector no
+        // longer costs us frames. SUSPEND (not DROP_OLDEST) is deliberate: dropping here would
+        // reintroduce the very silent data loss this is fixing.
         mavFrame = connection.mavFrame
-            .shareIn(scope, SharingStarted.Eagerly, replay = 0)
+            .buffer(MAV_FRAME_BUFFER_CAPACITY, onBufferOverflow = BufferOverflow.SUSPEND)
+            .shareIn(
+                scope,
+                SharingStarted.Eagerly,
+                replay = 0
+            )
 
         // Log raw messages
         scope.launch {
@@ -2432,9 +2522,12 @@ class MavlinkTelemetryRepository(
                 .filterIsInstance<RcChannels>()
                 .collect { rcChannelsData ->
 
-                    // Monitor RC7 for spray system status
-                    val rc7Value = rcChannelsData.chan7Raw.toInt()
-                    val sprayEnabled = rc7Value > 1500 // PWM > 1500 = spray ON
+                    // Monitor the sprayer switch channel for spray system status.
+                    // The channel is whichever one has RCx_OPTION = 15 (resolved from params on
+                    // connect); until that resolves it stays at the historical default of RC7.
+                    val sprayChannel = state.value.sprayTelemetry.sprayRcChannel
+                    val rc7Value = rcChannelsData.rawForChannel(sprayChannel)
+                    val sprayEnabled = rc7Value != null && rc7Value > 1500 // PWM > 1500 = spray ON
 
 
                     // Check if spray status changed
@@ -2482,6 +2575,19 @@ class MavlinkTelemetryRepository(
                 .filterIsInstance<ParamValue>()
                 .collect { paramValue ->
                     val paramName = paramValue.paramId.toString().trim()
+
+                    // ── Sprayer switch channel discovery ──
+                    // Any RCx_OPTION tells us whether channel x is the sprayer switch (value 15).
+                    // Handled before the when() below so it works alongside the BATT* cases.
+                    // The startsWith guard keeps the regex off the hot path: a PARAM_REQUEST_LIST
+                    // download pushes 1000+ messages through here and this collector must not become
+                    // the slow link in the fan-out.
+                    if (paramName.startsWith("RC")) RC_OPTION_PARAM_REGEX.matchEntire(paramName)?.let { match ->
+                        val channel = match.groupValues[1].toIntOrNull()
+                        if (channel != null && channel in 1..MAX_RC_OPTION_CHANNEL) {
+                            handleRcOptionParam(channel, paramValue.paramValue.toInt())
+                        }
+                    }
 
                     // Handle spray telemetry parameters
                     when (paramName) {
@@ -2861,6 +2967,35 @@ class MavlinkTelemetryRepository(
         } catch (e: Exception) {
         }
     }
+
+    /**
+     * Raw PWM of one RC channel from an RC_CHANNELS message, addressed by channel number.
+     *
+     * [RcChannels] exposes the channels as 18 separate fields with no array accessor, so reading a
+     * channel chosen at runtime (the sprayer switch, whose channel comes from RCx_OPTION) needs
+     * this mapping. Returns null for a channel outside 1..18.
+     */
+    private fun RcChannels.rawForChannel(channel: Int): Int? = when (channel) {
+        1 -> chan1Raw
+        2 -> chan2Raw
+        3 -> chan3Raw
+        4 -> chan4Raw
+        5 -> chan5Raw
+        6 -> chan6Raw
+        7 -> chan7Raw
+        8 -> chan8Raw
+        9 -> chan9Raw
+        10 -> chan10Raw
+        11 -> chan11Raw
+        12 -> chan12Raw
+        13 -> chan13Raw
+        14 -> chan14Raw
+        15 -> chan15Raw
+        16 -> chan16Raw
+        17 -> chan17Raw
+        18 -> chan18Raw
+        else -> null
+    }?.toInt()
 
     /**
      * Send RC_CHANNELS_OVERRIDE message to control specific RC channels.
@@ -4168,6 +4303,10 @@ class MavlinkTelemetryRepository(
             return
         }
 
+        // Drop any RCx_OPTION values cached from a previously connected airframe so the sprayer
+        // channel is resolved fresh from the values this FC is about to send back.
+        rcOptionValues.clear()
+
 
         try {
             val parametersToRequest = listOf(
@@ -4178,7 +4317,10 @@ class MavlinkTelemetryRepository(
                 "BATT3_CAPACITY",     // Tank capacity for level sensor
                 "BATT3_VOLT_PIN",     // Level sensor pin configuration
                 "BATT3_VOLT_MULT"     // Level sensor voltage multiplier (important for calibration!)
-            )
+            ) + (1..MAX_RC_OPTION_CHANNEL).map { "RC${it}_OPTION" }
+            // RCx_OPTION tells us which RC channel is the sprayer switch (option 15). Without it we
+            // would monitor RC7 on every airframe and miss tank-empty entirely on a setup that puts
+            // spray enable on another channel.
 
             for ((index, paramId) in parametersToRequest.withIndex()) {
                 val request = ParamRequestRead(

@@ -45,7 +45,7 @@ import kotlin.math.roundToInt
  * Drone Camera Feed Overlay with MissionPlanner-like Video Tracking
  *
  * Features:
- * - Live RTSP/UDP video stream via MediaPlayer SurfaceView
+ * - Live RTSP video stream via Media3/ExoPlayer
  * - Point tracking (tap on object) — sends MAV_CMD_CAMERA_TRACK_POINT
  * - Rectangle tracking (drag bounding box) — sends MAV_CMD_CAMERA_TRACK_RECTANGLE
  * - Visual overlay rendering (red ellipse/rectangle for tracking status)
@@ -107,9 +107,17 @@ fun DroneCameraFeedOverlay(
     val screenWidthDp = configuration.screenWidthDp.dp
     val screenHeightDp = configuration.screenHeightDp.dp
 
+    // On phones the PiP card must stay a sensible fraction of the screen, and the
+    // expanded card must subtract its own 16dp padding — sizing it to the full
+    // screen width/height pushed its edges (and the control bar) off-display.
+    val isCompactScreen = configuration.screenWidthDp < 600
+    val expandedPadding = if (isCompactScreen) 8.dp else 16.dp
+    val pipWidth = if (isCompactScreen) (screenWidthDp * 0.45f).coerceIn(150.dp, 220.dp) else 220.dp
+    val pipHeight = pipWidth * 160f / 220f
+
     // Animated sizes
-    val targetWidth = if (isExpanded) screenWidthDp else 220.dp
-    val targetHeight = if (isExpanded) screenHeightDp else 160.dp
+    val targetWidth = if (isExpanded) screenWidthDp - expandedPadding * 2 else pipWidth
+    val targetHeight = if (isExpanded) screenHeightDp - expandedPadding * 2 else pipHeight
     val animatedWidth by animateDpAsState(
         targetValue = targetWidth,
         animationSpec = tween(durationMillis = 300),
@@ -157,7 +165,7 @@ fun DroneCameraFeedOverlay(
                                     }
                                 }
                         } else {
-                            Modifier.padding(16.dp)
+                            Modifier.padding(expandedPadding)
                         }
                     )
                     .width(animatedWidth)
@@ -168,15 +176,20 @@ fun DroneCameraFeedOverlay(
             ) {
                 Box(modifier = Modifier.fillMaxSize()) {
                     // ═══════════════════════════════════════════════════════
-                    // VIDEO CONTENT: RTSP/MediaPlayer stream or placeholder
+                    // VIDEO CONTENT: RTSP stream (ExoPlayer) or placeholder
                     // ═══════════════════════════════════════════════════════
-                    if (effectiveStreamUrl != null && isConnected) {
+                    // The camera stream is an independent network path to the
+                    // camera (e.g. 192.168.144.25 over the MK15 Wi-Fi); it does not
+                    // depend on the MAVLink telemetry link, which usually arrives
+                    // over USB serial or Bluetooth. Gating video on telemetry meant
+                    // the feed never started unless the FC happened to be connected.
+                    if (effectiveStreamUrl != null) {
                         VideoStreamPlayer(
                             streamUri = effectiveStreamUrl,
                             modifier = Modifier.fillMaxSize(),
-                            isConnected = isConnected
+                            isConnected = true
                         )
-                    } else if (videoStreamUrl != null && isConnected) {
+                    } else if (videoStreamUrl != null) {
                         // Fallback to WebView for HTTP streams
                         VideoStreamView(
                             url = videoStreamUrl,
@@ -357,7 +370,10 @@ fun DroneCameraFeedOverlay(
                         Box(
                             modifier = Modifier
                                 .fillMaxSize()
-                                .background(Color.Black.copy(alpha = 0.7f)),
+                                .background(Color.Black.copy(alpha = 0.7f))
+                                // Consume taps so they do not fall through to the
+                                // tracking overlay underneath the settings sheet.
+                                .pointerInput(Unit) { detectDragGestures { change, _ -> change.consume() } },
                             contentAlignment = Alignment.Center
                         ) {
                             VideoStreamSettings(

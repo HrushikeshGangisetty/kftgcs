@@ -132,14 +132,28 @@ fun List<UByte>.toChipUidHex(): String? {
     return joinToString("") { it.toString(16).padStart(2, '0').uppercase() }
 }
 
+/** RCx_OPTION value that maps an RC channel to the sprayer enable switch (ArduPilot "Sprayer"). */
+const val RC_OPTION_SPRAYER = 15
+
+/** RC channel assumed to carry the sprayer switch until RCx_OPTION params resolve the real one. */
+const val DEFAULT_SPRAY_RC_CHANNEL = 7
+
+/** Highest RC channel scanned for RCx_OPTION = 15 (RC_CHANNELS carries 1..18). */
+const val MAX_RC_OPTION_CHANNEL = 16
+
 /**
  * Spray telemetry data for agricultural drones
  * Maps to BATTERY_STATUS messages from flow sensor (BATT2) and level sensor (BATT3)
  */
 data class SprayTelemetry(
     // Spray system status
-    val sprayEnabled: Boolean = false,       // Whether spray system is ON via RC7 (RC7 > 1500)
-    val rc7Value: Int? = null,               // Raw RC7 PWM value (1000-2000)
+    // The sprayer switch is whichever RC channel has RCx_OPTION = 15 (Sprayer). That channel is
+    // resolved at runtime from the RCx_OPTION parameters, so setups that put spray enable on RC6
+    // (or any other channel) are monitored correctly. Falls back to 7 until the params arrive.
+    val sprayEnabled: Boolean = false,       // Whether spray system is ON (spray channel PWM > 1500)
+    val rc7Value: Int? = null,               // Raw PWM of the resolved spray channel (1000-2000)
+    val sprayRcChannel: Int = DEFAULT_SPRAY_RC_CHANNEL, // RC channel carrying RCx_OPTION = 15
+    val sprayRcChannelResolved: Boolean = false,        // True once an RCx_OPTION = 15 was found
 
     // AUTO mission spray detection - spray is active when flow is detected
     // This catches spray enabled via DO_SET_SERVO, DO_SPRAYER, or ArduPilot Sprayer library
