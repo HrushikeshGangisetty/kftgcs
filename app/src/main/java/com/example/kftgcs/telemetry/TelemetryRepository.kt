@@ -4476,16 +4476,9 @@ class MavlinkTelemetryRepository(
                 }
                 Timber.i("Geofence: Step 3 OK - fence parameters configured")
 
-                // Step 4: Enable fence.
+                // Step 4: Enable fence
                 //
-                // Bounce through 0 first. AC_Fence::update() only rebuilds its live
-                // _enabled_fences mask when FENCE_ENABLE *changes value*, so on a vehicle
-                // whose fence is already enabled, writing 1 over 1 is a no-op and the
-                // FENCE_TYPE we just set in step 3 never reaches the mask the checks
-                // actually consult (get_enabled_fences() == _enabled_fences & present()).
                 delay(500)
-                enableFence(false)
-                delay(300)
                 val enabled = enableFence(true)
 
                 if (!enabled) {
@@ -5256,8 +5249,9 @@ class MavlinkTelemetryRepository(
                     // independently of the polygon toggle, and SYS_STATUS bit 8 is a single
                     // flag for ALL fence types. Gating on the polygon alone would discard a
                     // genuine 300m breach whenever the mission geofence was switched off.
-                    val gcsGeofenceEnabled = sharedViewModel.geofenceEnabled.value ||
-                            sharedViewModel.rangeFenceArmed.value
+                    // Only the polygon is FC-enforced; the range limit and altitude ceiling
+                    // are GCS-side, so this reports on the polygon fence alone.
+                    val gcsGeofenceEnabled = sharedViewModel.geofenceEnabled.value
                     if (!gcsGeofenceEnabled) {
                         // GCS says geofence is off - ensure we report clean state
                         if (_fenceStatus.value.enabled || _fenceStatus.value.breached) {
