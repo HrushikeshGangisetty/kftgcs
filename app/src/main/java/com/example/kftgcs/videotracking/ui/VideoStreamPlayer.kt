@@ -42,8 +42,11 @@ import timber.log.Timber
  * play the RTSP streams served by SIYI cameras (A8 mini / ZT6) behind an MK15 air
  * unit — it completes the connection and then buffers indefinitely without ever
  * rendering a frame. ExoPlayer's RTSP source performs a proper DESCRIBE/SETUP/PLAY
- * handshake and depacketizes H.264/H.265 correctly. RTP transport is negotiated
- * as UDP first, falling back to TCP interleaving automatically on failure.
+ * handshake and depacketizes H.264 correctly. RTP is interleaved over the RTSP
+ * TCP connection, matching the configuration proven against this camera.
+ *
+ * Note: ExoPlayer's RTSP stack does not support H.265/HEVC Aggregation Packets,
+ * so the camera must be set to H.264.
  *
  * Supports:
  * - RTSP streams (rtsp://) — e.g. rtsp://192.168.144.25:8554/main.264
@@ -90,14 +93,15 @@ fun VideoStreamPlayer(
     }
 
     val exoPlayer = remember(streamUri, retryToken) {
-        // Small buffer + no rebuffer-after-stall keeps the feed close to live; a
-        // large buffer would add seconds of latency to what is a piloting aid.
+        // Absolute minimum buffering. For a piloting aid, latency matters far more
+        // than smoothness: a dropped frame is harmless, a 5-second-old picture is
+        // dangerous. Start playback as soon as a single frame is decodable.
         val loadControl = DefaultLoadControl.Builder()
             .setBufferDurationsMs(
-                /* minBufferMs = */ 200,
-                /* maxBufferMs = */ 500,
-                /* bufferForPlaybackMs = */ 100,
-                /* bufferForPlaybackAfterRebufferMs = */ 100
+                /* minBufferMs = */ 0,
+                /* maxBufferMs = */ LIVE_MAX_BUFFER_MS,
+                /* bufferForPlaybackMs = */ 0,
+                /* bufferForPlaybackAfterRebufferMs = */ 0
             )
             .setTargetBufferBytes(C.LENGTH_UNSET)
             .setPrioritizeTimeOverSizeThresholds(true)
@@ -168,12 +172,52 @@ fun VideoStreamPlayer(
         }
     }
 
+    // ── Live latency control ────────────────────────────────────────────────
+    // RTSP over TCP never drops data, so if the decoder falls behind (a stall, a
+    // packet burst, CPU contention) the backlog is played late and the feed
+    // drifts permanently behind real time.
+    //
+    // NOTE: do NOT call seekTo() to correct this. ExoPlayer's RtspMediaPeriod
+    // implements a seek that misses the local buffer as an RTSP PAUSE/PLAY
+    // round-trip to the camera, which restarts the stream. Doing that on a timer
+    // would stutter the picture and can drop the connection outright.
+    //
+    // Instead, absorb drift by playing slightly faster than real time. The
+    // decoder catches up smoothly over a few seconds with no visible seam, and
+    // the speed returns to 1.0 once the backlog is drained.
+    LaunchedEffect(exoPlayer, streamUri) {
+        var boosted = false
+        while (true) {
+            delay(LIVE_DRIFT_CHECK_MS)
+            if (!isActuallyPlaying) continue
+
+            val drift = exoPlayer.bufferedPosition - exoPlayer.currentPosition
+
+            when {
+                !boosted && drift > LIVE_MAX_DRIFT_MS -> {
+                    Timber.d("VideoStreamPlayer: drift %d ms — catching up", drift)
+                    exoPlayer.setPlaybackSpeed(LIVE_CATCHUP_SPEED)
+                    boosted = true
+                }
+
+                boosted && drift < LIVE_TARGET_DRIFT_MS -> {
+                    Timber.d("VideoStreamPlayer: drift %d ms — back to normal speed", drift)
+                    exoPlayer.setPlaybackSpeed(1f)
+                    boosted = false
+                }
+            }
+        }
+    }
+
     // Watchdog: if nothing has rendered after a grace period, the RTSP handshake
     // is stuck (ExoPlayer does not always surface a timeout for a half-open
     // connection). Probe the port so the user is told which stage actually failed
     // instead of watching an indefinite spinner.
     LaunchedEffect(exoPlayer, streamUri) {
-        delay(12_000)
+        // Probe early: an unreachable camera is by far the most common cause and
+        // there is no reason to make the user wait out the full RTSP timeout for
+        // an answer we can get in a few seconds.
+        delay(6_000)
         if (!isActuallyPlaying &&
             (playerState == VideoPlayerState.LOADING || playerState == VideoPlayerState.BUFFERING)
         ) {
@@ -215,10 +259,27 @@ fun VideoStreamPlayer(
                         android.view.ViewGroup.LayoutParams.MATCH_PARENT,
                         android.view.ViewGroup.LayoutParams.MATCH_PARENT
                     )
-                    surfaceTextureListener = object : android.view.TextureView.SurfaceTextureListener {
+                }
+            },
+            // The surface must be (re)attached in update, not factory: after a
+            // retry the player instance is new while the TextureView is reused,
+            // and a factory-only binding would leave the new player with no
+            // surface — audio-less, picture-less, no error.
+            update = { view ->
+                // Only rebind when the player instance actually changed; update
+                // runs on every recomposition and allocating a Surface each time
+                // would churn graphics buffers behind a live decoder.
+                val existing = view.surfaceTexture
+                if (view.isAvailable && existing != null && view.tag !== exoPlayer) {
+                    view.tag = exoPlayer
+                    exoPlayer.setVideoSurface(android.view.Surface(existing))
+                }
+                view.surfaceTextureListener =
+                    object : android.view.TextureView.SurfaceTextureListener {
                         override fun onSurfaceTextureAvailable(
                             surface: android.graphics.SurfaceTexture, width: Int, height: Int
                         ) {
+                            view.tag = exoPlayer
                             exoPlayer.setVideoSurface(android.view.Surface(surface))
                         }
 
@@ -229,6 +290,7 @@ fun VideoStreamPlayer(
                         override fun onSurfaceTextureDestroyed(
                             surface: android.graphics.SurfaceTexture
                         ): Boolean {
+                            view.tag = null
                             exoPlayer.setVideoSurface(null)
                             return true
                         }
@@ -237,7 +299,6 @@ fun VideoStreamPlayer(
                             surface: android.graphics.SurfaceTexture
                         ) = Unit
                     }
-                }
             },
             modifier = Modifier.fillMaxSize()
         )
@@ -274,7 +335,13 @@ fun VideoStreamPlayer(
             VideoPlaceholder(
                 isConnected = true,
                 errorMessage = errorMessage,
-                onRetry = { retryToken++ },
+                onRetry = {
+                    // Clear the failure before rebuilding the player, or this
+                    // overlay would stay latched over the new one.
+                    errorMessage = null
+                    playerState = VideoPlayerState.LOADING
+                    retryToken++
+                },
                 modifier = Modifier.fillMaxSize()
             )
         }
@@ -425,6 +492,28 @@ private fun VideoPlaceholder(
         }
     }
 }
+
+/** Hard cap on buffered media. Anything beyond this is latency, not resilience. */
+private const val LIVE_MAX_BUFFER_MS = 1_000
+
+/** How often to check whether playback has drifted behind the live edge. */
+private const val LIVE_DRIFT_CHECK_MS = 1_000L
+
+/**
+ * Maximum tolerated lag behind the buffered edge before skipping forward.
+ * Kept well under the 2s operational budget so a correction happens before the
+ * delay becomes noticeable to the pilot.
+ */
+private const val LIVE_MAX_DRIFT_MS = 700L
+
+/** Drift we settle back to once catch-up has drained the backlog. */
+private const val LIVE_TARGET_DRIFT_MS = 300L
+
+/**
+ * Catch-up rate. 1.10x drains a backlog quickly while staying visually natural;
+ * higher rates read as fast-forward and make the picture hard to interpret.
+ */
+private const val LIVE_CATCHUP_SPEED = 1.10f
 
 /**
  * Video player state.

@@ -37,9 +37,10 @@ object StreamReachability {
             }
         } catch (_: java.net.SocketTimeoutException) {
             Result.Unreachable(
-                "No route to $host. Confirm the tablet is joined to the MK15 " +
-                    "Wi-Fi (Settings > Wi-Fi) and that Wi-Fi is not being bypassed " +
-                    "by mobile data."
+                "No route to $host from this device. The camera sits on the MK15's " +
+                    "own 192.168.144.x network. A phone joined to the MK15 Wi-Fi " +
+                    "hotspot gets a 192.168.43.x address and cannot reach that " +
+                    "subnet unless the MK15 is set to bridge/route to it."
             )
         } catch (_: java.net.ConnectException) {
             Result.Unreachable(
