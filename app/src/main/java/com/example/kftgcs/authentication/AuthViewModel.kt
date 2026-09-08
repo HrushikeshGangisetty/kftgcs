@@ -224,8 +224,18 @@ class AuthViewModel : ViewModel() {
         rePassword: String,
         signupKey: String? = null
     ) {
+        val isDgca = signupKey != null
+        if (isDgca) {
+            Timber.tag(ApiService.DGCA_SIGNUP_TAG).d(
+                "signup() start — DGCA flavor. Company picker skipped; company/admin resolved server-side from the pre-provisioned pilot row."
+            )
+        }
+
         val validationError = validateSignupInput(companyName, firstName, lastName, email, mobileNumber, password, rePassword, signupKey)
         if (validationError != null) {
+            if (isDgca) {
+                Timber.tag(ApiService.DGCA_SIGNUP_TAG).w("Client validation failed: %s", validationError)
+            }
             _authState.value = AuthState.Error(validationError)
             return
         }
@@ -234,6 +244,9 @@ class AuthViewModel : ViewModel() {
 
         viewModelScope.launch {
             try {
+                // A DGCA registration carries no company_name at all: Gson
+                // omits nulls, so the key never reaches the wire and the
+                // backend takes its signup_key branch.
                 val request = PilotRegisterRequest(
                     company_name = companyName.takeIf { it.isNotBlank() },
                     signup_key = signupKey,
@@ -253,16 +266,34 @@ class AuthViewModel : ViewModel() {
                         // so there is no OTP to collect — the caller sends the
                         // user straight to login instead of the OTP screen.
                         _authState.value = if (response.data.verified == true) {
+                            if (isDgca) {
+                                Timber.tag(ApiService.DGCA_SIGNUP_TAG).d(
+                                    "Account verified by server — skipping OTP, routing to login."
+                                )
+                            }
                             AuthState.RegistrationVerified(response.data.message)
                         } else {
+                            if (isDgca) {
+                                Timber.tag(ApiService.DGCA_SIGNUP_TAG).w(
+                                    "verified != true on a signup-key registration — routing to the OTP screen."
+                                )
+                            }
                             AuthState.RegistrationSuccess(response.data.message)
                         }
                     }
                     is ApiResponse.Error -> {
+                        if (isDgca) {
+                            Timber.tag(ApiService.DGCA_SIGNUP_TAG).e(
+                                "Registration rejected: %s (status %d)", response.message, response.statusCode
+                            )
+                        }
                         _authState.value = AuthState.Error(response.message)
                     }
                 }
             } catch (e: Exception) {
+                if (isDgca) {
+                    Timber.tag(ApiService.DGCA_SIGNUP_TAG).e(e, "Unexpected client-side failure during registration")
+                }
                 _authState.value = AuthState.Error("Unexpected error: ${e.message}")
             }
         }

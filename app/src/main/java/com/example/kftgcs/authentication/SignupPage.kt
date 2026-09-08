@@ -51,7 +51,9 @@ import androidx.navigation.NavController
 import com.example.kftgcs.BuildConfig
 import com.example.kftgcs.R
 import com.example.kftgcs.navigation.Screen
+import com.example.kftgcs.api.ApiService
 import com.example.kftgcs.utils.AppStrings
+import timber.log.Timber
 import java.net.URLEncoder
 
 // SVD pilots are pre-provisioned by their admin and receive an assigned mail ID
@@ -128,6 +130,7 @@ fun SignupPage(
             }
             is AuthState.RegistrationVerified -> {
                 // Account is already verified — skip OTP and go straight to login.
+                Timber.tag(ApiService.DGCA_SIGNUP_TAG).d("Navigating to Login (verified, no OTP step).")
                 Toast.makeText(context, state.message, Toast.LENGTH_LONG).show()
                 authViewModel.resetAuthState()
                 navController.navigate(Screen.Login.route) {
@@ -135,6 +138,9 @@ fun SignupPage(
                 }
             }
             is AuthState.Error -> {
+                if (isSvdFlavor) {
+                    Timber.tag(ApiService.DGCA_SIGNUP_TAG).e("Signup error shown to user: %s", state.message)
+                }
                 Toast.makeText(context, state.message, Toast.LENGTH_SHORT).show()
                 authViewModel.resetAuthState()
             }
@@ -391,6 +397,12 @@ fun SignupPage(
                     Button(
                         onClick = {
                             val fullMobileNumber = "$countryCode$mobileNumber"
+                            if (isSvdFlavor) {
+                                Timber.tag(ApiService.DGCA_SIGNUP_TAG).d(
+                                    "Create Account tapped — email=%s mobile_no=%s signup_key_entered=%b",
+                                    email.trim(), fullMobileNumber, signupKey.isNotBlank()
+                                )
+                            }
                             authViewModel.signup(
                                 context,
                                 selectedCompanyName,

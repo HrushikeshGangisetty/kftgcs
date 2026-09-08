@@ -174,12 +174,34 @@ object ApiService {
     private val gson = Gson()
     private val jsonMediaType = "application/json; charset=utf-8".toMediaType()
 
+    /** Logcat tag for the DGCA / signup-key registration path. */
+    const val DGCA_SIGNUP_TAG = "DGCA SIGNUP"
+
     suspend fun pilotRegister(request: PilotRegisterRequest): ApiResponse<PilotRegisterResponse> {
         return withContext(Dispatchers.IO) {
             try {
                 Timber.d("Attempting pilot registration for email: ${request.email}")
                 val json = gson.toJson(request)
                 Timber.d("Request JSON: $json")
+
+                // Gson omits null fields, so exactly one of company_name /
+                // signup_key reaches the wire. Log which branch of
+                // /api/pilot-register this payload will select.
+                val isDgca = request.signup_key != null
+                Timber.tag(DGCA_SIGNUP_TAG).d(
+                    "Registration type=%s | company_name=%s | signup_key=%s",
+                    if (isDgca) "DGCA (signup key)" else "NORMAL (company)",
+                    request.company_name ?: "<omitted>",
+                    if (request.signup_key != null) "<present>" else "<omitted>"
+                )
+                if (isDgca) {
+                    Timber.tag(DGCA_SIGNUP_TAG).d(
+                        "Payload fields sent: first_name=%s, last_name=%s, email=%s, mobile_no=%s, password=<redacted>, re_password=<redacted>, signup_key=<redacted>",
+                        request.first_name, request.last_name, request.email, request.mobile_no
+                    )
+                    Timber.tag(DGCA_SIGNUP_TAG).d("Payload JSON keys: %s", jsonKeysOf(json))
+                }
+
                 val requestBody = json.toRequestBody(jsonMediaType)
 
                 val httpRequest = Request.Builder()
@@ -190,10 +212,18 @@ object ApiService {
                     .build()
 
                 Timber.d("Sending request to: ${httpRequest.url}")
+                if (isDgca) {
+                    Timber.tag(DGCA_SIGNUP_TAG).d("POST %s", httpRequest.url)
+                }
                 val response = client.newCall(httpRequest).execute()
                 val responseBody = response.body?.string() ?: ""
                 Timber.d("Response code: ${response.code}")
                 Timber.d("Response body (first 500 chars): ${responseBody.take(500)}")
+                if (isDgca) {
+                    Timber.tag(DGCA_SIGNUP_TAG).d(
+                        "Response code=%d body=%s", response.code, responseBody.take(500)
+                    )
+                }
 
                 // Check if response is HTML (Django error page)
                 if (responseBody.trimStart().startsWith("<") || responseBody.contains("<!DOCTYPE")) {
@@ -211,6 +241,20 @@ object ApiService {
                     try {
                         val successResponse = gson.fromJson(responseBody, PilotRegisterResponse::class.java)
                         Timber.d("Registration successful: ${successResponse.message}")
+                        if (isDgca) {
+                            Timber.tag(DGCA_SIGNUP_TAG).d(
+                                "Success: registration_type=%s verified=%s id=%d — %s",
+                                successResponse.registration_type ?: "<absent>",
+                                successResponse.verified?.toString() ?: "<absent>",
+                                successResponse.id,
+                                successResponse.message
+                            )
+                            if (successResponse.verified != true) {
+                                Timber.tag(DGCA_SIGNUP_TAG).w(
+                                    "Server did not return verified=true — client will route to the OTP screen instead of login. Backend may be running the pre-DGCA build."
+                                )
+                            }
+                        }
                         ApiResponse.Success(successResponse)
                     } catch (e: Exception) {
                         Timber.e(e, "Failed to parse success response")
@@ -220,6 +264,19 @@ object ApiService {
                     try {
                         val errorResponse = gson.fromJson(responseBody, ErrorResponse::class.java)
                         Timber.e("Registration failed: ${errorResponse.error}")
+                        if (isDgca) {
+                            Timber.tag(DGCA_SIGNUP_TAG).e(
+                                "Failed: http=%d status_code=%d error=%s",
+                                response.code, errorResponse.status_code, errorResponse.error
+                            )
+                            // The pre-DGCA backend calls .upper() on the absent
+                            // company_name and reports it as a generic 500.
+                            if (errorResponse.error.contains("has no attribute 'upper'")) {
+                                Timber.tag(DGCA_SIGNUP_TAG).e(
+                                    "Backend is running the pre-DGCA pilot_views.py: it dereferences the omitted company_name. The signup-key branch is not deployed."
+                                )
+                            }
+                        }
                         ApiResponse.Error(errorResponse.error, errorResponse.status_code)
                     } catch (e: Exception) {
                         Timber.e(e, "Failed to parse error response")
@@ -228,9 +285,20 @@ object ApiService {
                 }
             } catch (e: Exception) {
                 Timber.e(e, "Network error during registration")
+                if (request.signup_key != null) {
+                    Timber.tag(DGCA_SIGNUP_TAG).e(e, "Network error during registration")
+                }
                 ApiResponse.Error("Network error: ${e.message}", 0)
             }
         }
+    }
+
+    /** Key names present in [json], for confirming which fields reached the wire. */
+    private fun jsonKeysOf(json: String): String = try {
+        com.google.gson.JsonParser.parseString(json)
+            .asJsonObject.keySet().joinToString(", ")
+    } catch (e: Exception) {
+        "<unparseable>"
     }
 
     suspend fun verifyOtp(request: VerifyOtpRequest): ApiResponse<MessageResponse> {
