@@ -25,6 +25,7 @@ import com.example.kftgcs.telemetry.TelemetryState
 import com.example.kftgcs.telemetry.connections.BluetoothConnectionProvider
 import com.example.kftgcs.telemetry.connections.MavConnectionProvider
 import com.example.kftgcs.telemetry.connections.TcpConnectionProvider
+import com.example.kftgcs.telemetry.connections.UdpConnectionProvider
 import com.example.kftgcs.telemetry.connections.UsbSerialConnectionProvider
 import android.app.PendingIntent
 import android.content.BroadcastReceiver
@@ -57,7 +58,7 @@ import java.util.Locale
 import com.example.kftgcs.api.ApiService
 
 enum class ConnectionType {
-    TCP, BLUETOOTH, USB
+    TCP, UDP, BLUETOOTH, USB
 }
 
 /** Private broadcast action used to receive the USB device permission result. */
@@ -1685,6 +1686,15 @@ class SharedViewModel : ViewModel() {
     private val _port = mutableStateOf("5762")
     val port: State<String> = _port
 
+    // --- UDP ---
+    // Local port the GCS listens on. 14550 is the ArduPilot/QGC/Mission Planner default.
+    private val _udpLocalPort = mutableStateOf("14550")
+    val udpLocalPort: State<String> = _udpLocalPort
+
+    // Optional remote host to also push to. Blank = pure listen mode (learn peer from first packet).
+    private val _udpRemoteHost = mutableStateOf("")
+    val udpRemoteHost: State<String> = _udpRemoteHost
+
     private val _pairedDevices = MutableStateFlow<List<PairedDevice>>(emptyList())
     val pairedDevices: StateFlow<List<PairedDevice>> = _pairedDevices.asStateFlow()
 
@@ -1701,6 +1711,14 @@ class SharedViewModel : ViewModel() {
 
     fun onPortChange(newValue: String) {
         _port.value = newValue
+    }
+
+    fun onUdpLocalPortChange(newValue: String) {
+        _udpLocalPort.value = newValue
+    }
+
+    fun onUdpRemoteHostChange(newValue: String) {
+        _udpRemoteHost.value = newValue
     }
 
     @SuppressLint("MissingPermission")
@@ -2345,6 +2363,44 @@ class SharedViewModel : ViewModel() {
                             TcpConnectionProvider(ipAddress.value, portInt)
                         } else {
                             LogUtils.e("SharedVM", "Invalid port number.")
+                            null
+                        }
+                    }
+                    ConnectionType.UDP -> {
+                        val localPortInt = udpLocalPort.value.toIntOrNull()
+                        if (localPortInt != null && localPortInt in 1..65535) {
+                            // Remote host is optional; accept "host" or "host:port". A blank value
+                            // means pure listen mode (peer learned from the first inbound packet).
+                            val raw = udpRemoteHost.value.trim()
+                            val host: String?
+                            val hostPort: Int
+                            if (raw.isBlank()) {
+                                host = null
+                                hostPort = localPortInt
+                            } else {
+                                val idx = raw.lastIndexOf(':')
+                                if (idx > 0 && idx < raw.length - 1) {
+                                    val parsed = raw.substring(idx + 1).toIntOrNull()
+                                    if (parsed != null && parsed in 1..65535) {
+                                        host = raw.substring(0, idx)
+                                        hostPort = parsed
+                                    } else {
+                                        host = raw
+                                        hostPort = localPortInt
+                                    }
+                                } else {
+                                    host = raw
+                                    hostPort = localPortInt
+                                }
+                            }
+                            UdpConnectionProvider(
+                                localPortInt,
+                                host,
+                                hostPort,
+                                GCSApplication.getInstance()?.applicationContext
+                            )
+                        } else {
+                            LogUtils.e("SharedVM", "Invalid UDP local port.")
                             null
                         }
                     }

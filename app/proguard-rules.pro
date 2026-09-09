@@ -88,6 +88,20 @@
 -keep class com.divpundir.mavlink.** { *; }
 -keep class io.dronefleet.mavlink.** { *; }
 
+# MAVLink connection transports (TCP/UDP/Bluetooth/USB). These are instantiated
+# only through the MavConnectionProvider interface, and BufferedMavConnection is
+# driven via okio Source/Sink adapters, so R8 full mode sees few direct
+# references. Keep the transport package intact so the UDP DatagramSocket
+# adapters (UdpMavConnection's nested UdpInputStream/UdpOutputStream) and their
+# okio bridges survive shrinking.
+-keep class com.example.kftgcs.telemetry.connections.** { *; }
+
+# kotlinx-atomicfu backs BufferedMavConnection's sequence counter and locks.
+# It is transitively pulled in by the MAVLink adapter and is not referenced
+# directly by app code.
+-dontwarn kotlinx.atomicfu.**
+-keep class kotlinx.atomicfu.** { *; }
+
 # ============================================
 # App data model classes used with Gson serialization
 # ============================================
@@ -122,15 +136,24 @@
 -keep class com.example.kftgcs.BuildConfig { *; }
 
 # ============================================
-# PRODUCTION BUILD: Remove all Android Log statements
-# This strips out all Log.d, Log.i, Log.v, Log.w, and Log.e calls
-# in release builds to improve performance and reduce log spam
+# PRODUCTION BUILD: Remove Android Log statements
+#
+# NOTE: -assumenosideeffects tells R8 the call itself is side-effect free, so it
+# removes the call AND any argument expression whose only use was that call.
+# Verified (2026-09-08) that no Log.* argument in this app performs work that
+# must still happen in release: the two candidates, WebSocketManager's
+# resolveDroneUid() and dao.countPending(), are both pure reads, and the
+# telemetrySendCount++ increment sits on its own statement outside the call.
+# Re-check this if you ever inline a mutation into a Log argument.
+#
+# Log.e/wtf are deliberately NOT stripped: real errors should still reach
+# logcat and Play Console crash breadcrumbs on production devices. LogUtils
+# already gates its own e() behind BuildConfig.DEBUG for routine noise, so
+# what remains here is genuine error reporting worth keeping.
 # ============================================
 -assumenosideeffects class android.util.Log {
     public static *** d(...);
     public static *** i(...);
     public static *** v(...);
     public static *** w(...);
-    public static *** e(...);
-    public static *** wtf(...);
 }

@@ -7,10 +7,12 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Bluetooth
 import androidx.compose.material.icons.filled.Cloud
+import androidx.compose.material.icons.filled.Lan
 import androidx.compose.material.icons.filled.SignalWifiOff
 import androidx.compose.material.icons.filled.Usb
 import androidx.compose.material3.*
@@ -22,6 +24,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -126,6 +129,8 @@ fun ConnectionPage(
 
     val isConnectEnabled = !isConnecting && when (connectionType) {
         ConnectionType.TCP -> viewModel.ipAddress.value.isNotBlank() && viewModel.port.value.isNotBlank()
+        ConnectionType.UDP -> viewModel.udpLocalPort.value.toIntOrNull()?.let { it in 1..65535 } == true &&
+            isPlausibleHost(viewModel.udpRemoteHost.value)
         ConnectionType.BLUETOOTH -> viewModel.selectedDevice.value != null
         ConnectionType.USB -> viewModel.selectedUsbDevice.value != null
     }
@@ -175,6 +180,7 @@ fun ConnectionPage(
                         Icon(
                             when (connectionType) {
                                 ConnectionType.TCP -> Icons.Default.Cloud
+                                ConnectionType.UDP -> Icons.Default.Lan
                                 ConnectionType.BLUETOOTH -> Icons.Default.Bluetooth
                                 ConnectionType.USB -> Icons.Default.Usb
                             },
@@ -205,7 +211,7 @@ fun ConnectionPage(
 
             Spacer(modifier = Modifier.height(6.dp))
 
-            val tabs = listOf(AppStrings.tcp, AppStrings.bluetooth, AppStrings.usb)
+            val tabs = listOf(AppStrings.tcp, AppStrings.udp, AppStrings.bluetooth, AppStrings.usb)
             TabRow(
                 selectedTabIndex = connectionType.ordinal,
                 containerColor = Color(0xFF1E293B).copy(alpha = 0.6f),
@@ -226,6 +232,7 @@ fun ConnectionPage(
 
             when (connectionType) {
                 ConnectionType.TCP -> TcpConnectionContent(viewModel)
+                ConnectionType.UDP -> UdpConnectionContent(viewModel)
                 ConnectionType.BLUETOOTH -> BluetoothConnectionContent(viewModel)
                 ConnectionType.USB -> UsbConnectionContent(viewModel)
             }
@@ -342,6 +349,83 @@ fun TcpConnectionContent(viewModel: SharedViewModel) {
         modifier = Modifier.fillMaxWidth(),
         textStyle = LocalTextStyle.current.copy(color = Color.White)
     )
+}
+
+@Composable
+fun UdpConnectionContent(viewModel: SharedViewModel) {
+    val localPort by viewModel.udpLocalPort
+    val remoteHost by viewModel.udpRemoteHost
+
+    OutlinedTextField(
+        value = localPort,
+        onValueChange = { viewModel.onUdpLocalPortChange(it.filter { c -> c.isDigit() }) },
+        label = { Text(AppStrings.udpLocalPort, color = Color.White) },
+        modifier = Modifier.fillMaxWidth(),
+        singleLine = true,
+        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+        textStyle = LocalTextStyle.current.copy(color = Color.White)
+    )
+
+    Spacer(modifier = Modifier.height(12.dp))
+
+    OutlinedTextField(
+        value = remoteHost,
+        onValueChange = { viewModel.onUdpRemoteHostChange(it) },
+        label = { Text(AppStrings.udpRemoteHostOptional, color = Color.White) },
+        placeholder = { Text("192.168.4.1  or  192.168.4.1:14555", color = Color.White.copy(alpha = 0.35f)) },
+        modifier = Modifier.fillMaxWidth(),
+        singleLine = true,
+        isError = remoteHost.isNotBlank() && !isPlausibleHost(remoteHost),
+        supportingText = {
+            if (remoteHost.isNotBlank() && !isPlausibleHost(remoteHost)) {
+                Text(AppStrings.udpInvalidHost, color = Color(0xFFFF5252))
+            } else {
+                // UDP is connectionless: binding always succeeds, so a wrong port shows up only as
+                // a timeout. Say so up front instead of letting the user guess.
+                Text(AppStrings.udpListenHint, color = Color.White.copy(alpha = 0.5f))
+            }
+        },
+        textStyle = LocalTextStyle.current.copy(color = Color.White)
+    )
+}
+
+/**
+ * Cheap sanity check for the optional remote host field: an IPv4 literal, a bracketed IPv6 literal,
+ * or a hostname, each with an optional `:port` suffix. Real resolution still happens on connect —
+ * this only catches obvious typos before the 10-second timeout.
+ */
+private fun isPlausibleHost(input: String): Boolean {
+    val value = input.trim()
+    if (value.isEmpty()) return true
+
+    // Split an optional :port, taking care not to break IPv6 literals.
+    val hostPart: String
+    if (value.startsWith("[")) {
+        val end = value.indexOf(']')
+        if (end < 0) return false
+        hostPart = value.substring(1, end)
+    } else {
+        val idx = value.lastIndexOf(':')
+        hostPart = if (idx > 0 && value.count { it == ':' } == 1) {
+            val port = value.substring(idx + 1).toIntOrNull() ?: return false
+            if (port !in 1..65535) return false
+            value.substring(0, idx)
+        } else {
+            value
+        }
+    }
+
+    if (hostPart.isEmpty()) return false
+    // IPv6 literal
+    if (hostPart.contains(':')) return hostPart.all { it.isDigit() || it in "abcdefABCDEF:" }
+    // IPv4 literal
+    if (hostPart.all { it.isDigit() || it == '.' }) {
+        val octets = hostPart.split('.')
+        return octets.size == 4 && octets.all { o -> o.isNotEmpty() && o.toIntOrNull()?.let { it in 0..255 } == true }
+    }
+    // Hostname
+    return hostPart.all { it.isLetterOrDigit() || it == '-' || it == '.' } &&
+        !hostPart.startsWith('-') && !hostPart.endsWith('-')
 }
 
 @Composable
