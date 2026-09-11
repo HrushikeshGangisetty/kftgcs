@@ -23,8 +23,16 @@ import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.shadow
+import androidx.compose.foundation.text.selection.SelectionContainer
+import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.input.KeyboardType
+import com.example.kftgcs.telemetry.connections.UdpDiagnostics
+import com.example.kftgcs.telemetry.connections.UdpPortScanner
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import androidx.compose.ui.unit.dp
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -91,7 +99,14 @@ fun ConnectionPage(
                 // If we are still in a 'connecting' state after the timeout, it failed.
                 if (isConnecting) {
                     isConnecting = false
-                    errorMessage = AppStrings.connectionTimedOut
+                    // For UDP, a bare "timed out" tells the user nothing — and the app ships on the
+                    // RC where no logcat is available. Substitute the stage-specific verdict
+                    // recorded by the transport (bind failed / no packets / no MAVLink parsed).
+                    errorMessage = if (connectionType == ConnectionType.UDP && UdpDiagnostics.hasData()) {
+                        UdpDiagnostics.verdict()
+                    } else {
+                        AppStrings.connectionTimedOut
+                    }
                     showPopup = true
                     viewModel.cancelConnection() // Clean up the failed attempt
                     // Announce connection failure via TTS
@@ -130,7 +145,14 @@ fun ConnectionPage(
     val isConnectEnabled = !isConnecting && when (connectionType) {
         ConnectionType.TCP -> viewModel.ipAddress.value.isNotBlank() && viewModel.port.value.isNotBlank()
         ConnectionType.UDP -> viewModel.udpLocalPort.value.toIntOrNull()?.let { it in 1..65535 } == true &&
-            isPlausibleHost(viewModel.udpRemoteHost.value)
+            isPlausibleHost(viewModel.udpRemoteHost.value) &&
+            (viewModel.udpRemoteHost.value.isBlank() ||
+                viewModel.udpRemotePort.value.toIntOrNull()?.let { it in 1..65535 } == true) &&
+            !isUdpSelfTarget(
+                viewModel.udpLocalPort.value,
+                viewModel.udpRemoteHost.value,
+                viewModel.udpRemotePort.value
+            )
         ConnectionType.BLUETOOTH -> viewModel.selectedDevice.value != null
         ConnectionType.USB -> viewModel.selectedUsbDevice.value != null
     }
@@ -232,7 +254,7 @@ fun ConnectionPage(
 
             when (connectionType) {
                 ConnectionType.TCP -> TcpConnectionContent(viewModel)
-                ConnectionType.UDP -> UdpConnectionContent(viewModel)
+                ConnectionType.UDP -> UdpConnectionContent(viewModel, isConnecting)
                 ConnectionType.BLUETOOTH -> BluetoothConnectionContent(viewModel)
                 ConnectionType.USB -> UsbConnectionContent(viewModel)
             }
@@ -315,12 +337,69 @@ fun ConnectionPage(
         }
 
         if (showPopup) {
+            val clipboard = LocalClipboardManager.current
+            // Keyed on errorMessage, not on showPopup: showPopup is always true inside this branch,
+            // so keying on it would keep the FIRST failure's snapshot for every later failure.
+            var copied by remember(errorMessage) { mutableStateOf(false) }
+            // Snapshot the details when the dialog opens: cancelConnection() has already torn the
+            // socket down by now, but UdpDiagnostics is a plain singleton so the counters remain.
+            val udpDetails = remember(errorMessage) {
+                if (connectionType == ConnectionType.UDP && UdpDiagnostics.hasData()) {
+                    UdpDiagnostics.details()
+                } else {
+                    null
+                }
+            }
+
             AlertDialog(
                 onDismissRequest = { showPopup = false },
                 title = { Text(AppStrings.connectionFailed, fontWeight = androidx.compose.ui.text.font.FontWeight.Bold) },
-                text = { Text(errorMessage) },
+                text = {
+                    // Scrollable: the RC's screen is short and the diagnostics block was being
+                    // clipped after the first line — hiding the "remote :" row, which is exactly
+                    // the line needed to tell listen-only mode from a seeded-peer attempt.
+                    Column(modifier = Modifier.verticalScroll(rememberScrollState())) {
+                        Text(errorMessage)
+                        if (udpDetails != null) {
+                            Spacer(modifier = Modifier.height(12.dp))
+                            Text(
+                                AppStrings.udpDiagnostics,
+                                style = MaterialTheme.typography.labelMedium
+                            )
+                            Spacer(modifier = Modifier.height(4.dp))
+                            // Selectable so the customer can long-press to copy even if the button
+                            // is missed, and monospaced so the columns line up in a screenshot.
+                            SelectionContainer {
+                                Text(
+                                    udpDetails,
+                                    fontFamily = FontFamily.Monospace,
+                                    fontSize = 11.sp,
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .background(
+                                            Color.Black.copy(alpha = 0.25f),
+                                            RoundedCornerShape(8.dp)
+                                        )
+                                        .padding(8.dp)
+                                )
+                            }
+                        }
+                    }
+                },
                 confirmButton = {
                     Button(onClick = { showPopup = false }) { Text(AppStrings.ok) }
+                },
+                dismissButton = if (udpDetails != null) {
+                    {
+                        TextButton(onClick = {
+                            clipboard.setText(AnnotatedString("$errorMessage\n\n$udpDetails"))
+                            copied = true
+                        }) {
+                            Text(if (copied) AppStrings.copied else AppStrings.copy)
+                        }
+                    }
+                } else {
+                    null
                 }
             )
         }
@@ -352,19 +431,104 @@ fun TcpConnectionContent(viewModel: SharedViewModel) {
 }
 
 @Composable
-fun UdpConnectionContent(viewModel: SharedViewModel) {
+fun UdpConnectionContent(viewModel: SharedViewModel, isConnecting: Boolean = false) {
     val localPort by viewModel.udpLocalPort
     val remoteHost by viewModel.udpRemoteHost
+    val remotePort by viewModel.udpRemotePort
+    val scope = rememberCoroutineScope()
 
-    OutlinedTextField(
-        value = localPort,
-        onValueChange = { viewModel.onUdpLocalPortChange(it.filter { c -> c.isDigit() }) },
-        label = { Text(AppStrings.udpLocalPort, color = Color.White) },
-        modifier = Modifier.fillMaxWidth(),
-        singleLine = true,
-        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-        textStyle = LocalTextStyle.current.copy(color = Color.White)
-    )
+    var scanning by remember { mutableStateOf(false) }
+    var scanSummary by remember { mutableStateOf<String?>(null) }
+
+    // Local port + Scan sit on one row: on an RC the port map varies by firmware, so finding the
+    // live port matters more than typing one in.
+    Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.Top) {
+        OutlinedTextField(
+            value = localPort,
+            onValueChange = { viewModel.onUdpLocalPortChange(it.filter { c -> c.isDigit() }) },
+            label = { Text(AppStrings.udpLocalPort, color = Color.White) },
+            modifier = Modifier.weight(1f),
+            singleLine = true,
+            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+            textStyle = LocalTextStyle.current.copy(color = Color.White)
+        )
+
+        Spacer(modifier = Modifier.width(12.dp))
+
+        Button(
+            onClick = {
+                scanning = true
+                scanSummary = null
+                scope.launch {
+                    // Binding sockets blocks; keep it off the main thread.
+                    val results = withContext(Dispatchers.IO) { UdpPortScanner.scan() }
+                    scanSummary = UdpPortScanner.summarize(results)
+                    // Apply ONLY the local port.
+                    //
+                    // An earlier version also filled Remote Host/Port from the discovered peer.
+                    // That was wrong and actively harmful: every Scan re-populated Remote Host,
+                    // silently putting the app back into seed-and-probe mode and undoing
+                    // listen-only — so a user who cleared the field and then scanned was tested in
+                    // the very mode we were trying to avoid. QGroundControl and Mission Planner
+                    // never derive a send target this way; they learn the peer from the first
+                    // received datagram at runtime, which PeerAddress.observe() already does.
+                    UdpPortScanner.bestResult(results)?.let { best ->
+                        viewModel.onUdpLocalPortChange(best.port.toString())
+                    }
+                    scanning = false
+                }
+            },
+            // Disabled while a connection attempt is live: the transport already holds the local
+            // port, so scanning now would report our own socket as "in use by another app".
+            enabled = !scanning && !isConnecting,
+            modifier = Modifier.height(56.dp),
+            colors = ButtonDefaults.buttonColors(
+                containerColor = Color(0xFF00796B),
+                contentColor = Color.White
+            )
+        ) {
+            if (scanning) {
+                CircularProgressIndicator(
+                    modifier = Modifier.size(18.dp),
+                    color = Color.White,
+                    strokeWidth = 2.dp
+                )
+            } else {
+                Text(AppStrings.scan)
+            }
+        }
+    }
+
+    // One-tap reset to the configuration the vendor documents and that both QGroundControl and
+    // Mission Planner use: bind the port, transmit nothing, learn the peer from the first packet.
+    // A button rather than an instruction because a stale Remote Host silently re-enables the
+    // seed-and-probe path, and asking the user to clear a field by hand keeps not working.
+    if (remoteHost.isNotBlank()) {
+        Spacer(modifier = Modifier.height(8.dp))
+        TextButton(
+            onClick = {
+                viewModel.onUdpRemoteHostChange("")
+                scanSummary = null
+            },
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            Text(AppStrings.udpUseListenOnly, color = Color(0xFF4FC3F7))
+        }
+    }
+
+    if (scanning || scanSummary != null) {
+        Spacer(modifier = Modifier.height(8.dp))
+        Text(
+            scanSummary ?: AppStrings.scanning,
+            color = Color.White.copy(alpha = 0.75f),
+            fontFamily = FontFamily.Monospace,
+            fontSize = 11.sp,
+            modifier = Modifier
+                .fillMaxWidth()
+                .background(Color.Black.copy(alpha = 0.25f), RoundedCornerShape(8.dp))
+                .padding(8.dp)
+        )
+    }
 
     Spacer(modifier = Modifier.height(12.dp))
 
@@ -372,7 +536,7 @@ fun UdpConnectionContent(viewModel: SharedViewModel) {
         value = remoteHost,
         onValueChange = { viewModel.onUdpRemoteHostChange(it) },
         label = { Text(AppStrings.udpRemoteHostOptional, color = Color.White) },
-        placeholder = { Text("192.168.4.1  or  192.168.4.1:14555", color = Color.White.copy(alpha = 0.35f)) },
+        placeholder = { Text("127.0.0.1", color = Color.White.copy(alpha = 0.35f)) },
         modifier = Modifier.fillMaxWidth(),
         singleLine = true,
         isError = remoteHost.isNotBlank() && !isPlausibleHost(remoteHost),
@@ -387,6 +551,48 @@ fun UdpConnectionContent(viewModel: SharedViewModel) {
         },
         textStyle = LocalTextStyle.current.copy(color = Color.White)
     )
+
+    Spacer(modifier = Modifier.height(12.dp))
+
+    // Separate remote port, matching QGC's layout, so an RC router's two ports (e.g. listen on
+    // 14550, send to 14551) map one-to-one instead of being squeezed into a host:port string.
+    OutlinedTextField(
+        value = remotePort,
+        onValueChange = { viewModel.onUdpRemotePortChange(it.filter { c -> c.isDigit() }) },
+        label = { Text(AppStrings.udpRemotePort, color = Color.White) },
+        modifier = Modifier.fillMaxWidth(),
+        singleLine = true,
+        enabled = remoteHost.isNotBlank(),
+        isError = remoteHost.isNotBlank() &&
+            (remotePort.toIntOrNull()?.let { it in 1..65535 } != true ||
+                isUdpSelfTarget(localPort, remoteHost, remotePort)),
+        supportingText = {
+            if (isUdpSelfTarget(localPort, remoteHost, remotePort)) {
+                Text(AppStrings.udpSameAsLocalPort, color = Color(0xFFFF5252))
+            }
+        },
+        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+        textStyle = LocalTextStyle.current.copy(color = Color.White)
+    )
+}
+
+/**
+ * True when the remote endpoint points back at our own listen socket (loopback on the same port).
+ *
+ * This is the configuration that produced the customer's "bound: yes, packets in: 0": the peer is
+ * seeded to 127.0.0.1 on the port we just bound, so the heartbeat probe is delivered straight back
+ * to us instead of to the RC's router. Blocking it in the UI turns a 10-second timeout into an
+ * immediately visible mistake.
+ */
+private fun isUdpSelfTarget(localPort: String, remoteHost: String, remotePort: String): Boolean {
+    val host = remoteHost.trim()
+    if (host.isBlank()) return false
+    val isLoopback = host == "127.0.0.1" || host.equals("localhost", ignoreCase = true) ||
+        host == "::1" || host == "[::1]"
+    if (!isLoopback) return false
+    val lp = localPort.toIntOrNull() ?: return false
+    val rp = remotePort.toIntOrNull() ?: return false
+    return lp == rp
 }
 
 /**

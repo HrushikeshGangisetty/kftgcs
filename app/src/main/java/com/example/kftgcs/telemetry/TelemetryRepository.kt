@@ -15,6 +15,7 @@ import com.example.kftgcs.telemetry.extractDroneUniqueId
 
 import com.example.kftgcs.utils.AppStrings
 import com.example.kftgcs.telemetry.connections.MavConnectionProvider
+import com.example.kftgcs.telemetry.connections.UdpDiagnostics
 import com.example.kftgcs.fence.FenceConfiguration
 import com.example.kftgcs.fence.FenceStatus
 import com.example.kftgcs.fence.FenceZone
@@ -926,9 +927,12 @@ class MavlinkTelemetryRepository(
                 replay = 0
             )
 
-        // Log raw messages
+        // Log raw messages. Also records that at least one frame actually parsed, which the UDP
+        // failure dialog uses to tell "bytes arrived but nothing was MAVLink" apart from "the link
+        // is fine, the autopilot just never sent a heartbeat".
         scope.launch {
             mavFrame.collect {
+                if (!UdpDiagnostics.mavlinkFrameSeen) UdpDiagnostics.mavlinkFrameSeen = true
             }
         }
 

@@ -1687,13 +1687,29 @@ class SharedViewModel : ViewModel() {
     val port: State<String> = _port
 
     // --- UDP ---
-    // Local port the GCS listens on. 14550 is the ArduPilot/QGC/Mission Planner default.
-    private val _udpLocalPort = mutableStateOf("14550")
+    // Local port the GCS listens on. Skydroid's own documentation says to connect the ground
+    // station over UDP with the listening port set to 14551, so that is the default here.
+    private val _udpLocalPort = mutableStateOf("14551")
     val udpLocalPort: State<String> = _udpLocalPort
 
-    // Optional remote host to also push to. Blank = pure listen mode (learn peer from first packet).
+    // Optional remote host. BLANK BY DEFAULT — this matters.
+    //
+    // Both reference ground stations bind and wait rather than inventing a target:
+    //  - QGroundControl's UDPWorker::writeData sends only to user-configured targetHosts() and to
+    //    _sessionTargets learned from received datagrams; with neither, it transmits nothing, and
+    //    it adds no automatic localhost target.
+    //  - Mission Planner opens a UdpClient on the port, transmits nothing unprompted, and takes the
+    //    remote endpoint from the source address of the first packet it receives.
+    //
+    // Pre-filling 127.0.0.1 made us the odd one out: we seeded a peer nobody asked for and fired an
+    // unsolicited heartbeat at it. Blank means pure listen mode, matching the vendor instructions
+    // and both reference implementations.
     private val _udpRemoteHost = mutableStateOf("")
     val udpRemoteHost: State<String> = _udpRemoteHost
+
+    // Port we transmit to, used only when a remote host is explicitly entered.
+    private val _udpRemotePort = mutableStateOf("14550")
+    val udpRemotePort: State<String> = _udpRemotePort
 
     private val _pairedDevices = MutableStateFlow<List<PairedDevice>>(emptyList())
     val pairedDevices: StateFlow<List<PairedDevice>> = _pairedDevices.asStateFlow()
@@ -1719,6 +1735,10 @@ class SharedViewModel : ViewModel() {
 
     fun onUdpRemoteHostChange(newValue: String) {
         _udpRemoteHost.value = newValue
+    }
+
+    fun onUdpRemotePortChange(newValue: String) {
+        _udpRemotePort.value = newValue
     }
 
     @SuppressLint("MissingPermission")
@@ -2353,6 +2373,47 @@ class SharedViewModel : ViewModel() {
         LogUtils.d("SharedVM", "Seeded radar thresholds from vehicle: $seeded")
     }
 
+    /**
+     * Read the vehicle's spray configuration on connect and seed the local state.
+     *
+     * Before this existed [_sprayRate] was hardcoded to 100 at startup, so the slider always
+     * claimed 100% no matter what the FC held — a pilot who set 40 last flight reconnected to a
+     * UI that disagreed with the vehicle, and the first nudge of the slider wrote a value they
+     * had not chosen.
+     *
+     * SPRAY_PUMP_MIN and SPRAY_ENABLE are read for display only (see the effective-output readout
+     * in the spray panels): the floor and the master switch both decide what the pump actually
+     * does, and neither was visible anywhere in the app. We do not write either one here.
+     *
+     * Missing / timed-out reads leave the corresponding value alone.
+     */
+    private suspend fun seedSprayConfigFromVehicle() {
+        val rate = readParameter("SPRAY_PUMP_RATE")
+        if (rate != null) {
+            // Clamp into the slider's own range: an FC holding a rate outside 10..100 (a hand-set
+            // param, or the ArduPilot default of 10) must still land on a position the slider can
+            // represent, or the thumb and the number would disagree.
+            _sprayRate.value = rate.coerceIn(10f, 100f)
+            LogUtils.i("SprayControl", "🚿 Seeded spray rate from vehicle: SPRAY_PUMP_RATE=$rate → slider ${_sprayRate.value.toInt()}%")
+        } else {
+            LogUtils.w("SprayControl", "⚠ Could not read SPRAY_PUMP_RATE — slider keeps ${_sprayRate.value.toInt()}%")
+        }
+
+        _sprayPumpMin.value = readParameter("SPRAY_PUMP_MIN") ?: run {
+            LogUtils.w("SprayControl", "⚠ Could not read SPRAY_PUMP_MIN")
+            null
+        }
+
+        val enable = readParameter("SPRAY_ENABLE")
+        _sprayEnableParam.value = enable?.let { it >= 0.5f }
+        if (enable != null && enable < 0.5f) {
+            LogUtils.w("SprayControl", "⚠ SPRAY_ENABLE=0 on the vehicle — the Sprayer library is off, so rate changes will have no effect")
+        }
+
+        LogUtils.d("SprayControl",
+            "Spray config seeded: rate=${_sprayRate.value}, pumpMin=${_sprayPumpMin.value}, enabled=${_sprayEnableParam.value}")
+    }
+
     fun connect() {
         viewModelScope.launch {
             try {
@@ -2369,30 +2430,28 @@ class SharedViewModel : ViewModel() {
                     ConnectionType.UDP -> {
                         val localPortInt = udpLocalPort.value.toIntOrNull()
                         if (localPortInt != null && localPortInt in 1..65535) {
-                            // Remote host is optional; accept "host" or "host:port". A blank value
-                            // means pure listen mode (peer learned from the first inbound packet).
+                            // A blank host means pure listen mode (peer learned from first packet).
+                            //
+                            // A LOOPBACK host is now also forced to listen-only, whatever port is
+                            // set. Five field tests in a row ran in SEEDED mode because a stale
+                            // 127.0.0.1 sat in the box and nobody cleared it, and seeding loopback
+                            // is never useful here: the RC's router already pushes to our port, so
+                            // the only thing the seed achieves is transmitting at a loopback port
+                            // that may have nothing bound to it. When nothing is listening there,
+                            // the kernel answers our own datagrams with ICMP port-unreachable, and
+                            // a pending ICMP error on the socket can cost us inbound datagrams —
+                            // which is exactly the "packets out: 9, packets in: 0" we measured on a
+                            // port that Scan had just proved was carrying 4 packets of telemetry.
+                            //
+                            // QGroundControl and Mission Planner never invent a loopback target
+                            // either; they bind and learn the peer from the first datagram.
                             val raw = udpRemoteHost.value.trim()
-                            val host: String?
-                            val hostPort: Int
-                            if (raw.isBlank()) {
-                                host = null
-                                hostPort = localPortInt
-                            } else {
-                                val idx = raw.lastIndexOf(':')
-                                if (idx > 0 && idx < raw.length - 1) {
-                                    val parsed = raw.substring(idx + 1).toIntOrNull()
-                                    if (parsed != null && parsed in 1..65535) {
-                                        host = raw.substring(0, idx)
-                                        hostPort = parsed
-                                    } else {
-                                        host = raw
-                                        hostPort = localPortInt
-                                    }
-                                } else {
-                                    host = raw
-                                    hostPort = localPortInt
-                                }
-                            }
+                            val isLoopbackHost = raw.equals("localhost", ignoreCase = true) ||
+                                raw == "::1" || raw == "[::1]" || raw.startsWith("127.")
+                            val host: String? = raw.ifBlank { null }?.takeUnless { isLoopbackHost }
+                            val hostPort: Int = udpRemotePort.value.toIntOrNull()
+                                ?.takeIf { it in 1..65535 }
+                                ?: localPortInt
                             UdpConnectionProvider(
                                 localPortInt,
                                 host,
@@ -2487,6 +2546,11 @@ class SharedViewModel : ViewModel() {
                 newRepo.state.collect { state ->
                     if (state.fcuDetected && state.connected) {
                         seedRadarThresholdsFromVehicle()
+                        // Same one-shot: read the spray config so the slider reflects the vehicle
+                        // rather than its hardcoded startup value. Sequential (not a parallel
+                        // launch) because readParameter drives a shared PARAM_VALUE flow and
+                        // overlapping reads would race for each other's acks.
+                        seedSprayConfigFromVehicle()
                         return@collect
                     }
                 }
@@ -3344,8 +3408,21 @@ class SharedViewModel : ViewModel() {
     private val _sprayEnabled = MutableStateFlow(false)
     val sprayEnabled: StateFlow<Boolean> = _sprayEnabled.asStateFlow()
 
+    // Seeded from the vehicle's SPRAY_PUMP_RATE on connect (see seedSprayConfigFromVehicle), so
+    // the slider shows what the FC is actually set to instead of always reading 100 on startup.
+    // The 100f here is only the pre-connect placeholder.
     private val _sprayRate = MutableStateFlow(100f) // 10% to 100%
     val sprayRate: StateFlow<Float> = _sprayRate.asStateFlow()
+
+    // Pump floor (SPRAY_PUMP_MIN) and sprayer master switch (SPRAY_ENABLE), read from the vehicle
+    // on connect. Both are needed to show the pilot the pump output the FC will actually command:
+    // AC_Sprayer floors its computed output at SPRAY_PUMP_MIN, and does nothing at all unless
+    // SPRAY_ENABLE = 1. Null = not read yet / read timed out.
+    private val _sprayPumpMin = MutableStateFlow<Float?>(null)
+    val sprayPumpMin: StateFlow<Float?> = _sprayPumpMin.asStateFlow()
+
+    private val _sprayEnableParam = MutableStateFlow<Boolean?>(null)
+    val sprayEnableParam: StateFlow<Boolean?> = _sprayEnableParam.asStateFlow()
 
     // Track spray state before pause for automatic restore on resume
     private var _sprayWasActiveBeforePause = false
@@ -5132,6 +5209,27 @@ class SharedViewModel : ViewModel() {
 
     // Serializes rate writes so two overlapping applies can't reach the FC out of order.
     private val sprayRateWriteMutex = kotlinx.coroutines.sync.Mutex()
+
+    /**
+     * The pump output percentage the FC will actually command right now, mirroring AC_Sprayer's
+     * own arithmetic: `output% = groundspeed_m/s × SPRAY_PUMP_RATE`, floored at SPRAY_PUMP_MIN and
+     * capped at 100.
+     *
+     * This exists because the slider alone is misleading in flight. SPRAY_PUMP_RATE is pump % per
+     * 1 m/s, not an absolute percentage, so at 4 m/s every slider position from 25 up already
+     * commands a saturated pump — the pilot moves the slider across most of its travel and nothing
+     * changes, which reads as "the app isn't setting the rate". Surfacing the computed number next
+     * to the slider makes that visible instead of invisible.
+     *
+     * Emits null when groundspeed is unknown (no VFR_HUD yet), so the UI can say so rather than
+     * show a confident 0.
+     */
+    val sprayEffectiveOutputPct: StateFlow<Float?> =
+        combine(_telemetryState, _sprayRate, _sprayPumpMin) { telemetry, rate, pumpMin ->
+            val speedMs = telemetry.groundspeed ?: return@combine null
+            val raw = speedMs * rate
+            raw.coerceAtLeast(pumpMin ?: 0f).coerceIn(0f, 100f)
+        }.stateIn(viewModelScope, SharingStarted.Eagerly, null)
 
     /**
      * Push the current slider rate to the FC as SPRAY_PUMP_RATE (1:1 — see the block comment

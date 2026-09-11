@@ -73,6 +73,10 @@ fun PlanScreen(
     val rangeFenceRadius by telemetryViewModel.fenceRadiusMeters.collectAsState()
     val rangeFenceArmed by telemetryViewModel.rangeFenceArmed.collectAsState()
     val sprayRate by telemetryViewModel.sprayRate.collectAsState()
+    // Pump output the FC will actually command at the current groundspeed, and the vehicle's
+    // sprayer master switch. Shared by both spray panels below.
+    val sprayEffectiveOutput by telemetryViewModel.sprayEffectiveOutputPct.collectAsState()
+    val sprayEnableParam by telemetryViewModel.sprayEnableParam.collectAsState()
     val context = LocalContext.current
     val uploadProgress by telemetryViewModel.missionUploadProgress.collectAsState()
 
@@ -2253,6 +2257,38 @@ fun PlanScreen(
                                 style = MaterialTheme.typography.bodySmall,
                                 modifier = Modifier.padding(top = 2.dp)
                             )
+
+                            // Effective pump output. The slider is % per 1 m/s, so its number is
+                            // NOT the pump percentage in flight — showing the computed value is
+                            // what makes a saturated pump (every position above ~25 at 4 m/s)
+                            // visible instead of looking like the app failed to write the rate.
+                            Text(
+                                text = sprayEffectiveOutput?.let { pct ->
+                                    val saturated = pct >= 100f
+                                    "Pump now: ${pct.toInt()}%" + if (saturated) " (max — slider has no effect at this speed)" else ""
+                                } ?: "Pump now: — (no groundspeed)",
+                                color = sprayEffectiveOutput.let { pct ->
+                                    when {
+                                        pct == null -> Color.Gray
+                                        pct >= 100f -> Color(0xFFFFA000)
+                                        else -> Color.LightGray
+                                    }
+                                },
+                                style = MaterialTheme.typography.bodySmall,
+                                modifier = Modifier.padding(top = 2.dp)
+                            )
+
+                            // A vehicle with SPRAY_ENABLE = 0 accepts and acks every rate write
+                            // while spraying nothing, which is indistinguishable from a broken
+                            // write unless we say so.
+                            if (sprayEnableParam == false) {
+                                Text(
+                                    "⚠ SPRAY_ENABLE = 0 on the vehicle — rate changes will have no effect",
+                                    color = Color(0xFFFF6D00),
+                                    style = MaterialTheme.typography.bodySmall,
+                                    modifier = Modifier.padding(top = 2.dp)
+                                )
+                            }
                         }
 
                         // Auto Spray
@@ -2638,6 +2674,38 @@ fun PlanScreen(
                                 style = MaterialTheme.typography.bodySmall,
                                 modifier = Modifier.padding(top = 2.dp)
                             )
+
+                            // Effective pump output. The slider is % per 1 m/s, so its number is
+                            // NOT the pump percentage in flight — showing the computed value is
+                            // what makes a saturated pump (every position above ~25 at 4 m/s)
+                            // visible instead of looking like the app failed to write the rate.
+                            Text(
+                                text = sprayEffectiveOutput?.let { pct ->
+                                    val saturated = pct >= 100f
+                                    "Pump now: ${pct.toInt()}%" + if (saturated) " (max — slider has no effect at this speed)" else ""
+                                } ?: "Pump now: — (no groundspeed)",
+                                color = sprayEffectiveOutput.let { pct ->
+                                    when {
+                                        pct == null -> Color.Gray
+                                        pct >= 100f -> Color(0xFFFFA000)
+                                        else -> Color.LightGray
+                                    }
+                                },
+                                style = MaterialTheme.typography.bodySmall,
+                                modifier = Modifier.padding(top = 2.dp)
+                            )
+
+                            // A vehicle with SPRAY_ENABLE = 0 accepts and acks every rate write
+                            // while spraying nothing, which is indistinguishable from a broken
+                            // write unless we say so.
+                            if (sprayEnableParam == false) {
+                                Text(
+                                    "⚠ SPRAY_ENABLE = 0 on the vehicle — rate changes will have no effect",
+                                    color = Color(0xFFFF6D00),
+                                    style = MaterialTheme.typography.bodySmall,
+                                    modifier = Modifier.padding(top = 2.dp)
+                                )
+                            }
                         }
 
                         // Auto Spray

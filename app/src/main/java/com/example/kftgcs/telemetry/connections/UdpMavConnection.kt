@@ -67,18 +67,31 @@ class UdpMavConnection(
         // Ensure any previous connection is closed
         close()
 
+        UdpDiagnostics.reset(
+            localPort,
+            if (remoteHost.isNullOrBlank()) null else "$remoteHost:$remotePort"
+        )
+
         var newSocket: DatagramSocket? = null
         try {
             // Gap #8: Android's Wi-Fi stack drops broadcast/multicast datagrams unless a multicast
             // lock is held. Some ground setups broadcast telemetry rather than unicasting it.
             acquireMulticastLock()
 
-            newSocket = DatagramSocket(null).apply {
-                reuseAddress = true
-                broadcast = true
-                soTimeout = RECEIVE_TIMEOUT_MS
-                bind(InetSocketAddress(localPort))
+            newSocket = try {
+                DatagramSocket(null).apply {
+                    reuseAddress = true
+                    broadcast = true
+                    soTimeout = RECEIVE_TIMEOUT_MS
+                    bind(InetSocketAddress(localPort))
+                }
+            } catch (e: Exception) {
+                // Record the bind failure before rethrowing so the UI can name the real cause
+                // instead of showing a bare timeout.
+                UdpDiagnostics.onBindFailed(e.message)
+                throw if (e is IOException) e else IOException("Cannot bind UDP port $localPort", e)
             }
+            UdpDiagnostics.onBound()
             this.socket = newSocket
 
             // Holds the peer address. In client mode we seed it up front; in server mode the input
@@ -94,15 +107,35 @@ class UdpMavConnection(
                 } catch (e: IOException) {
                     throw IOException("Cannot resolve UDP remote host '$remoteHost'", e)
                 }
-                peer.seed(resolved, remotePort)
 
-                // Gap #5: nudge the peer with a real MAVLink heartbeat rather than an empty
-                // datagram — ArduPilot/MAVProxy ignore zero-length payloads for peer learning.
-                try {
-                    newSocket.send(DatagramPacket(HEARTBEAT_PROBE, HEARTBEAT_PROBE.size, resolved, remotePort))
-                } catch (e: IOException) {
-                    // Non-fatal: the vehicle may still start streaming to us on its own.
-                    LogUtils.w(TAG, "Initial UDP probe to $remoteHost:$remotePort failed: ${e.message}")
+                // Never seed a LOOPBACK remote, on any port.
+                //
+                // On this hardware the router pushes telemetry to our bound port unprompted, so a
+                // loopback seed buys nothing and can cost us the link: if nothing is bound at the
+                // target loopback port the kernel replies to our own datagrams with ICMP
+                // port-unreachable, and a pending ICMP error on the socket can suppress inbound
+                // delivery. Measured symptom: "packets out: 9, packets in: 0" on a port that a scan
+                // moments earlier had proved was carrying telemetry.
+                //
+                // Listen-only is also what QGroundControl and Mission Planner do — neither invents
+                // a target — so PeerAddress learns the real endpoint from the first inbound packet.
+                if (resolved.isLoopbackAddress) {
+                    LogUtils.w(
+                        TAG,
+                        "Ignoring loopback remote $remoteHost:$remotePort — listening only on " +
+                            "$localPort and learning the peer from inbound packets."
+                    )
+                } else {
+                    peer.seed(resolved, remotePort)
+
+                    // Gap #5: nudge the peer with a real MAVLink heartbeat rather than an empty
+                    // datagram — ArduPilot/MAVProxy ignore zero-length payloads for peer learning.
+                    try {
+                        newSocket.send(DatagramPacket(HEARTBEAT_PROBE, HEARTBEAT_PROBE.size, resolved, remotePort))
+                    } catch (e: IOException) {
+                        // Non-fatal: the vehicle may still start streaming to us on its own.
+                        LogUtils.w(TAG, "Initial UDP probe to $remoteHost:$remotePort failed: ${e.message}")
+                    }
                 }
             }
 
@@ -309,7 +342,10 @@ class UdpMavConnection(
                 }
                 // Gap #3: re-latch to whoever is currently talking to us, every packet.
                 val from = packet.address
-                if (from != null) peer.observe(from, packet.port)
+                if (from != null) {
+                    peer.observe(from, packet.port)
+                    UdpDiagnostics.onPacket(from, packet.port, packet.length)
+                }
 
                 if (packet.length <= 0) continue
                 buffered = packetBuf.copyOfRange(0, packet.length)
@@ -346,8 +382,17 @@ class UdpMavConnection(
             // send, and a dropped command must not look like a delivered one — surface it as an
             // IOException so the connection is marked failed instead of appearing healthy.
             val endpoint = peer.current()
-                ?: throw IOException("No UDP peer yet — cannot send ${len}B (nothing has been received on this port).")
-            socket.send(DatagramPacket(b, off, len, endpoint.address, endpoint.port))
+                ?: run {
+                    UdpDiagnostics.onSendError("no peer known")
+                    throw IOException("No UDP peer yet — cannot send ${len}B (nothing has been received on this port).")
+                }
+            try {
+                socket.send(DatagramPacket(b, off, len, endpoint.address, endpoint.port))
+                UdpDiagnostics.onSent()
+            } catch (e: IOException) {
+                UdpDiagnostics.onSendError(e.message)
+                throw e
+            }
         }
     }
 }
