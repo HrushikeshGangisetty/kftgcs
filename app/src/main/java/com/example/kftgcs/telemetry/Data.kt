@@ -1,5 +1,6 @@
 package com.example.kftgcs.telemetry
 
+import com.google.android.gms.maps.model.LatLng
 import com.divpundir.mavlink.definitions.common.OpenDroneIdBasicId
 import com.divpundir.mavlink.definitions.common.MavOdidIdType
 
@@ -304,3 +305,19 @@ data class TelemetryState(
 // identical copy used to live here under the old capital-"Telemetry" package; it was
 // removed when the package was unified to lowercase "telemetry" to avoid a duplicate
 // class declaration.
+
+/**
+ * One sample of the drone's flown path, tagged with whether the sprayer was running.
+ *
+ * Consecutive points sharing an [isSpraying] value are drawn as one polyline segment, so
+ * the flag is what splits the trail into green (sprayed) and red (not sprayed) runs.
+ *
+ * Lives here, in the telemetry package, because the trail is owned by SharedViewModel rather
+ * than by the map composable: GcsMap is created separately by MainPage and PlanScreen, and
+ * composable-local state was being destroyed whenever navigation swapped between them,
+ * wiping the sprayed-line history mid-mission.
+ */
+data class DronePathPoint(
+    val position: LatLng,
+    val isSpraying: Boolean
+)

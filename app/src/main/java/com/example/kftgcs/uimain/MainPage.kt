@@ -78,6 +78,9 @@ fun MainPage(
     val rangeFenceArmed by telemetryViewModel.rangeFenceArmed.collectAsState()
     val obstacles by telemetryViewModel.obstacles.collectAsState()
     val clearDronePathTrigger by telemetryViewModel.clearDronePathTrigger.collectAsState()
+    // Trail is ViewModel-owned so it survives navigation away from this screen (a
+    // pause/resume) without losing the green sprayed-line history.
+    val dronePathPoints by telemetryViewModel.dronePathPoints.collectAsState()
 
     // Selected geofence point tracking for adjustment
     var selectedGeofencePointIndex by remember { mutableStateOf<Int?>(null) }
@@ -228,6 +231,8 @@ fun MainPage(
                 manualResumePointUploaded = manualResumePointUploaded,
                 // Clear drone path trail trigger
                 clearDronePathTrigger = clearDronePathTrigger,
+                dronePathPoints = dronePathPoints,
+                onDronePathPoint = telemetryViewModel::recordDronePathPoint,
                 dronePathColor = dronePathColor
             )
 

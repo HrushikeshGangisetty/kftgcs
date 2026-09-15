@@ -18,6 +18,7 @@ workRuntimeKtx = "2.11.1"
 ksp = "2.0.21-1.0.28"
 appUpdate = "2.1.0"
 media3 = "1.4.1"
+uvccamera = "0.0.13"
 
 [libraries]
 androidx-core-ktx = { group = "androidx.core", name = "core-ktx", version.ref = "coreKtx" }
@@ -46,6 +47,14 @@ play-app-update = { group = "com.google.android.play", name = "app-update", vers
 androidx-media3-exoplayer = { group = "androidx.media3", name = "media3-exoplayer", version.ref = "media3" }
 androidx-media3-exoplayer-rtsp = { group = "androidx.media3", name = "media3-exoplayer-rtsp", version.ref = "media3" }
 androidx-media3-ui = { group = "androidx.media3", name = "media3-ui", version.ref = "media3" }
+
+# UVC (USB Video Class) capture — Skydroid T12 video feed over USB OTG.
+# The original saki4510t/UVCCamera repo has no tags/releases, so JitPack can
+# never resolve a "libuvccamera" version from it — that coordinate was never
+# valid. alexey-pelykh/UVCCamera is a maintained fork (same com.serenegiant.usb
+# package/API, verified API-compatible with our UsbUvcVideoSource usage) that
+# publishes real tagged releases straight to Maven Central — no JitPack needed.
+uvccamera = { group = "org.uvccamera", name = "lib", version.ref = "uvccamera" }
 
 [plugins]
 android-application = { id = "com.android.application", version.ref = "agp" }

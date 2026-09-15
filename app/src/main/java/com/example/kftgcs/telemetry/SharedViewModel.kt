@@ -191,23 +191,58 @@ class SharedViewModel : ViewModel() {
      *
      * The band must be wide enough that noise and a normal descent overshoot cannot toggle
      * the latch: sitting exactly on the threshold would otherwise re-fire the action every
-     * few seconds. 10m matches the warn band, so the latch clears at the same altitude the
-     * "approaching limit" warning stops.
+     * few seconds.
+     *
+     * MEASURED FROM THE CEILING, NOT FROM THE ACTION THRESHOLD. The threshold is
+     * speed-aware and slides downward as the drone climbs faster, so a band hung off it
+     * moved too — which is how the "warnings but no RTL" bug happened. A pilot who fired
+     * the action at a 5 m/s climb (threshold ~ceiling−11 m), cancelled, and settled into a
+     * hover at ceiling−10 m was ABOVE the re-arm point (ceiling−21 m), so the latch stayed
+     * set; the next climb sailed through the ceiling into the "action already taken" branch,
+     * which only speaks. Anchoring to the ceiling makes the re-arm altitude a fixed,
+     * predictable number that a hover below the limit actually reaches.
      */
-    private val ALTITUDE_REARM_HYSTERESIS_M = 10f
+    private val ALTITUDE_REARM_BELOW_CEILING_M = 12f
+    /**
+     * A climb slower than this counts as "not climbing" for the purpose of re-arming.
+     * Re-arm needs BOTH a descent below [ALTITUDE_REARM_BELOW_CEILING_M] and a vehicle
+     * that is no longer heading for the ceiling, so the latch cannot clear on a brief dip
+     * during a continuous climb and then immediately re-fire.
+     */
+    private val ALTITUDE_REARM_MAX_CLIMB_MPS = 0.5f
+    /**
+     * Hard backstop: once the drone is within this distance of the ceiling (or above it),
+     * the action fires again even if the one-shot is already consumed.
+     *
+     * The one-shot's purpose is to avoid fighting a pilot who is managing the situation
+     * INSIDE the envelope — it was never meant to license an actual breach. DGCA requires
+     * the ceiling not to be crossed, so a latch can suppress the repeat action only while
+     * the drone stays clear of the limit. At the limit, protection wins over politeness.
+     * Rate-limited by [ALTITUDE_LIMIT_INTERVAL_MS] so it re-commands at most every 5 s.
+     */
+    private val ALTITUDE_BACKSTOP_MARGIN_M = 1.5f
     /**
      * Smallest buffer below the ceiling where the action fires. Applies when the drone is
      * barely climbing; a faster climb gets the projected stopping distance below instead.
+     *
+     * Raised from 4 m: a "barely climbing" drone still carries the command round trip plus
+     * the FC's mode-entry delay, and the observed overshoot at low climb rates ate most of
+     * a 4 m buffer. 6 m keeps the stop comfortably under the line without costing usable
+     * altitude that matters at survey heights.
      */
-    private val ALTITUDE_MIN_ACTION_MARGIN_M = 4f
+    private val ALTITUDE_MIN_ACTION_MARGIN_M = 6f
     /** Upper clamp so a bogus climb rate or a stale fix can't consume the whole envelope. */
     private val ALTITUDE_MAX_ACTION_MARGIN_M = 25f
     /**
      * Seconds of latency budgeted between crossing the trigger point and the mode change
      * biting: DO_SET_MODE round trip + the FC's own mode-entry delay. The age of the
      * position fix is added on top of this at evaluation time, not folded into it.
+     *
+     * 0.8 s rather than 0.5: 0.5 s budgeted the link round trip but not the FC's own
+     * mode-entry and attitude-transition delay, which is where the residual overshoot came
+     * from.
      */
-    private val ALTITUDE_LATENCY_S = 0.5f
+    private val ALTITUDE_LATENCY_S = 0.8f
     /** Conservative vertical deceleration (ArduCopter PILOT_ACCEL_Z ≈ 2.5 m/s²). */
     private val ALTITUDE_DECEL_MPS2 = 2.5f
 
@@ -230,15 +265,49 @@ class SharedViewModel : ViewModel() {
     /** Warn this far inside the action point so the pilot can turn back first. */
     private val MAX_RANGE_WARN_LEAD_M = 25f
     /** Smallest buffer inside the radius where the action fires (near-hover case). */
-    private val MAX_RANGE_MIN_ACTION_MARGIN_M = 10f
+    private val MAX_RANGE_MIN_ACTION_MARGIN_M = 12f
     /** Upper clamp so a bogus groundspeed can't shrink the usable envelope to nothing. */
     private val MAX_RANGE_MAX_ACTION_MARGIN_M = 60f
-    /** Latency between crossing the trigger and RTL biting: command round trip + mode entry. */
-    private val MAX_RANGE_LATENCY_S = 1.0f
-    /** Conservative horizontal deceleration (ATC_ACCEL/WPNAV_ACCEL ≈ 2.5 m/s² on this airframe). */
-    private val MAX_RANGE_DECEL_MPS2 = 2.5f
-    /** How far back inside the action point the drone must return before the action re-arms. */
-    private val MAX_RANGE_REARM_HYSTERESIS_M = 25f
+    /**
+     * Latency between crossing the trigger and RTL biting: command round trip + mode entry.
+     *
+     * 1.4 s rather than 1.0: the measured 1-2 m overshoot at 8 m/s is ~0.2 s of flight, and
+     * the missing time is the FC's own mode-entry + attitude-transition delay — RTL does not
+     * begin decelerating the instant the mode change is acknowledged. Budgeting it here is
+     * what makes the turn happen before the line instead of on it.
+     */
+    private val MAX_RANGE_LATENCY_S = 1.4f
+    /**
+     * Horizontal deceleration assumed when sizing the stopping distance, m/s².
+     *
+     * Lowered from 2.5: WPNAV_ACCEL is the commanded maximum, and the achieved average over
+     * a real stop is lower — a heavy airframe with the sprayer tank loaded does not hit the
+     * book figure. Assuming less deceleration buys a longer stopping distance, which is the
+     * conservative direction for a fence we are not allowed to cross.
+     */
+    private val MAX_RANGE_DECEL_MPS2 = 2.0f
+    /**
+     * How far back inside the RADIUS the drone must return before the range action re-arms.
+     *
+     * Measured from the radius, not from the action threshold, for the same reason as the
+     * altitude ceiling (see [ALTITUDE_REARM_BELOW_CEILING_M]): the threshold slides inward
+     * with groundspeed, so a band hung off it moved with speed and could sit outside where
+     * a pilot actually loitered after cancelling, leaving the latch stuck.
+     */
+    private val MAX_RANGE_REARM_INSIDE_RADIUS_M = 40f
+    /**
+     * A groundspeed below this counts as "not running for the fence" when re-arming. Re-arm
+     * needs both a genuine return inside the radius and a vehicle that is not still charging
+     * outward, so the latch cannot clear and instantly re-fire.
+     */
+    private val MAX_RANGE_REARM_MAX_SPEED_MPS = 2.0f
+    /**
+     * Hard backstop: within this distance of the radius (or beyond it), the action fires
+     * again even if the one-shot is already consumed. Same reasoning as
+     * [ALTITUDE_BACKSTOP_MARGIN_M] — the latch may spare a pilot who is managing the
+     * situation inside the envelope, never one about to cross the line.
+     */
+    private val MAX_RANGE_BACKSTOP_MARGIN_M = 3f
 
     /**
      * A position fix older than this tells us nothing usable about where the drone is now,
@@ -673,18 +742,33 @@ class SharedViewModel : ViewModel() {
         // but it used to clear only on disarm — a pilot who recovered and later climbed
         // through the ceiling again got no action for the rest of the flight. Re-arming on
         // genuine recovery restores protection for the second and subsequent breaches.
-        if (altitudeLimitActionTriggered &&
-            altitude < actionThreshold - ALTITUDE_REARM_HYSTERESIS_M) {
+        //
+        // The band is measured from the CEILING, not from actionThreshold: the threshold
+        // slides down as climb rate rises, so a band hung off it could sit below the
+        // altitude the pilot actually levelled off at, leaving the latch permanently set —
+        // and the next climb then reached the ceiling with nothing but TTS to show for it.
+        // Re-arming also requires the vehicle to have stopped climbing, so a momentary dip
+        // during a continuous climb does not clear and immediately re-fire the action.
+        val rearmAltitude = ceiling - ALTITUDE_REARM_BELOW_CEILING_M
+        val climbingHard = (state.climbRate ?: 0f).let { it.isFinite() && it > ALTITUDE_REARM_MAX_CLIMB_MPS }
+        if (altitudeLimitActionTriggered && altitude < rearmAltitude && !climbingHard) {
             altitudeLimitActionTriggered = false
             lastAltitudeLimitTime = 0L
-            LogUtils.i("AltitudeFailsafe", "✓ Recovered to ${altitude}m (below ${actionThreshold - ALTITUDE_REARM_HYSTERESIS_M}m) — altitude action re-armed")
-            addNotification(
-                Notification(
-                    message = "✓ Back below altitude limit — protection re-armed",
-                    type = NotificationType.INFO
-                )
-            )
+            // Log only — re-arming is internal housekeeping, not an event the pilot needs
+            // in the notification list. It fires on recovery, i.e. once things are already
+            // going right, and pairing it with the breach entry doubled the list's length
+            // for every excursion.
+            LogUtils.i("AltitudeFailsafe", "✓ Recovered to ${altitude}m (below ${rearmAltitude}m, climb=${state.climbRate}m/s) — altitude action re-armed")
         }
+
+        // ═══ HARD BACKSTOP ═══
+        // True once the drone is at (or within a whisker of) the ceiling itself, as opposed
+        // to merely past the speed-aware trigger point. The one-shot latch must not suppress
+        // the action here: its job is to avoid fighting a pilot who is managing the situation
+        // INSIDE the envelope, and DGCA does not permit the ceiling to be crossed at all.
+        // This is the second half of the "warnings but no RTL" fix — even if the latch is
+        // somehow still set, reaching the limit re-commands the action.
+        val atBackstop = altitude >= ceiling - ALTITUDE_BACKSTOP_MARGIN_M
 
         if (altitude >= actionThreshold) {
 
@@ -703,7 +787,11 @@ class SharedViewModel : ViewModel() {
                 voltageCriticalActive -> "critical-battery action in progress"
                 else -> null
             }
-            if (!altitudeLimitActionTriggered && deferReason != null) {
+            // Deferring is safe only while the drone is still clear of the ceiling. At the
+            // backstop the competing recovery is demonstrably NOT keeping us under the
+            // limit, so the ceiling stops yielding to it — a breach in progress outranks a
+            // recovery that is failing to prevent it.
+            if (!altitudeLimitActionTriggered && deferReason != null && !atBackstop) {
                 if (now - lastAltitudeLimitTime >= ALTITUDE_LIMIT_INTERVAL_MS) {
                     lastAltitudeLimitTime = now
                     LogUtils.w("AltitudeFailsafe", "⏸️ Altitude ${altitude}m over action threshold ${actionThreshold}m (ceiling ${ceiling}m) but $deferReason — deferring $action (one-shot NOT consumed)")
@@ -712,8 +800,14 @@ class SharedViewModel : ViewModel() {
                 return
             }
 
-            if (!altitudeLimitActionTriggered) {
-                // ═══ FIRST TRIGGER: stop the climb (one-shot per arm cycle) ═══
+            // Fire on the first crossing of the trigger point, and fire AGAIN whenever the
+            // drone reaches the backstop despite the latch (rate-limited below) — a
+            // consumed one-shot may never be the reason a breach goes unactioned.
+            val backstopRefire = altitudeLimitActionTriggered && atBackstop &&
+                now - lastAltitudeLimitTime >= ALTITUDE_LIMIT_INTERVAL_MS
+
+            if (!altitudeLimitActionTriggered || backstopRefire) {
+                // ═══ TRIGGER: stop the climb ═══
                 altitudeLimitActionTriggered = true
                 lastAltitudeLimitTime = now
 
@@ -721,15 +815,28 @@ class SharedViewModel : ViewModel() {
                 // Options dropdown value — the mode below comes from FENCE_ACTION.
                 val announcedAction = _fenceAction.value?.pilotLabel ?: action
 
-                LogUtils.i("AltitudeFailsafe", "⛔ ALTITUDE LIMIT: ${altitude}m >= action threshold ${actionThreshold}m (FENCE_ALT_MAX ${ceiling}m, margin ${String.format(Locale.US, "%.1f", actionMargin)}m from climb=${state.climbRate}m/s age=${positionAgeMs}ms) — triggering $announcedAction (one-shot), mode=${_telemetryState.value.mode}")
+                if (backstopRefire) {
+                    LogUtils.w("AltitudeFailsafe", "⛔ ALTITUDE BACKSTOP: ${altitude}m is at/over the ${ceiling}m ceiling and the one-shot was already consumed — RE-COMMANDING $announcedAction, mode=${_telemetryState.value.mode}")
+                } else {
+                    LogUtils.i("AltitudeFailsafe", "⛔ ALTITUDE LIMIT: ${altitude}m >= action threshold ${actionThreshold}m (FENCE_ALT_MAX ${ceiling}m, margin ${String.format(Locale.US, "%.1f", actionMargin)}m from climb=${state.climbRate}m/s age=${positionAgeMs}ms) — triggering $announcedAction (one-shot), mode=${_telemetryState.value.mode}")
+                }
 
-                ttsManager?.speak("Approaching altitude limit. Activating $announcedAction.")
-                addNotification(
-                    Notification(
-                        message = "⛔ ALTITUDE LIMIT: ${String.format(Locale.US, "%.0f", altitude)}m ≥ ${String.format(Locale.US, "%.0f", actionThreshold)}m (${String.format(Locale.US, "%.0f", actionMargin)}m margin below ${String.format(Locale.US, "%.0f", ceiling)}m ceiling) — activating $announcedAction",
-                        type = NotificationType.ERROR
+                ttsManager?.speak("Above altitude limit. Activating $announcedAction.")
+
+                // One notification per breach, not per re-command. The backstop keeps
+                // re-issuing the mode change every ALTITUDE_LIMIT_INTERVAL_MS while the
+                // drone sits at the ceiling — that repetition is the safety behaviour and
+                // must stay — but repeating the LIST entry alongside it would turn a single
+                // event into a wall of identical rows. The re-fire still logs (above), still
+                // speaks, and still refreshes the popup.
+                if (!backstopRefire) {
+                    addNotification(
+                        Notification(
+                            message = "⛔ ALTITUDE LIMIT: ${String.format(Locale.US, "%.0f", altitude)}m of ${String.format(Locale.US, "%.0f", ceiling)}m ceiling — activating $announcedAction",
+                            type = NotificationType.ERROR
+                        )
                     )
-                )
+                }
                 showFailsafePopup("Max Altitude")
 
                 viewModelScope.launch {
@@ -780,29 +887,36 @@ class SharedViewModel : ViewModel() {
                     }
                 }
             } else if (now - lastAltitudeLimitTime >= ALTITUDE_LIMIT_INTERVAL_MS) {
-                // ═══ REPEAT: TTS only, action already taken this arm cycle ═══
+                // ═══ REPEAT: TTS only ═══
+                // Reached only when the latch is set AND the drone is below the backstop,
+                // i.e. past the speed-aware trigger but still clear of the ceiling — the
+                // one case where staying quiet and letting the pilot fly is right. At the
+                // backstop, backstopRefire above takes the action branch instead.
                 lastAltitudeLimitTime = now
-                LogUtils.i("AltitudeFailsafe", "⛔ Still above ceiling: ${altitude}m >= ${ceiling}m (action already taken this arm cycle)")
+                LogUtils.i("AltitudeFailsafe", "⛔ Past altitude trigger: ${altitude}m (ceiling ${ceiling}m, action already taken; below backstop)")
                 ttsManager?.speak("Above altitude limit. ${altitude.toInt()} meters.")
             }
         }
-        // Approaching the ceiling — alert only, so the pilot can level off themselves.
+        // Approaching the ceiling — TTS + log only, so the pilot can level off themselves.
+        //
+        // Deliberately raises NO notification. A drone worked near its ceiling sits in this
+        // band for minutes at a time, and at one entry every 4s the approach warning buried
+        // the notification list — including the breach entries that actually matter. TTS is
+        // the right channel for "you are getting close": it reaches a pilot who is looking
+        // at the aircraft rather than the screen, and it does not accumulate. The
+        // notification list is reserved for things that HAPPENED (the breach and its mode
+        // change), not for things that merely might.
         else if (altitude >= ceiling - ALTITUDE_WARN_MARGIN_M) {
             if (now - lastAltitudeWarnTime >= ALTITUDE_WARN_INTERVAL_MS) {
                 lastAltitudeWarnTime = now
                 LogUtils.i("AltitudeFailsafe", "⚠️ Approaching altitude limit: ${altitude}m of ${ceiling}m")
                 ttsManager?.speak("Approaching altitude limit. ${altitude.toInt()} meters.")
-                addNotification(
-                    Notification(
-                        message = "⚠️ Approaching altitude limit: ${String.format(Locale.US, "%.0f", altitude)}m of ${String.format(Locale.US, "%.0f", ceiling)}m",
-                        type = NotificationType.WARNING
-                    )
-                )
             }
         }
         // NOTE: altitudeLimitActionTriggered re-arms mid-flight once the drone descends
-        // ALTITUDE_REARM_HYSTERESIS_M below the action threshold (and on disarm), so a
-        // second climb through the ceiling is protected just like the first.
+        // ALTITUDE_REARM_BELOW_CEILING_M below the CEILING with the climb arrested (and on
+        // disarm), so a second climb through the ceiling is protected just like the first.
+        // Even if it somehow does not re-arm, the backstop above still acts at the ceiling.
     }
 
     /**
@@ -819,8 +933,10 @@ class SharedViewModel : ViewModel() {
      * themselves.
      *
      * One-shot per breach so a pilot who deliberately takes back control is not fought on
-     * every frame; it re-arms once they return [MAX_RANGE_REARM_HYSTERESIS_M] inside the
-     * action point, so a second excursion is protected like the first.
+     * every frame; it re-arms once they return [MAX_RANGE_REARM_INSIDE_RADIUS_M] inside the
+     * RADIUS with the vehicle slowed, so a second excursion is protected like the first.
+     * Independently of the latch, reaching [MAX_RANGE_BACKSTOP_MARGIN_M] of the radius
+     * always re-commands the action: the fence must not be crossed.
      */
     private fun handleMaxRangeFailsafe(state: TelemetryState) {
         // Limit comes from the vehicle. No parameter, no enforcement — we must not invent a
@@ -854,18 +970,28 @@ class SharedViewModel : ViewModel() {
         // ═══ RECOVERED: re-arm the one-shot ═══
         // Before the action branch, not as an else-if: actionThreshold moves with
         // groundspeed, so a re-arm band expressed as an else-if could be shadowed.
-        if (maxRangeActionTriggered &&
-            distance < actionThreshold - MAX_RANGE_REARM_HYSTERESIS_M) {
+        //
+        // Measured from the RADIUS, not from actionThreshold, and additionally requiring the
+        // vehicle to have slowed down — see [MAX_RANGE_REARM_INSIDE_RADIUS_M]. A band hung
+        // off the speed-aware threshold moved with groundspeed and could sit outside where
+        // the pilot actually pulled back to, leaving the latch set so that the next run at
+        // the fence hit the "action already taken" branch and crossed with TTS only.
+        val rearmDistance = radius - MAX_RANGE_REARM_INSIDE_RADIUS_M
+        val stillRunning = (state.groundspeed ?: 0f).let { it.isFinite() && it > MAX_RANGE_REARM_MAX_SPEED_MPS }
+        if (maxRangeActionTriggered && distance < rearmDistance && !stillRunning) {
             maxRangeActionTriggered = false
             lastMaxRangeLimitTime = 0L
-            LogUtils.i("MaxRangeFailsafe", "Back inside range (${distance}m) — range action re-armed")
-            addNotification(
-                Notification(
-                    message = "✓ Back inside max range — protection re-armed",
-                    type = NotificationType.INFO
-                )
-            )
+            // Log only, matching the altitude ceiling — internal housekeeping, not a pilot
+            // event.
+            LogUtils.i("MaxRangeFailsafe", "Back inside range (${distance}m, below ${rearmDistance}m at ${state.groundspeed}m/s) — range action re-armed")
         }
+
+        // ═══ HARD BACKSTOP ═══
+        // True once the drone is at (or within a whisker of) the radius itself, rather than
+        // merely past the speed-aware trigger point. Neither the one-shot latch nor a
+        // competing recovery may suppress the action here: DGCA requires the fence not to be
+        // breached, and a recovery that has let the drone reach the line is not working.
+        val atBackstop = distance >= radius - MAX_RANGE_BACKSTOP_MARGIN_M
 
         if (distance >= actionThreshold) {
 
@@ -876,7 +1002,7 @@ class SharedViewModel : ViewModel() {
                 voltageCriticalActive -> "critical-battery action in progress"
                 else -> null
             }
-            if (!maxRangeActionTriggered && deferReason != null) {
+            if (!maxRangeActionTriggered && deferReason != null && !atBackstop) {
                 if (now - lastMaxRangeLimitTime >= MAX_RANGE_LIMIT_INTERVAL_MS) {
                     lastMaxRangeLimitTime = now
                     LogUtils.w("MaxRangeFailsafe", "Range ${distance}m over threshold ${actionThreshold}m but $deferReason — deferring (one-shot NOT consumed)")
@@ -885,7 +1011,13 @@ class SharedViewModel : ViewModel() {
                 return
             }
 
-            if (!maxRangeActionTriggered) {
+            // Fire on the first crossing, and fire AGAIN whenever the drone reaches the
+            // backstop despite the latch — a consumed one-shot may never be the reason a
+            // fence breach goes unactioned.
+            val backstopRefire = maxRangeActionTriggered && atBackstop &&
+                now - lastMaxRangeLimitTime >= MAX_RANGE_LIMIT_INTERVAL_MS
+
+            if (!maxRangeActionTriggered || backstopRefire) {
                 maxRangeActionTriggered = true
                 lastMaxRangeLimitTime = now
 
@@ -908,15 +1040,24 @@ class SharedViewModel : ViewModel() {
                 }
                 val announced = fenceAction?.pilotLabel ?: "RTL"
 
-                LogUtils.i("MaxRangeFailsafe", "MAX RANGE: ${distance}m >= threshold ${actionThreshold}m (FENCE_RADIUS ${radius}m, ${margin}m margin at ${state.groundspeed}m/s) — triggering $announced, mode=${state.mode}")
+                if (backstopRefire) {
+                    LogUtils.w("MaxRangeFailsafe", "MAX RANGE BACKSTOP: ${distance}m is at/over the ${radius}m limit and the one-shot was already consumed — RE-COMMANDING $announced, mode=${state.mode}")
+                } else {
+                    LogUtils.i("MaxRangeFailsafe", "MAX RANGE: ${distance}m >= threshold ${actionThreshold}m (FENCE_RADIUS ${radius}m, ${margin}m margin at ${state.groundspeed}m/s) — triggering $announced, mode=${state.mode}")
+                }
 
-                ttsManager?.speak("Approaching max range. Activating $announced.")
-                addNotification(
-                    Notification(
-                        message = "⛔ MAX RANGE: ${String.format(Locale.US, "%.0f", distance)}m of ${String.format(Locale.US, "%.0f", radius)}m limit — activating $announced",
-                        type = NotificationType.ERROR
+                ttsManager?.speak("Max range reached. Activating $announced.")
+
+                // One notification per breach, not per re-command — see the altitude
+                // ceiling's equivalent guard.
+                if (!backstopRefire) {
+                    addNotification(
+                        Notification(
+                            message = "⛔ MAX RANGE: ${String.format(Locale.US, "%.0f", distance)}m of ${String.format(Locale.US, "%.0f", radius)}m limit — activating $announced",
+                            type = NotificationType.ERROR
+                        )
                     )
-                )
+                }
                 showFailsafePopup("Max Range")
 
                 viewModelScope.launch {
@@ -936,23 +1077,23 @@ class SharedViewModel : ViewModel() {
                     }
                 }
             } else if (now - lastMaxRangeLimitTime >= MAX_RANGE_LIMIT_INTERVAL_MS) {
+                // TTS only. Reached when the latch is set AND the drone is still inside the
+                // backstop — past the speed-aware trigger but clear of the radius, the one
+                // case where letting the pilot fly is right. At the backstop, backstopRefire
+                // above takes the action branch instead.
                 lastMaxRangeLimitTime = now
-                LogUtils.i("MaxRangeFailsafe", "Still beyond max range: ${distance}m of ${radius}m (action already taken)")
+                LogUtils.i("MaxRangeFailsafe", "Past range trigger: ${distance}m of ${radius}m (action already taken; inside backstop)")
                 ttsManager?.speak("Beyond max range. ${distance.toInt()} meters.")
             }
         }
-        // Approaching the trigger point — alert only, so the pilot can turn back themselves.
+        // Approaching the trigger point — TTS + log only, so the pilot can turn back
+        // themselves. No notification, for the same reason as the altitude approach warning
+        // above: a repeating "getting close" entry every 4s crowds out the breach records.
         else if (distance >= warnThreshold) {
             if (now - lastMaxRangeWarnTime >= MAX_RANGE_WARN_INTERVAL_MS) {
                 lastMaxRangeWarnTime = now
                 LogUtils.i("MaxRangeFailsafe", "Approaching max range: ${distance}m of ${radius}m (action at ${actionThreshold}m)")
                 ttsManager?.speak("Approaching max range. ${distance.toInt()} meters.")
-                addNotification(
-                    Notification(
-                        message = "⚠️ Approaching max range: ${String.format(Locale.US, "%.0f", distance)}m of ${String.format(Locale.US, "%.0f", radius)}m",
-                        type = NotificationType.WARNING
-                    )
-                )
             }
         }
     }
@@ -968,8 +1109,11 @@ class SharedViewModel : ViewModel() {
      *     margin = v · (age + [MAX_RANGE_LATENCY_S]) + v² / (2 · [MAX_RANGE_DECEL_MPS2])
      *
      * clamped to [[MAX_RANGE_MIN_ACTION_MARGIN_M], [MAX_RANGE_MAX_ACTION_MARGIN_M]]. At 8 m/s
-     * that is 8 + 12.8 ≈ 21m, so on a 1000m fence RTL fires around 979m and the real-world
-     * overshoot lands inside the limit. Hovering falls back to the 10m floor.
+     * that is 8·1.4 + 64/4 = 11.2 + 16 ≈ 27m, so on a 1000m fence RTL fires around 973m.
+     * The earlier 1.0 s / 2.5 m/s² figures gave ~21m and the drone still crossed the line by
+     * a metre or two at that speed — the FC's mode-entry delay and the real achieved
+     * deceleration of a loaded airframe were both optimistic. Hovering falls back to the
+     * 12m floor.
      *
      * positionAgeMs adds the distance already flown since the fix being judged was measured,
      * so the margin grows when the link degrades rather than silently under-budgeting.
@@ -994,9 +1138,14 @@ class SharedViewModel : ViewModel() {
      *     margin = v · (age + [ALTITUDE_LATENCY_S]) + v² / (2 · [ALTITUDE_DECEL_MPS2])
      *
      * clamped to [[ALTITUDE_MIN_ACTION_MARGIN_M], [ALTITUDE_MAX_ACTION_MARGIN_M]]. At 2 m/s with
-     * a fresh fix that is 2·0.5 + 0.8 = 1.8 m → the 4 m floor, i.e. unchanged from before. At
-     * 5 m/s with a 0.8 s-stale fix it is 5·1.3 + 5 = 11.5 m, which is what actually prevents the
-     * overshoot. Only a positive climb rate counts: descending toward the ceiling is not a risk.
+     * a fresh fix that is 2·0.8 + 0.8 = 2.4 m → the 6 m floor. At 5 m/s with a 0.8 s-stale fix
+     * it is 5·1.6 + 5 = 13 m, which is what actually prevents the overshoot. Only a positive
+     * climb rate counts: descending toward the ceiling is not a risk.
+     *
+     * Note this margin is only the FIRST line of defence. It can be defeated by a climb that
+     * accelerates after the reading being judged, which is why the ceiling also carries a
+     * hard backstop at [ALTITUDE_BACKSTOP_MARGIN_M] that re-commands the action regardless
+     * of the one-shot latch.
      */
     private fun altitudeActionMargin(climbRate: Float?, positionAgeMs: Long): Float {
         val v = climbRate?.takeIf { it.isFinite() && it > 0f } ?: 0f
@@ -1058,7 +1207,9 @@ class SharedViewModel : ViewModel() {
         lastUploadedCount = 0
         lastUploadedMissionItems = emptyList()
         // Geofence is intentionally NOT cleared here
-        // Signal GcsMap to clear the local drone path trail
+        // Drop the flown trail. The trigger is kept for any observer still keyed to it; the
+        // trail itself now lives here, so it must be cleared here too.
+        clearDronePath()
         _clearDronePathTrigger.value++
     }
 
@@ -1996,6 +2147,48 @@ class SharedViewModel : ViewModel() {
             lastMissionElapsedSec = null
         )
         LogUtils.i("SharedVM", "Mission completed state reset")
+    }
+
+    /**
+     * The finished mission was wiped off the flight controller after disarm (see the disarm
+     * branch in [TelemetryRepository]).
+     *
+     * Clears the GCS's own copy too, so the map does not keep drawing a mission the vehicle
+     * no longer holds — leaving the lines up would imply a switch to AUTO would still fly
+     * them, which is the exact confusion this whole change exists to remove.
+     *
+     * The geofence is deliberately preserved ([clearMapLinesOnly], not
+     * [clearMissionFromMap]): the fence is a safety limit tied to the SITE, not to the
+     * mission, and the pilot is very likely to fly again from the same spot.
+     */
+    fun onMissionClearedFromFcAfterCompletion() {
+        LogUtils.i("SharedVM", "🧹 FC mission cleared after completion — clearing map lines (geofence preserved)")
+        clearMapLinesOnly()
+        addNotification(
+            Notification(
+                message = "Mission complete — cleared from the drone",
+                type = NotificationType.SUCCESS
+            )
+        )
+    }
+
+    /**
+     * The post-disarm mission clear did NOT succeed, so the completed mission is still
+     * loaded on the flight controller.
+     *
+     * This is told to the pilot rather than swallowed: they would otherwise reasonably
+     * assume the mission is gone, which is the belief that makes a stray AUTO switch
+     * dangerous. The map lines are left in place on purpose — they are now an accurate
+     * picture of what the FC still holds.
+     */
+    fun onMissionClearFromFcFailed() {
+        LogUtils.w("SharedVM", "⚠️ Completed mission could NOT be cleared from the FC — still loaded")
+        addNotification(
+            Notification(
+                message = "⚠️ Could not clear the mission from the drone — it is still loaded. Avoid switching to AUTO.",
+                type = NotificationType.WARNING
+            )
+        )
     }
 
     // --- Calibration helpers ---
@@ -2937,6 +3130,51 @@ class SharedViewModel : ViewModel() {
     // Trigger to clear the drone's drawn flight path in GcsMap (incremented each time clear is requested)
     private val _clearDronePathTrigger = MutableStateFlow(0)
     val clearDronePathTrigger: StateFlow<Int> = _clearDronePathTrigger.asStateFlow()
+
+    /**
+     * The flown path with its per-point spray status — the source of the red/green trail.
+     *
+     * Held HERE rather than in a `remember` inside GcsMap because composable-local state dies
+     * whenever the map leaves composition. GcsMap is instantiated separately by MainPage and
+     * PlanScreen, so any navigation between them — which is exactly what a pause/resume
+     * involves — destroyed the whole trail and took every green sprayed line with it. The
+     * pilot then lost the record of what had already been covered, which is the one thing
+     * they need when deciding where to resume.
+     *
+     * The ViewModel outlives that navigation, so the trail now survives it.
+     */
+    private val _dronePathPoints = MutableStateFlow<List<DronePathPoint>>(emptyList())
+    val dronePathPoints: StateFlow<List<DronePathPoint>> = _dronePathPoints.asStateFlow()
+
+    /**
+     * Cap on retained trail points. The trail is drawn as polyline segments, so an unbounded
+     * list would grow for the whole flight; 2000 points at the ~1Hz that position+spray
+     * changes are recorded covers a long mission with room to spare.
+     */
+    private val MAX_DRONE_PATH_POINTS = 2000
+
+    /**
+     * Append one position sample to the trail, if it differs from the last one.
+     *
+     * Called from GcsMap on each position / spray-status change. A point is recorded when the
+     * position moved OR the spray status flipped — the latter is what creates the boundary
+     * between a red segment and a green one, so it must never be skipped.
+     */
+    fun recordDronePathPoint(position: LatLng, isSpraying: Boolean) {
+        val current = _dronePathPoints.value
+        val last = current.lastOrNull()
+        if (last != null && last.position == position && last.isSpraying == isSpraying) return
+
+        val appended = current + DronePathPoint(position, isSpraying)
+        _dronePathPoints.value =
+            if (appended.size > MAX_DRONE_PATH_POINTS) appended.takeLast(MAX_DRONE_PATH_POINTS)
+            else appended
+    }
+
+    /** Drop the whole trail. Only for an explicit "clear map" — never on resume. */
+    fun clearDronePath() {
+        _dronePathPoints.value = emptyList()
+    }
 
     // Store home position for geofence calculation
     private val _homePosition = MutableStateFlow<LatLng?>(null)

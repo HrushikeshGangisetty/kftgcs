@@ -341,6 +341,33 @@ class MavlinkTelemetryRepository(
     // warn the pilot instead of falsely declaring empty (and crucially do NOT change flight mode).
     // Reset to false on every IDLE→PRIMING transition (start of a new spray pass).
     @Volatile private var hasSeenHealthyFlow = false
+
+    /**
+     * Same proof, but scoped to the whole SPRAY SESSION rather than one pass.
+     *
+     * [hasSeenHealthyFlow] resets on every IDLE→PRIMING transition, and a spray mission
+     * embeds DO_SPRAYER(0) at each line-end / DO_SPRAYER(1) at each line-start — so the
+     * sprayer cycles IDLE→PRIMING at EVERY line. That made the per-pass latch ask for fresh
+     * proof of flow on each line, which the tank cannot give once it has run dry:
+     *
+     *   line N   : healthy flow → hasSeenHealthyFlow = true → a dry tank here latches EMPTY ✓
+     *   tank empties at the end of line N
+     *   line N+1 : PRIMING resets the latch → flow is 0 from the very first tick →
+     *              hasSeenHealthyFlow stays false → DEBOUNCING_EMPTY takes the
+     *              "sensor/config fault" branch → a warning, and NO tank-empty action ✗
+     *
+     * The tank empties once; the proof of a working sensor does not need re-earning every
+     * line. This latch remembers that the sprayer HAS produced real flow at some point in
+     * this spray session, so a later dry line is correctly read as an empty tank rather than
+     * a broken sensor. It is deliberately NOT reset in [transitionTo] — only when the spray
+     * session genuinely ends (leaving AUTO / mission end / disconnect), via
+     * [resetSprayFlowEvidence].
+     *
+     * The false-positive protection this was guarding is preserved: a truly dead sensor
+     * never sets this flag either, so it still reports a fault rather than an empty tank.
+     */
+    @Volatile private var hasSeenHealthyFlowThisSession = false
+
     // One-shot guards so the field warnings fire once per spray pass, not every BATT2 tick.
     private var sensorFaultWarned = false       // "no flow ever seen" warning (reset each PRIMING)
     private var configInvalidWarned = false     // "monitoring inactive" warning (reset when sprayer off)
@@ -407,6 +434,27 @@ class MavlinkTelemetryRepository(
         lastPositiveFlowTime = null
         // Sprayer is being turned off → release the tank-empty state machine to IDLE.
         transitionTo(SprayerState.IDLE)
+        // NOTE: hasSeenHealthyFlowThisSession is deliberately NOT cleared here. This runs at
+        // every mission-end detection and every AUTO exit — including the ones that happen
+        // between spray lines — which is exactly the churn the session latch exists to
+        // survive. It is cleared by resetSprayFlowEvidence() when the spray session truly
+        // ends (leaving AUTO, disarm, disconnect).
+    }
+
+    /**
+     * Forget that the sprayer ever produced healthy flow.
+     *
+     * Ends the spray session for [hasSeenHealthyFlowThisSession], so the next session must
+     * earn its own proof before a dry tank can latch TANK_EMPTY. Without this the latch would
+     * persist across flights and a flow sensor that failed between flights would be reported
+     * as an empty tank instead of a sensor fault — the false positive the original per-pass
+     * latch was written to prevent.
+     */
+    private fun resetSprayFlowEvidence(reason: String) {
+        if (hasSeenHealthyFlowThisSession) {
+            LogUtils.i("TankEmpty", "🔄 Spray session ended ($reason) — flow evidence cleared, next session must re-prove the sensor")
+        }
+        hasSeenHealthyFlowThisSession = false
     }
 
     /**
@@ -680,6 +728,13 @@ class MavlinkTelemetryRepository(
             // which is what made the fence overshoot look like a Lua bug rather than a
             // link-budget one.
             setMessageRate(132u, 8f) // DISTANCE_SENSOR - 10→8Hz, ~4Hz per instance
+
+            // OBSTACLE_DISTANCE - DIAGNOSTIC ONLY for now (see the ObstacleDistance collector's
+            // comment above): not multiplexed like DISTANCE_SENSOR, PRX1 is a single logical
+            // instance, so no round-robin doubling is needed. 2Hz is plenty for a live-capture
+            // comparison against RNGFND2 without spending link budget on a stream nothing
+            // consumes yet; raise this once real per-sector UI is built.
+            setMessageRate(330u, 2f) // OBSTACLE_DISTANCE - diagnostic only
 
             // Request AUTOPILOT_VERSION for drone identification
             val autopilotVersionCmd = CommandLong(
@@ -1152,8 +1207,12 @@ class MavlinkTelemetryRepository(
         //   orientation 25 (PITCH_270, downward-facing) -> TerrainData   (distance to ground)
         //   orientation  0 (NONE, forward-facing)       -> ProximityData (forward obstacle distance)
         // Raw distances are centimetres; convert to metres. signalQuality raw 0 means unknown.
-        // NOTE: OBSTACLE_DISTANCE (330) is intentionally NOT handled — the forward obstacle hardware
-        // is a single rangefinder that reports via DISTANCE_SENSOR, not the 360° sector scan.
+        // NOTE: OBSTACLE_DISTANCE (330) UI is intentionally NOT built yet — this vehicle's PRX1 is
+        // configured PRX1_TYPE=4 ("RangeFinder"), which ArduPilot synthesizes FROM RNGFND2's single
+        // forward point distance by projecting it across a narrow sector arc, rather than a genuinely
+        // scanning radar. See the diagnostic-only collector below, which logs 330's raw sector array
+        // alongside this stream's forward reading so that assumption can be confirmed from a live
+        // capture before any per-sector UI is built.
         scope.launch {
             mavFrame
                 .filter { state.value.fcuDetected && it.systemId == fcuSystemId }
@@ -1183,9 +1242,52 @@ class MavlinkTelemetryRepository(
                                 signalQuality = quality
                             )
                             _state.update { it.copy(proximityData = proximity) }
+                            // Logged under the same "ObstacleDistanceDbg" tag as the OBSTACLE_DISTANCE
+                            // (330) collector above so the two streams can be diffed directly in
+                            // logcat while confirming whether PRX1 (PRX1_TYPE=4) is genuinely
+                            // synthesized from this RNGFND2 reading.
+                            LogUtils.d(
+                                "ObstacleDistanceDbg",
+                                "DISTANCE_SENSOR(fwd/RNGFND2) currentDistance=${currentM}m " +
+                                    "min=${minM}m max=${maxM}m quality=$quality"
+                            )
                         }
                         else -> { /* other orientations are not used by the obstacle/terrain UI */ }
                     }
+                }
+        }
+
+        // OBSTACLE_DISTANCE (330) - DIAGNOSTIC ONLY, not yet wired into any UI or TelemetryState
+        // field. PRX1_TYPE=4 on this vehicle means ArduPilot builds this message FROM RNGFND2 (a
+        // single forward point sensor), not from genuine per-sector radar returns — so before
+        // building a multi-sector wedge UI we need to confirm from a live capture whether the
+        // `distances[]` array actually varies sector-to-sector or is just RNGFND2's one distance
+        // projected across a narrow arc (the expected outcome for PRX1_TYPE=4). Logs the full raw
+        // array plus increment/min/max so it can be diffed against DISTANCE_SENSOR's forward
+        // (orientation NONE) reading logged just above. Remove/replace once that's confirmed.
+        scope.launch {
+            mavFrame
+                .filter { state.value.fcuDetected && it.systemId == fcuSystemId }
+                .map { it.message }
+                .filterIsInstance<ObstacleDistance>()
+                .collect { od ->
+                    // UINT16_MAX (65535) = unknown/unused slot; max_distance+1 = "no obstacle" at
+                    // that sector. Only log populated slots so the interesting values aren't buried
+                    // in 72 mostly-empty entries.
+                    val populated = od.distances
+                        .mapIndexedNotNull { i, d ->
+                            val raw = d.toInt()
+                            if (raw == 0xFFFF) null else i to raw
+                        }
+                    LogUtils.d(
+                        "ObstacleDistanceDbg",
+                        "OBSTACLE_DISTANCE sensorType=${od.sensorType.entry} " +
+                            "increment=${od.increment}deg incrementF=${od.incrementF}deg " +
+                            "angleOffset=${od.angleOffset}deg frame=${od.frame.entry} " +
+                            "min=${od.minDistance}cm max=${od.maxDistance}cm " +
+                            "populatedSectors=${populated.size}/${od.distances.size} " +
+                            "values(idx:cm)=$populated"
+                    )
                 }
         }
 
@@ -1649,6 +1751,13 @@ class MavlinkTelemetryRepository(
                                     hasSeenHealthyFlow = true
                                     LogUtils.i("TankEmpty", "💧 Healthy flow observed (${flowRateLiterPerMin} L/min) — tank-empty latch now armed")
                                 }
+                                // Session-scoped proof: survives the IDLE→PRIMING cycle that
+                                // happens at every line boundary, so a tank that empties
+                                // mid-mission still latches EMPTY on the following line.
+                                if (flowIsHealthy && !hasSeenHealthyFlowThisSession) {
+                                    hasSeenHealthyFlowThisSession = true
+                                    LogUtils.i("TankEmpty", "💧 First healthy flow this spray session — sensor proven, later dry lines will latch TANK_EMPTY")
+                                }
                                 when {
                                     !sprayerIsOn -> transitionTo(SprayerState.IDLE)
                                     // Flow fell to ~0 while spraying → start the empty debounce.
@@ -1670,9 +1779,15 @@ class MavlinkTelemetryRepository(
                                     }
                                     // Low flow persisted past the debounce window.
                                     timeInState >= DEBOUNCE_DURATION_MS -> {
-                                        if (hasSeenHealthyFlow) {
-                                            // We saw real flow earlier this pass, then it stopped → tank really is empty.
-                                            LogUtils.e("TankEmpty", "🚨 Low flow persisted ${timeInState}ms after healthy flow (mode=$currentMode) → TANK_EMPTY_LOCKED")
+                                        // Either proof works. The per-pass latch covers a tank
+                                        // that empties DURING this line; the session latch covers
+                                        // one that emptied on a previous line and left this line
+                                        // dry from its first tick — the case the per-pass latch
+                                        // alone misread as a sensor fault.
+                                        if (hasSeenHealthyFlow || hasSeenHealthyFlowThisSession) {
+                                            // We saw real flow earlier, then it stopped → tank really is empty.
+                                            val proof = if (hasSeenHealthyFlow) "this pass" else "earlier this session"
+                                            LogUtils.e("TankEmpty", "🚨 Low flow persisted ${timeInState}ms after healthy flow ($proof, mode=$currentMode) → TANK_EMPTY_LOCKED")
                                             transitionTo(SprayerState.TANK_EMPTY_LOCKED)
                                         } else {
                                             // Flow was NEVER healthy this pass → this is a sensor/config fault,
@@ -1710,6 +1825,11 @@ class MavlinkTelemetryRepository(
                             autoModeSprayDetected = false
                             lastPositiveFlowTime = null
                             missionEndPhaseActive = false
+                            // The spray session is genuinely over here (the drone has left
+                            // AUTO), as opposed to the between-lines sprayer cycling that
+                            // resetAutoModeSprayDetection() handles — so the flow evidence
+                            // goes with it.
+                            resetSprayFlowEvidence("left AUTO mode")
                         }
                     }
                     // Level sensor (BATT3 - id=2)
@@ -2105,6 +2225,46 @@ class MavlinkTelemetryRepository(
                                 // No meaningful mission or already handled - just reset state
                                 _state.update { it.copy(isMissionActive = false, missionElapsedSec = null) }
                             }
+
+                            // ═══ WIPE THE FINISHED MISSION OFF THE FC ═══
+                            // A completed mission stays resident in the flight controller, so
+                            // a pilot who later flicks the mode switch to AUTO — by mistake,
+                            // or just to reposition — re-flies the whole thing from item 1.
+                            // The aircraft is on the ground and disarmed here, which is the
+                            // only point where clearing is unambiguously safe: at AUTO→RTL
+                            // (the other "mission completed" trigger) the drone is still
+                            // airborne and still flying the mission's own final RTL/LAND item,
+                            // and pulling the mission out from under it there would strand it.
+                            //
+                            // Guarded on `isPaused`: a paused mission is one the pilot
+                            // intends to resume, and clearing it would destroy the resume
+                            // target. Also requires a mission to have actually run this
+                            // flight (elapsed > 0), so a disarm after a manual hop leaves an
+                            // uploaded-but-unflown mission alone.
+                            val missionActuallyFlown = (lastElapsed ?: 0L) > 0L
+                            if (missionActuallyFlown && !isPaused) {
+                                AppScope.launch {
+                                    try {
+                                        val cleared = clearMissionFromFC()
+                                        if (cleared) {
+                                            LogUtils.i("MissionClear", "🧹 Completed mission cleared from FC after disarm — a stray switch to AUTO can no longer re-fly it")
+                                            sharedViewModel.onMissionClearedFromFcAfterCompletion()
+                                        } else {
+                                            // Not fatal: the mission is still on the FC, so say
+                                            // so rather than letting the pilot assume it is gone.
+                                            LogUtils.w("MissionClear", "⚠️ Could not clear the completed mission from the FC (no ACK) — it is STILL loaded")
+                                            sharedViewModel.onMissionClearFromFcFailed()
+                                        }
+                                    } catch (e: Exception) {
+                                        LogUtils.e("MissionClear", "❌ Error clearing completed mission from FC", e)
+                                        sharedViewModel.onMissionClearFromFcFailed()
+                                    }
+                                }
+                            }
+
+                            // The flight is over, so the next one must re-prove the flow
+                            // sensor before a dry tank counts as empty.
+                            resetSprayFlowEvidence("disarmed")
 
                             // Also disable spray when drone is disarmed for safety
                             sharedViewModel.disableSprayOnModeChange()

@@ -35,6 +35,7 @@ import androidx.compose.ui.viewinterop.AndroidView
 import androidx.compose.ui.zIndex
 import com.example.kftgcs.telemetry.TelemetryState
 import com.example.kftgcs.videotracking.*
+import com.example.kftgcs.videotracking.source.VideoSource
 import com.example.kftgcs.videotracking.ui.GimbalControlOverlay
 import com.example.kftgcs.videotracking.ui.VideoStreamPlayer
 import com.example.kftgcs.videotracking.ui.VideoStreamSettings
@@ -79,11 +80,18 @@ fun DroneCameraFeedOverlay(
     var showStreamSettings by remember { mutableStateOf(false) }
     var showGimbalControls by remember { mutableStateOf(false) }
     var activeStreamUrl by remember { mutableStateOf(videoStreamUrl) }
+    // Skydroid T12 (USB UVC) source, when the user has picked one in stream
+    // settings. Takes priority over any network URL once selected — picking a
+    // USB device is an explicit action, unlike the MAVLink auto-detected stream.
+    var activeUsbDevice by remember { mutableStateOf<android.hardware.usb.UsbDevice?>(null) }
 
     // Use tracking state stream URL if available, or the passed-in URL
     val effectiveStreamUrl = activeStreamUrl
         ?: trackingState.selectedStreamUri
         ?: videoStreamUrl
+
+    val effectiveVideoSource: VideoSource? = activeUsbDevice?.let { VideoSource.Usb(it) }
+        ?: VideoSource.ofUriOrNull(effectiveStreamUrl)
 
     // Load saved custom URL from preferences
     val context = LocalContext.current
@@ -183,9 +191,9 @@ fun DroneCameraFeedOverlay(
                     // depend on the MAVLink telemetry link, which usually arrives
                     // over USB serial or Bluetooth. Gating video on telemetry meant
                     // the feed never started unless the FC happened to be connected.
-                    if (effectiveStreamUrl != null) {
+                    if (effectiveVideoSource != null) {
                         VideoStreamPlayer(
-                            streamUri = effectiveStreamUrl,
+                            source = effectiveVideoSource,
                             modifier = Modifier.fillMaxSize(),
                             isConnected = true
                         )
@@ -205,7 +213,7 @@ fun DroneCameraFeedOverlay(
                     // ═══════════════════════════════════════════════════════
                     // TRACKING OVERLAY: touch interaction + visual feedback
                     // ═══════════════════════════════════════════════════════
-                    if (isExpanded && isConnected && (effectiveStreamUrl != null || videoStreamUrl != null)) {
+                    if (isExpanded && isConnected && (effectiveVideoSource != null || videoStreamUrl != null)) {
                         VideoTrackingOverlay(
                             trackingState = trackingState,
                             onTap = { x, y ->
@@ -274,7 +282,7 @@ fun DroneCameraFeedOverlay(
                                     .background(
                                         when {
                                             trackingState.isTrackingActive -> Color(0xFF4CAF50) // Green when tracking
-                                            isConnected && effectiveStreamUrl != null -> Color.Red // Red when streaming
+                                            isConnected && effectiveVideoSource != null -> Color.Red // Red when streaming
                                             else -> Color.Gray
                                         }
                                     )
@@ -282,7 +290,7 @@ fun DroneCameraFeedOverlay(
                             Text(
                                 text = when {
                                     trackingState.isTrackingActive -> "TRACKING"
-                                    isConnected && effectiveStreamUrl != null -> "LIVE"
+                                    isConnected && effectiveVideoSource != null -> "LIVE"
                                     else -> "CAMERA"
                                 },
                                 color = Color.White,
@@ -379,8 +387,14 @@ fun DroneCameraFeedOverlay(
                             VideoStreamSettings(
                                 detectedStreams = trackingState.videoStreams,
                                 onStreamSelected = { url ->
+                                    activeUsbDevice = null
                                     activeStreamUrl = url
                                     onStreamSelected?.invoke(url)
+                                    showStreamSettings = false
+                                },
+                                onUsbDeviceSelected = { device ->
+                                    activeStreamUrl = null
+                                    activeUsbDevice = device
                                     showStreamSettings = false
                                 },
                                 onDismiss = { showStreamSettings = false }

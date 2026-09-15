@@ -219,4 +219,10 @@ dependencies {
     implementation(libs.androidx.media3.exoplayer)
     implementation(libs.androidx.media3.exoplayer.rtsp)
     implementation(libs.androidx.media3.ui)
+
+    // UVC (USB Video Class) capture — Skydroid T12 controller video feed over USB OTG.
+    // The T12's Skydroid FPV app only exposes its video as a floating overlay window
+    // (no SDK/intent/shared-Surface API), so KFT talks to the USB video endpoint
+    // directly as a standard UVC webcam rather than depending on that app.
+    implementation(libs.uvccamera)
 }

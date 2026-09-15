@@ -11,6 +11,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import com.example.kftgcs.R
 import com.example.kftgcs.location.rememberPhoneLocation
+import com.example.kftgcs.telemetry.DronePathPoint
 import com.example.kftgcs.telemetry.TelemetryState
 import com.example.kftgcs.telemetry.SharedViewModel
 import com.google.android.gms.maps.CameraUpdateFactory
@@ -536,6 +537,11 @@ fun GcsMap(
     manualResumePointUploaded: LatLng? = null,
     // Trigger to clear the local drone path trail (increment to clear)
     clearDronePathTrigger: Int = 0,
+    // The flown trail, hoisted into SharedViewModel so it survives this composable leaving
+    // composition (navigating between MainPage and PlanScreen, e.g. during a pause/resume).
+    // Defaults keep the map usable in previews and in any caller that doesn't track a trail.
+    dronePathPoints: List<DronePathPoint> = emptyList(),
+    onDronePathPoint: (LatLng, Boolean) -> Unit = { _, _ -> },
     // User-customizable drone path line color (non-spraying segments)
     dronePathColor: Color = Color.Red
 ) {
@@ -574,21 +580,14 @@ fun GcsMap(
         }
     }
 
-    // Data class to track position with spray status
-    data class DronePathPoint(
-        val position: LatLng,
-        val isSpraying: Boolean
-    )
-
-    // Track drone path with spray status
-    val visitedPathPoints = remember { mutableStateListOf<DronePathPoint>() }
-
-    // Clear the drone path trail when clearDronePathTrigger is incremented
-    LaunchedEffect(clearDronePathTrigger) {
-        if (clearDronePathTrigger > 0) {
-            visitedPathPoints.clear()
-        }
-    }
+    // The trail itself is owned by SharedViewModel (see [dronePathPoints]); this composable
+    // only reports new samples and draws what it is given. It deliberately keeps no local
+    // copy — that local copy was the bug: it died with the composable on navigation, so a
+    // pause/resume erased every green sprayed line already flown.
+    //
+    // Clearing is likewise the ViewModel's job, driven by clearDronePathTrigger at the call
+    // site, so an explicit "Clear Map" still empties the trail.
+    val visitedPathPoints = dronePathPoints
 
     // Load quadcopter drawable with directional arrow indicator
     val droneIcon = remember {
@@ -626,22 +625,11 @@ fun GcsMap(
             // This ensures green spray lines during AUTO missions even with brief flow sensor gaps
             val isSpraying = telemetryState.sprayTelemetry.sprayActive
 
-            val newPoint = DronePathPoint(pos, isSpraying)
-
-            // Add new point if position changed or spray status changed
-            if (visitedPathPoints.isEmpty() ||
-                visitedPathPoints.last().position != pos ||
-                visitedPathPoints.last().isSpraying != isSpraying) {
-
-
-                visitedPathPoints.add(newPoint)
-
-                val maxLen = 2000
-                if (visitedPathPoints.size > maxLen) {
-                    val removeCount = visitedPathPoints.size - maxLen
-                    repeat(removeCount) { visitedPathPoints.removeAt(0) }
-                }
-            }
+            // Hand the sample to the ViewModel, which de-duplicates against the last point
+            // and enforces the length cap. Recording a point when the SPRAY STATUS flips
+            // (not just when the position moves) is what creates the boundary between a red
+            // segment and a green one.
+            onDronePathPoint(pos, isSpraying)
         }
     }
 

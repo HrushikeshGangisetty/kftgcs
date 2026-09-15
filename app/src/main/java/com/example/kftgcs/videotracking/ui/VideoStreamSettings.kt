@@ -1,6 +1,8 @@
 package com.example.kftgcs.videotracking.ui
 
 import android.content.Context
+import android.hardware.usb.UsbDevice
+import android.hardware.usb.UsbManager
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.FlowRow
@@ -21,6 +23,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.kftgcs.videotracking.VideoStreamInfo
 import com.example.kftgcs.videotracking.VideoStreamType
+import com.example.kftgcs.videotracking.source.UsbUvcDeviceManager
 
 /**
  * Video stream settings panel — allows the user to configure
@@ -34,12 +37,21 @@ fun VideoStreamSettings(
     detectedStreams: List<VideoStreamInfo>,
     onStreamSelected: (String) -> Unit,
     onDismiss: () -> Unit,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    onUsbDeviceSelected: ((UsbDevice) -> Unit)? = null
 ) {
     val context = LocalContext.current
     val prefs = remember { context.getSharedPreferences("video_stream_prefs", Context.MODE_PRIVATE) }
     var customUrl by remember { mutableStateOf(prefs.getString("custom_stream_url", "") ?: "") }
     var selectedTab by remember { mutableStateOf(if (detectedStreams.isNotEmpty()) 0 else 1) }
+
+    // Skydroid T12 (USB UVC) devices currently plugged in. Re-scanned each time
+    // the settings sheet opens rather than kept live — USB attach/detach while
+    // this sheet is open is rare enough not to warrant a BroadcastReceiver here.
+    val usbManager = remember {
+        context.getSystemService(Context.USB_SERVICE) as UsbManager
+    }
+    val usbDevices = remember { UsbUvcDeviceManager.findAttachedUvcDevices(usbManager) }
 
     // On a phone in landscape (the usual GCS orientation) the screen is only
     // ~360dp tall, so the card must be capped and its body scrollable — otherwise
@@ -84,7 +96,7 @@ fun VideoStreamSettings(
 
             Spacer(modifier = Modifier.height(12.dp))
 
-            // Tabs: Detected / Custom
+            // Tabs: Detected / Custom / T12 (USB)
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(8.dp)
@@ -109,6 +121,18 @@ fun VideoStreamSettings(
                         labelColor = Color.Gray
                     )
                 )
+                if (onUsbDeviceSelected != null) {
+                    FilterChip(
+                        selected = selectedTab == 2,
+                        onClick = { selectedTab = 2 },
+                        label = { Text("T12 (USB) (${usbDevices.size})", fontSize = 11.sp) },
+                        colors = FilterChipDefaults.filterChipColors(
+                            selectedContainerColor = Color(0xFFFF9800).copy(alpha = 0.3f),
+                            selectedLabelColor = Color.White,
+                            labelColor = Color.Gray
+                        )
+                    )
+                }
             }
 
             Spacer(modifier = Modifier.height(if (isCompact) 8.dp else 12.dp))
@@ -190,6 +214,33 @@ fun VideoStreamSettings(
                         Text(
                             text = "MK15 + SIYI camera: connect the tablet to the MK15 " +
                                 "Wi-Fi (or USB tether), then use SIYI Main.",
+                            color = Color.Gray.copy(alpha = 0.7f),
+                            fontSize = 9.sp
+                        )
+                    }
+
+                    2 -> {
+                        // Skydroid T12 — USB UVC device picker
+                        if (usbDevices.isEmpty()) {
+                            Text(
+                                text = "No T12 detected on USB.\nPlug in the T12 via USB-OTG and " +
+                                    "grant USB permission when prompted.",
+                                color = Color.Gray,
+                                fontSize = 11.sp
+                            )
+                        } else {
+                            usbDevices.forEach { device ->
+                                UsbDeviceCard(
+                                    device = device,
+                                    onSelect = { onUsbDeviceSelected?.invoke(device) }
+                                )
+                                Spacer(modifier = Modifier.height(6.dp))
+                            }
+                        }
+                        Spacer(modifier = Modifier.height(6.dp))
+                        Text(
+                            text = "T12 video is read directly from the USB port as a UVC " +
+                                "camera — the Skydroid FPV app does not need to be running.",
                             color = Color.Gray.copy(alpha = 0.7f),
                             fontSize = 9.sp
                         )
@@ -283,6 +334,53 @@ private fun DetectedStreamCard(
                 imageVector = Icons.Default.PlayCircleOutline,
                 contentDescription = "Connect",
                 tint = Color(0xFF4CAF50),
+                modifier = Modifier.size(24.dp)
+            )
+        }
+    }
+}
+
+@Composable
+private fun UsbDeviceCard(
+    device: UsbDevice,
+    onSelect: () -> Unit
+) {
+    Card(
+        onClick = onSelect,
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(8.dp),
+        colors = CardDefaults.cardColors(containerColor = Color.White.copy(alpha = 0.08f))
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(10.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            Icon(
+                imageVector = Icons.Default.Usb,
+                contentDescription = null,
+                tint = Color(0xFFFF9800),
+                modifier = Modifier.size(20.dp)
+            )
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = device.productName ?: "USB Video Device",
+                    color = Color.White,
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.Medium
+                )
+                Text(
+                    text = "VID ${device.vendorId} • PID ${device.productId} • ${device.deviceName}",
+                    color = Color.Gray,
+                    fontSize = 9.sp
+                )
+            }
+            Icon(
+                imageVector = Icons.Default.PlayCircleOutline,
+                contentDescription = "Connect",
+                tint = Color(0xFFFF9800),
                 modifier = Modifier.size(24.dp)
             )
         }

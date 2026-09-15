@@ -21,4 +21,15 @@
     <usb-device vendor-id="9900" />
     <!-- Hex / ProfiCNC Cube (0x2DAE) -->
     <usb-device vendor-id="11694" />
+
+    <!--
+        Skydroid T12 video (USB Video Class / UVC). The T12's actual USB
+        vendor/product ID has not been confirmed against hardware, so this
+        filters by USB interface class instead (14 = UsbConstants.USB_CLASS_VIDEO,
+        matching any standard UVC device). If the T12 does not enumerate under
+        this class, it is not a plain UVC camera and this filter (and the UVC
+        capture path in videotracking/source/) will not match it — see
+        UsbUvcVideoSource's class doc for what that would mean.
+    -->
+    <usb-device class="14" />
 </resources>

@@ -1,5 +1,6 @@
 package com.example.kftgcs.videotracking.ui
 
+import android.content.Context
 import androidx.annotation.OptIn
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
@@ -30,13 +31,57 @@ import androidx.media3.exoplayer.source.MediaSource
 import androidx.media3.exoplayer.source.ProgressiveMediaSource
 import androidx.media3.datasource.DefaultDataSource
 import com.example.kftgcs.videotracking.StreamReachability
+import com.example.kftgcs.videotracking.source.VideoSource
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.withContext
 import timber.log.Timber
 
 /**
  * Video stream player composable for the drone camera feed.
+ *
+ * Source-agnostic entry point: dispatches to the network (MK15/RTSP, unchanged)
+ * or USB-UVC (Skydroid T12) rendering path based on [source]. Both paths share
+ * the same placeholder/error/PiP chrome in `DroneCameraFeedOverlay` — only how
+ * pixels get onto the surface differs.
+ */
+@OptIn(UnstableApi::class)
+@Composable
+fun VideoStreamPlayer(
+    source: VideoSource?,
+    modifier: Modifier = Modifier,
+    isConnected: Boolean = false,
+    onPlayerReady: (() -> Unit)? = null,
+    onError: ((String) -> Unit)? = null
+) {
+    when (source) {
+        is VideoSource.Usb -> UsbUvcStreamPlayer(
+            device = source.device,
+            modifier = modifier,
+            isConnected = isConnected,
+            onPlayerReady = onPlayerReady,
+            onError = onError
+        )
+        is VideoSource.Network -> VideoStreamPlayer(
+            streamUri = source.uri,
+            modifier = modifier,
+            isConnected = isConnected,
+            onPlayerReady = onPlayerReady,
+            onError = onError
+        )
+        null -> VideoStreamPlayer(
+            streamUri = null,
+            modifier = modifier,
+            isConnected = isConnected,
+            onPlayerReady = onPlayerReady,
+            onError = onError
+        )
+    }
+}
+
+/**
+ * RTSP/HTTP network stream player — the original MK15 implementation, untouched.
  *
  * Backed by Media3/ExoPlayer. Android's built-in [android.media.MediaPlayer] cannot
  * play the RTSP streams served by SIYI cameras (A8 mini / ZT6) behind an MK15 air
@@ -524,4 +569,161 @@ private enum class VideoPlayerState {
     BUFFERING,
     PLAYING,
     ERROR
+}
+
+/**
+ * Skydroid T12 video player — a USB-attached UVC (USB Video Class) camera,
+ * rendered into the same [android.view.TextureView] contract as the ExoPlayer
+ * path above so it can drop into the same overlay/PiP/tracking chrome.
+ *
+ * Unlike RTSP, there is no reconnect-by-URI here: losing the USB device means
+ * losing the [android.hardware.usb.UsbDevice] handle too, so retry means asking
+ * [com.example.kftgcs.videotracking.source.UsbUvcDeviceManager] to re-enumerate,
+ * which is surfaced to the caller via [onError] rather than an internal retry
+ * loop.
+ */
+@Composable
+private fun UsbUvcStreamPlayer(
+    device: android.hardware.usb.UsbDevice,
+    modifier: Modifier = Modifier,
+    isConnected: Boolean = false,
+    onPlayerReady: (() -> Unit)? = null,
+    onError: ((String) -> Unit)? = null
+) {
+    val context = LocalContext.current
+    var playerState by remember(device) { mutableStateOf(VideoPlayerState.IDLE) }
+    var errorMessage by remember(device) { mutableStateOf<String?>(null) }
+
+    if (!isConnected) {
+        VideoPlaceholder(isConnected = false, errorMessage = null, modifier = modifier)
+        return
+    }
+
+    val usbManager = remember(context) {
+        context.getSystemService(Context.USB_SERVICE) as android.hardware.usb.UsbManager
+    }
+    val source = remember(device) {
+        com.example.kftgcs.videotracking.source.UsbUvcVideoSource(context, usbManager, device)
+    }
+    var pendingSurface by remember(device) {
+        mutableStateOf<android.graphics.SurfaceTexture?>(null)
+    }
+    var permissionGranted by remember(device) { mutableStateOf(false) }
+
+    // USB permission is asked for once per device attach, independent of the
+    // TextureView's own lifecycle (which can recreate its surface on layout
+    // changes without the device actually being re-plugged).
+    LaunchedEffect(device) {
+        playerState = VideoPlayerState.LOADING
+        errorMessage = null
+        com.example.kftgcs.videotracking.source.UsbUvcDeviceManager
+            .requestPermission(context, usbManager, device)
+            .collect { granted ->
+                if (granted) {
+                    permissionGranted = true
+                } else {
+                    errorMessage = "USB permission for the T12 was denied."
+                    playerState = VideoPlayerState.ERROR
+                    onError?.invoke(errorMessage ?: "")
+                }
+            }
+    }
+
+    // Connect only once both the permission and the rendering surface are ready
+    // — whichever arrives second triggers it.
+    LaunchedEffect(permissionGranted, pendingSurface) {
+        val surfaceTexture = pendingSurface ?: return@LaunchedEffect
+        if (!permissionGranted) return@LaunchedEffect
+        source.connect(
+            surface = android.view.Surface(surfaceTexture),
+            onReady = {
+                playerState = VideoPlayerState.PLAYING
+                errorMessage = null
+                onPlayerReady?.invoke()
+            },
+            onError = { message ->
+                Timber.e("UsbUvcStreamPlayer: %s", message)
+                errorMessage = message
+                playerState = VideoPlayerState.ERROR
+                onError?.invoke(message)
+            }
+        )
+    }
+
+    Box(
+        modifier = modifier.background(Color.Black),
+        contentAlignment = Alignment.Center
+    ) {
+        AndroidView(
+            factory = { ctx ->
+                android.view.TextureView(ctx).apply {
+                    layoutParams = android.view.ViewGroup.LayoutParams(
+                        android.view.ViewGroup.LayoutParams.MATCH_PARENT,
+                        android.view.ViewGroup.LayoutParams.MATCH_PARENT
+                    )
+                }
+            },
+            update = { view ->
+                view.surfaceTextureListener =
+                    object : android.view.TextureView.SurfaceTextureListener {
+                        override fun onSurfaceTextureAvailable(
+                            surfaceTexture: android.graphics.SurfaceTexture, width: Int, height: Int
+                        ) {
+                            pendingSurface = surfaceTexture
+                        }
+
+                        override fun onSurfaceTextureSizeChanged(
+                            surface: android.graphics.SurfaceTexture, width: Int, height: Int
+                        ) = Unit
+
+                        override fun onSurfaceTextureDestroyed(
+                            surface: android.graphics.SurfaceTexture
+                        ): Boolean {
+                            pendingSurface = null
+                            source.release()
+                            return true
+                        }
+
+                        override fun onSurfaceTextureUpdated(
+                            surface: android.graphics.SurfaceTexture
+                        ) = Unit
+                    }
+            },
+            modifier = Modifier.fillMaxSize()
+        )
+
+        if (playerState == VideoPlayerState.LOADING) {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .background(Color.Black.copy(alpha = 0.5f)),
+                contentAlignment = Alignment.Center
+            ) {
+                Column(
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.Center
+                ) {
+                    androidx.compose.material3.CircularProgressIndicator(
+                        modifier = Modifier.size(32.dp),
+                        color = Color.White,
+                        strokeWidth = 2.dp
+                    )
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Text(text = "Connecting to T12...", color = Color.White, fontSize = 11.sp)
+                }
+            }
+        }
+
+        if (playerState == VideoPlayerState.ERROR) {
+            VideoPlaceholder(
+                isConnected = true,
+                errorMessage = errorMessage,
+                modifier = Modifier.fillMaxSize()
+            )
+        }
+    }
+
+    DisposableEffect(device) {
+        onDispose { source.release() }
+    }
 }
