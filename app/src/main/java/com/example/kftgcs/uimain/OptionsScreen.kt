@@ -27,6 +27,7 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.navigation.NavHostController
 import com.example.kftgcs.telemetry.SharedViewModel
 import com.example.kftgcs.viewmodel.OptionsViewModel
+import java.util.Locale
 
 private val DarkBackground = Color(0xFF23272A)
 private val AccentBlue = Color(0xFF87CEEB)
@@ -251,8 +252,38 @@ fun OptionsScreen(
 
                 Spacer(modifier = Modifier.height(8.dp))
 
+                // Describes the WALL, not the breach action, because the wall is what the
+                // pilot actually meets in normal flying. The old copy ("acts at N m") was
+                // doubly misleading: the action fired at least 6 m below N, and what it did
+                // was fly the aircraft home. Quoting the usable height is the honest number
+                // and the one they plan a spray pass around.
+                //
+                // The numbers below must track SharedViewModel: the wall sits at
+                // ceiling − (FC_ALT_FENCE_SAFETY_OFFSET_M + 1), and the drone's own fence at
+                // ceiling − FC_ALT_FENCE_SAFETY_OFFSET_M. Read from the view model rather than
+                // re-typed here so the copy cannot quietly go stale against the behaviour.
+                val fcOffset = sharedViewModel.FC_ALT_FENCE_SAFETY_OFFSET_M
+                val holdAltitude = (options.maxAltitude - (fcOffset + 1f)).coerceAtLeast(0f)
+                val fcFenceAltitude = (options.maxAltitude - fcOffset).coerceAtLeast(0f)
+                val warnAltitude = (options.maxAltitude -
+                    minOf(10f, options.maxAltitude * 0.2f)).coerceAtLeast(0f)
+                // What happens AT the limit now depends on the action below: Hover stops the
+                // climb and hands control straight back, while RTL/Land stop the climb and
+                // then run that action. The copy has to say which, or a pilot who picks RTL
+                // has no way to know their next pass will end in a flight home.
+                val holdsAtLimit = options.maxAltitudeAction.equals("HOVER", ignoreCase = true)
+                val atLimitText = if (holdsAtLimit) {
+                    "Usable to ${String.format(Locale.US, "%.1f", holdAltitude)} m: a climb is stopped there and control handed straight back. "
+                } else {
+                    val actionLabel = if (options.maxAltitudeAction.equals("LAND", ignoreCase = true)) "Land" else "RTL"
+                    "Climbs are stopped at ${String.format(Locale.US, "%.1f", holdAltitude)} m and the drone then performs $actionLabel — " +
+                        "choose Hover if you want to keep working at this height. "
+                }
                 Text(
-                    text = "Warns from ${(options.maxAltitude - 10f).coerceAtLeast(0f).toInt()} m, then acts at ${options.maxAltitude.toInt()} m.",
+                    text = atLimitText +
+                        "Voice warning from ${warnAltitude.toInt()} m while climbing. " +
+                        "Above ${String.format(Locale.US, "%.1f", fcFenceAltitude)} m the drone's own fence takes over and runs the action below — " +
+                        "it enforces this onboard, so it holds even if the tablet link drops.",
                     color = Color(0xFFB0B0B0),
                     fontSize = 13.sp,
                     modifier = Modifier.padding(start = 4.dp, bottom = 12.dp)

@@ -62,6 +62,12 @@ fun TopNavBar(
     val sprayEffectiveOutput by telemetryViewModel.sprayEffectiveOutputPct.collectAsState()
     val sprayEnableParam by telemetryViewModel.sprayEnableParam.collectAsState()
 
+    // Pump mode (AUTO = speed-scaled SPRAY_PUMP_RATE, MANUAL = direct SPRAY_PUMP_PCT duty) and
+    // whether this firmware defines the manual params at all.
+    val sprayManualMode by telemetryViewModel.sprayManualMode.collectAsState()
+    val sprayManualPct by telemetryViewModel.sprayManualPct.collectAsState()
+    val sprayManualSupported by telemetryViewModel.sprayManualParamsSupported.collectAsState()
+
     // Remember the mode to prevent flickering due to recomposition
     val displayMode by remember(telemetryState.mode) {
         derivedStateOf {
@@ -514,52 +520,104 @@ fun TopNavBar(
 
                         HorizontalDivider(color = Color.White.copy(alpha = 0.3f))
 
-                        // Spray Rate Slider
-                        // Written to the FC as SPRAY_PUMP_RATE 1:1.
+                        // Pump mode toggle. NOTE: this is the FC's pump-output MODE, unrelated to
+                        // PlanScreen's "Auto Spray" switch (which embeds DO_SPRAYER items into a
+                        // planned mission). Disabled when the firmware has no manual-pump params.
+                        Column(modifier = Modifier.padding(vertical = 4.dp)) {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Text(AppStrings.sprayPumpMode, color = Color.White, modifier = Modifier.weight(1f))
+                                Text(
+                                    if (sprayManualMode) AppStrings.sprayModeManual else AppStrings.sprayModeAuto,
+                                    color = if (sprayManualSupported == false) Color.Gray else Color.White,
+                                    fontWeight = FontWeight.Bold
+                                )
+                                Switch(
+                                    checked = sprayManualMode,
+                                    onCheckedChange = { telemetryViewModel.setSprayManualMode(it) },
+                                    enabled = sprayManualSupported != false,
+                                    colors = SwitchDefaults.colors(
+                                        checkedThumbColor = Color.White,
+                                        checkedTrackColor = Color(0xFF1E88E5), // Blue = manual
+                                        uncheckedThumbColor = Color.White,
+                                        uncheckedTrackColor = Color.Green      // Green = auto
+                                    )
+                                )
+                            }
+                            if (sprayManualSupported == false) {
+                                Text(
+                                    AppStrings.sprayManualUnsupported,
+                                    color = Color(0xFFFF6D00),
+                                    style = MaterialTheme.typography.bodySmall,
+                                    modifier = Modifier.padding(top = 2.dp)
+                                )
+                            }
+                        }
+
+                        // Spray slider. In AUTO it writes SPRAY_PUMP_RATE (% per 1 m/s, 10-100
+                        // step 10); in MANUAL it writes SPRAY_PUMP_PCT (direct duty, 0-100 step 5
+                        // — finer because a duty cycle is set directly, and 0 means pump off).
                         // Slider is always functional regardless of the sprayer switch status.
                         Column(modifier = Modifier.padding(vertical = 4.dp)) {
                             Row(verticalAlignment = Alignment.CenterVertically) {
-                                Text(AppStrings.sprayRate, color = Color.White, modifier = Modifier.weight(1f))
-                                Text("${sprayRate.toInt()} %", color = Color.White, fontWeight = FontWeight.Bold)
+                                Text(
+                                    if (sprayManualMode) AppStrings.sprayManualDuty else AppStrings.sprayRate,
+                                    color = Color.White,
+                                    modifier = Modifier.weight(1f)
+                                )
+                                Text(
+                                    "${if (sprayManualMode) sprayManualPct.toInt() else sprayRate.toInt()} %",
+                                    color = Color.White,
+                                    fontWeight = FontWeight.Bold
+                                )
                             }
                             Slider(
-                                value = sprayRate,
-                                onValueChange = { newRate ->
-                                    // Snap to nearest 10%
-                                    val snappedRate = (Math.round(newRate / 10f) * 10f).coerceIn(10f, 100f)
-                                    telemetryViewModel.setSprayRate(snappedRate)
+                                value = if (sprayManualMode) sprayManualPct else sprayRate,
+                                onValueChange = { raw ->
+                                    if (sprayManualMode) {
+                                        // Snap to nearest 5%
+                                        telemetryViewModel.setSprayManualPct(
+                                            (Math.round(raw / 5f) * 5f).coerceIn(0f, 100f)
+                                        )
+                                    } else {
+                                        // Snap to nearest 10%
+                                        telemetryViewModel.setSprayRate(
+                                            (Math.round(raw / 10f) * 10f).coerceIn(10f, 100f)
+                                        )
+                                    }
                                 },
-                                valueRange = 10f..100f, // 10% to 100% (minimum 10%)
-                                steps = 8, // 9 positions: 10%, 20%, 30%, 40%, 50%, 60%, 70%, 80%, 90%, 100%
+                                valueRange = if (sprayManualMode) 0f..100f else 10f..100f,
+                                steps = if (sprayManualMode) 19 else 8, // 21 vs 9 positions
                                 modifier = Modifier.fillMaxWidth(),
                                 enabled = true, // Always enabled
                                 colors = SliderDefaults.colors(
-                                    thumbColor = Color.Green,
-                                    activeTrackColor = Color.Green,
+                                    thumbColor = if (sprayManualMode) Color(0xFF1E88E5) else Color.Green,
+                                    activeTrackColor = if (sprayManualMode) Color(0xFF1E88E5) else Color.Green,
                                     inactiveTrackColor = Color.DarkGray
                                 )
                             )
                             // Status text
                             Text(
-                                AppStrings.adjustSprayIntensity,
+                                if (sprayManualMode) AppStrings.sprayManualHint else AppStrings.adjustSprayIntensity,
                                 color = Color.Gray,
                                 style = MaterialTheme.typography.bodySmall,
                                 modifier = Modifier.padding(top = 2.dp)
                             )
 
-                            // Effective pump output. The slider is % per 1 m/s, so its number is
-                            // NOT the pump percentage in flight — showing the computed value is
-                            // what makes a saturated pump (every position above ~25 at 4 m/s)
-                            // visible instead of looking like the app failed to write the rate.
+                            // Effective pump output. In AUTO the slider is % per 1 m/s, so its
+                            // number is NOT the pump percentage in flight — showing the computed
+                            // value is what makes a saturated pump (every position above ~25 at
+                            // 4 m/s) visible instead of looking like the app failed to write the
+                            // rate. In MANUAL the two agree by definition, so the saturation
+                            // warning would be noise and is suppressed.
                             Text(
                                 text = sprayEffectiveOutput?.let { pct ->
-                                    val saturated = pct >= 100f
+                                    val saturated = pct >= 100f && !sprayManualMode
                                     "Pump now: ${pct.toInt()}%" + if (saturated) " (max — slider has no effect at this speed)" else ""
                                 } ?: "Pump now: — (no groundspeed)",
                                 color = sprayEffectiveOutput.let { pct ->
                                     when {
                                         pct == null -> Color.Gray
-                                        pct >= 100f -> Color(0xFFFFA000)
+                                        pct >= 100f && !sprayManualMode -> Color(0xFFFFA000)
                                         else -> Color.LightGray
                                     }
                                 },

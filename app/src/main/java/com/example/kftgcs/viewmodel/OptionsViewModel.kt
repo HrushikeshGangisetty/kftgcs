@@ -270,28 +270,27 @@ class OptionsViewModel(application: Application) : AndroidViewModel(application)
                 LogUtils.e(TAG, "✗ Failed to set $PARAM_BATT_FS_CRT_ACT")
             }
 
-            // FENCE_ALT_MAX ← maxAltitude (the altitude ceiling failsafe)
+            // ═══ Altitude ceiling → FENCE_ALT_MAX + RTL_ALT + FENCE_TYPE/FENCE_ENABLE ═══
             //
-            // FENCE_ENABLE is deliberately NOT touched here: it belongs to the geofence
-            // upload flow, and switching the fence on for a drone flying without a geofence
-            // would change its pre-arm and breach behaviour. FENCE_TYPE is likewise not
-            // touched here — SharedViewModel.syncFenceParametersOnConnect owns it and only
-            // ORs bits in. The GCS enforces the ceiling itself
-            // (SharedViewModel.handleAltitudeFailsafe); this write just keeps the FC's own
-            // limit correct as a second layer.
+            // Delegated to SharedViewModel.applyAltitudeCeilingToFc() rather than written
+            // here, because the ceiling is THREE parameters that have to move together and
+            // this path used to move only one of them:
+            //
+            //   FENCE_ALT_MAX  — the limit itself, biased below the pilot's ceiling because
+            //                    ArduPilot arrests the climb AFTER detecting the breach.
+            //   RTL_ALT        — must stay under the ceiling, or the breach action (an RTL)
+            //                    starts by climbing to RTL_ALT and straight through it. This
+            //                    was previously synced on connect only, so changing the
+            //                    ceiling in Options left RTL_ALT agreeing with the old one.
+            //   FENCE_TYPE /
+            //   FENCE_ENABLE   — without these the FC ignores FENCE_ALT_MAX entirely and the
+            //                    ceiling is held by the GCS over the telemetry link alone.
+            //
+            // FENCE_ACTION and FENCE_MARGIN are still never written: the breach behaviour
+            // stays the operator's.
             if (current.maxAltitudeEnabled && current.maxAltitude > 0f) {
-                // Written slightly BELOW the pilot's ceiling: ArduPilot arrests the climb
-                // after detecting the breach and coasts past FENCE_ALT_MAX, so a verbatim
-                // write exceeds the stated limit. See SharedViewModel.getFcAltitudeFenceMax().
-                val fcLimit = (current.maxAltitude - sharedViewModel.FC_ALT_FENCE_SAFETY_OFFSET_M)
-                    .coerceAtLeast(1f)
-                val r5 = sharedViewModel.setParameter(PARAM_FENCE_ALT_MAX, fcLimit)
-                if (r5 != null) {
-                    LogUtils.i(TAG, "✓ $PARAM_FENCE_ALT_MAX = $fcLimit m (ceiling ${current.maxAltitude} m)")
-                } else {
-                    results.add(PARAM_FENCE_ALT_MAX)
-                    LogUtils.e(TAG, "✗ Failed to set $PARAM_FENCE_ALT_MAX")
-                }
+                sharedViewModel.applyAltitudeCeilingToFc()
+                LogUtils.i(TAG, "Altitude ceiling ${current.maxAltitude} m pushed to the FC (see OptionsSync/FenceSync logs)")
             }
 
             if (results.isEmpty()) {

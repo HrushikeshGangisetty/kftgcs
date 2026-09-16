@@ -28,6 +28,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.channels.BufferOverflow
 import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.isActive
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.TimeoutCancellationException
@@ -80,6 +81,20 @@ const val FENCE_TYPE_ALT_MIN = 8
  * distinguish a circle breach from a polygon or altitude breach.
  */
 const val MAV_SYS_STATUS_GEOFENCE: UInt = 0x100000u
+
+/**
+ * MAV_PROTOCOL_CAPABILITY bits from AUTOPILOT_VERSION.capabilities that the fence
+ * mission-protocol path depends on, from MAVLink common.xml.
+ *
+ * MISSION_FENCE says the vehicle accepts fence geometry as mission items with
+ * mission_type = MAV_MISSION_TYPE_FENCE. Without it the only way to send a polygon is
+ * the deprecated single FENCE_POINT message, which this GCS does not implement — so
+ * attempting an upload would silently do nothing useful. ArduPilot 4.6.3 sets both bits;
+ * the check exists so a vehicle that does NOT support them fails loudly instead of
+ * leaving the pilot believing a fence was uploaded.
+ */
+const val MAV_PROTOCOL_CAPABILITY_MISSION_INT: UInt = 4u
+const val MAV_PROTOCOL_CAPABILITY_MISSION_FENCE: UInt = 16_384u
 
 // MAVLink command IDs for mission items
 object MavCmdId {
@@ -135,6 +150,21 @@ enum class SprayerState {
  * DROP_OLDEST buffer discard frames.
  */
 private const val MAV_FRAME_BUFFER_CAPACITY = 2048
+
+/**
+ * How recently we must have sent a mission item for a repeat request of that same seq to
+ * count as the FC's retransmit crossing our reply, rather than a genuine re-request.
+ *
+ * ArduPilot retransmits an unanswered MISSION_REQUEST after roughly half a second. Observed:
+ * our reply to seq 0 took ~500 ms, the FC's retransmit for seq 0 arrived ~498 ms after that
+ * reply went out, we answered it a second time, and the FC — which had already taken the
+ * first copy and moved to seq 1 — rejected the upload with MAV_MISSION_INVALID_SEQUENCE.
+ *
+ * Normal request spacing on this link is ~150-200 ms, so 1.2 s sits well clear of both:
+ * long enough to swallow a crossed retransmit, short enough that an item genuinely lost in
+ * flight is still re-sent promptly.
+ */
+private const val MISSION_ITEM_RETRANSMIT_WINDOW_MS = 1200L
 
 /**
  * PARAM_VALUE messages buffered for [MavlinkTelemetryRepository.paramValue] subscribers.
@@ -238,7 +268,43 @@ class MavlinkTelemetryRepository(
 
     // Manual mission tracking removed - now handled by UnifiedFlightTracker
     private var previousArmedState = false  // Track previous armed state for TTS announcements
+
+    // Previous GLOBAL_POSITION_INT altitude sample, used to derive the climb rate the
+    // altitude-ceiling failsafe sizes its action margin from. See the collector for why
+    // VFR_HUD.climb is not used.
+    private var lastClimbAltM: Float? = null
+    private var lastClimbAtMs: Long = 0L
+    /**
+     * Low-pass filtered climb rate, in m/s.
+     *
+     * The raw two-sample difference below is honest but noisy: at a 0.15 s interval, 0.3 m
+     * of barometric wobble reads as 2 m/s of "climb". The altitude ceiling sizes its
+     * stopping distance from this number, so that noise used to push the trigger several
+     * metres further down the envelope than the vehicle's actual motion justified. An EMA
+     * over [CLIMB_EMA_TAU_S] removes it at the cost of ~0.3 s of lag — an order of
+     * magnitude less than the VFR_HUD barometric filter this derivation replaced.
+     *
+     * The RAW value still goes out as climbRate (the "is it moving?" tests and the UI want
+     * responsiveness); the filtered one goes out as climbRateSmoothed, and only the
+     * predictive maths uses it.
+     */
+    private var climbEmaMps: Float? = null
+    /** EMA time constant for [climbEmaMps]. */
+    private val CLIMB_EMA_TAU_S = 0.3f
     private var isMissionUploadInProgress = false  // Track if mission upload is actively in progress (not just clearing)
+
+    /**
+     * Serializes everything that speaks the MISSION-type mission protocol: upload and clear.
+     *
+     * These used to run concurrently on unrelated scopes — clearMissionCompletely() fires
+     * from screen navigation, the post-disarm auto-clear fires from the telemetry collector,
+     * and an upload fires from the plan screen. All three exchange MISSION_CLEAR_ALL /
+     * MISSION_COUNT / MISSION_ACK on one link with no correlation id, so their acks are
+     * indistinguishable once in flight. Filtering on missionType stops a FENCE ack from
+     * being mistaken for ours, but only mutual exclusion stops one MISSION operation's ack
+     * from satisfying another's wait.
+     */
+    private val missionProtocolMutex = kotlinx.coroutines.sync.Mutex()
 
     // COMMAND_ACK flow for calibration and other commands
     private val _commandAck = MutableSharedFlow<CommandAck>(replay = 0, extraBufferCapacity = 10)
@@ -535,6 +601,33 @@ class MavlinkTelemetryRepository(
     // ════════════════════════════════════════════════════════════════
     private val _fenceStatus = MutableStateFlow(FenceStatus())
     val fenceStatus: StateFlow<FenceStatus> = _fenceStatus.asStateFlow()
+
+    /**
+     * AUTOPILOT_VERSION.capabilities as last reported by the vehicle, or null if it has
+     * not answered yet. Null means "unknown", NOT "unsupported" — see
+     * [fenceMissionProtocolUnsupported].
+     */
+    private val _autopilotCapabilities = MutableStateFlow<UInt?>(null)
+    val autopilotCapabilities: StateFlow<UInt?> = _autopilotCapabilities.asStateFlow()
+
+    /**
+     * Why the vehicle cannot take fence geometry over the mission protocol, or null if it
+     * can (or if we simply do not know yet).
+     *
+     * Deliberately permissive when [_autopilotCapabilities] is null: AUTOPILOT_VERSION is
+     * requested at connect but is not guaranteed to have arrived by the time the pilot
+     * enables a geofence, and refusing an upload because a capability message was late
+     * would be a worse failure than attempting one. This is the defensive check Mission
+     * Planner makes, not a handshake.
+     */
+    private fun fenceMissionProtocolUnsupported(): String? {
+        val caps = _autopilotCapabilities.value ?: return null
+        val missing = buildList {
+            if (caps and MAV_PROTOCOL_CAPABILITY_MISSION_FENCE == 0u) add("MISSION_FENCE")
+            if (caps and MAV_PROTOCOL_CAPABILITY_MISSION_INT == 0u) add("MISSION_INT")
+        }
+        return if (missing.isEmpty()) null else missing.joinToString(" and ")
+    }
 
     /**
      * Shared auth launcher with debouncing — triggers KFT auth handshake.
@@ -913,6 +1006,12 @@ class MavlinkTelemetryRepository(
                     is StreamState.Inactive -> {
                         _state.update { it.copy(connected = false, fcuDetected = false) }
                         lastFcuHeartbeatTime.set(0L)
+                        // Drop the climb-rate reference sample: differentiating the first
+                        // fix of a new session against an altitude from the previous one
+                        // would hand the altitude failsafe a fabricated climb rate.
+                        lastClimbAltM = null
+                        lastClimbAtMs = 0L
+                        climbEmaMps = null
                         // Auto-reconnect disabled - user must manually reconnect via connection tab
                     }
                 }
@@ -929,6 +1028,10 @@ class MavlinkTelemetryRepository(
                         if (state.value.connected) {
                             _state.update { it.copy(connected = false, fcuDetected = false) }
                             lastFcuHeartbeatTime.set(0L)
+                            // See the StreamState.Inactive path — stale reference sample.
+                            lastClimbAltM = null
+                            lastClimbAtMs = 0L
+                            climbEmaMps = null
                         }
                     }
                 }
@@ -1162,11 +1265,12 @@ class MavlinkTelemetryRepository(
                             groundspeed = hud.groundspeed.takeIf { v -> v >= 0f },
                             formattedAirspeed = formatSpeed(hud.airspeed.takeIf { v -> v >= 0f }),
                             formattedGroundspeed = formatSpeed(hud.groundspeed.takeIf { v -> v >= 0f }),
-                            heading = normalizedHeading,
-                            // Vertical speed, used by the altitude-ceiling failsafe to size its
-                            // action margin: the faster the climb, the further below the ceiling
-                            // it must act to stop in time.
-                            climbRate = hud.climb
+                            heading = normalizedHeading
+                            // climbRate is deliberately NOT set here. It is derived from
+                            // successive GLOBAL_POSITION_INT relative_alt samples instead —
+                            // VFR_HUD.climb is baro-filtered and lags the true vertical speed
+                            // in forward flight, which undersized the altitude failsafe's
+                            // action margin. See the GLOBAL_POSITION_INT collector.
                         )
                     }
                 }
@@ -1349,13 +1453,56 @@ class MavlinkTelemetryRepository(
                     // the altitude/range failsafes evaluated a stale fix. Position is now the
                     // most safety-critical field in the state, so it goes straight through, on
                     // the same reasoning VFR_HUD already documents above.
+                    // ══ Climb rate, derived here rather than taken from VFR_HUD ══
+                    // VFR_HUD.climb is a filtered barometric rate and LAGS the true vertical
+                    // speed, badly so in fast forward flight (pitch + throttle) where the
+                    // baro sees airflow over the airframe. The altitude wall projects the
+                    // vehicle's stopping altitude from this number, so a climb rate that
+                    // reads low means the brake goes in too late. Differentiating the SAME
+                    // relative_alt signal the ceiling is judged against keeps the projection
+                    // consistent with the altitude it is protecting, and makes it respond
+                    // immediately to a real climb.
+                    //
+                    // The raw quotient is what the wall's "is it moving?" tests want; the EMA
+                    // below is what its arithmetic wants. Both are published.
+                    val nowMs = System.currentTimeMillis()
+                    val prevAlt = lastClimbAltM
+                    val dtS = (nowMs - lastClimbAtMs) / 1000f
+                    // Ignore samples too close together (noise dominates the quotient) or too
+                    // far apart (the gap spans a telemetry dropout and the average is stale).
+                    val derivedClimb = if (prevAlt != null && dtS >= 0.15f && dtS <= 2f) {
+                        ((relAltM - prevAlt) / dtS).takeIf { it.isFinite() }
+                    } else {
+                        null
+                    }
+                    if (prevAlt == null || dtS >= 0.15f) {
+                        lastClimbAltM = relAltM
+                        lastClimbAtMs = nowMs
+                    }
+
+                    // Feed the EMA. alpha is derived from the ACTUAL sample interval rather
+                    // than fixed, so the filter keeps the same time constant whether position
+                    // is arriving at 10 Hz or has degraded to 2 Hz under a saturated link —
+                    // a fixed alpha would over-smooth (and therefore under-report a real
+                    // climb) exactly when the link is worst and the margin matters most.
+                    if (derivedClimb != null) {
+                        val alpha = (dtS / (CLIMB_EMA_TAU_S + dtS)).coerceIn(0f, 1f)
+                        val prevEma = climbEmaMps
+                        climbEmaMps = if (prevEma == null) derivedClimb
+                                      else prevEma + alpha * (derivedClimb - prevEma)
+                    }
+
                     _state.update {
                         it.copy(
                             altitudeMsl = altAMSLm,
                             altitudeRelative = relAltM,
                             latitude = lat,
                             longitude = lon,
-                            positionReceivedAtMs = System.currentTimeMillis()
+                            // Keep the last good value when this sample could not produce one,
+                            // so a single odd interval does not blank the failsafe's input.
+                            climbRate = derivedClimb ?: it.climbRate,
+                            climbRateSmoothed = climbEmaMps ?: it.climbRateSmoothed,
+                            positionReceivedAtMs = nowMs
                         )
                     }
 
@@ -2162,8 +2309,16 @@ class MavlinkTelemetryRepository(
                             missionTimerJob?.cancel()
                             missionTimerJob = null
 
-                            // Get current mission state before updating
-                            val lastElapsed = state.value.missionElapsedSec ?: state.value.lastMissionElapsedSec
+                            // Get current mission state before updating.
+                            // NOTE: deliberately NOT falling back to lastMissionElapsedSec here —
+                            // that field carries over from a PREVIOUS flight (it's only cleared
+                            // when AUTO newly starts, at line ~2052) and survives arm/disarm
+                            // cycles in between. Falling back to it made a purely manual disarm
+                            // (never entered AUTO this flight) look like "a mission just flew",
+                            // which fed missionActuallyFlown below and wiped a freshly uploaded,
+                            // not-yet-flown mission off the FC — the "Auto init failed" /
+                            // "Failed to upload mission" bug.
+                            val lastElapsed = state.value.missionElapsedSec
                             val wasMissionActive = state.value.isMissionActive
                             val wasInAutoMode = lastMode?.equals("Auto", ignoreCase = true) == true
                             val isPaused = state.value.missionPaused
@@ -2226,40 +2381,24 @@ class MavlinkTelemetryRepository(
                                 _state.update { it.copy(isMissionActive = false, missionElapsedSec = null) }
                             }
 
-                            // ═══ WIPE THE FINISHED MISSION OFF THE FC ═══
-                            // A completed mission stays resident in the flight controller, so
-                            // a pilot who later flicks the mode switch to AUTO — by mistake,
-                            // or just to reposition — re-flies the whole thing from item 1.
-                            // The aircraft is on the ground and disarmed here, which is the
-                            // only point where clearing is unambiguously safe: at AUTO→RTL
-                            // (the other "mission completed" trigger) the drone is still
-                            // airborne and still flying the mission's own final RTL/LAND item,
-                            // and pulling the mission out from under it there would strand it.
+                            // ═══ THE FINISHED MISSION IS LEFT ON THE FC ═══
                             //
-                            // Guarded on `isPaused`: a paused mission is one the pilot
-                            // intends to resume, and clearing it would destroy the resume
-                            // target. Also requires a mission to have actually run this
-                            // flight (elapsed > 0), so a disarm after a manual hop leaves an
-                            // uploaded-but-unflown mission alone.
+                            // This used to wipe the mission off the flight controller here,
+                            // automatically, on every disarm that followed a flown mission.
+                            // The reasoning was sound (a stray switch to AUTO re-flies the
+                            // whole grid) but the behaviour was not the operator's to choose:
+                            // it also destroyed a mission they wanted to fly again, it fired
+                            // on disarms they did not think of as "the end", and whether the
+                            // drone still held a mission depended on internal state
+                            // (`missionActuallyFlown`, `isPaused`) that nobody could see.
+                            //
+                            // Clearing is now explicit: the Clear Mission button on the home
+                            // screen, which is only offered while disarmed and asks first.
+                            // See SharedViewModel.clearMissionFromFcConfirmed().
                             val missionActuallyFlown = (lastElapsed ?: 0L) > 0L
                             if (missionActuallyFlown && !isPaused) {
-                                AppScope.launch {
-                                    try {
-                                        val cleared = clearMissionFromFC()
-                                        if (cleared) {
-                                            LogUtils.i("MissionClear", "🧹 Completed mission cleared from FC after disarm — a stray switch to AUTO can no longer re-fly it")
-                                            sharedViewModel.onMissionClearedFromFcAfterCompletion()
-                                        } else {
-                                            // Not fatal: the mission is still on the FC, so say
-                                            // so rather than letting the pilot assume it is gone.
-                                            LogUtils.w("MissionClear", "⚠️ Could not clear the completed mission from the FC (no ACK) — it is STILL loaded")
-                                            sharedViewModel.onMissionClearFromFcFailed()
-                                        }
-                                    } catch (e: Exception) {
-                                        LogUtils.e("MissionClear", "❌ Error clearing completed mission from FC", e)
-                                        sharedViewModel.onMissionClearFromFcFailed()
-                                    }
-                                }
+                                LogUtils.i("MissionClear", "Mission finished and drone disarmed — mission LEFT on the FC (clear it from the home screen if you want it gone)")
+                                sharedViewModel.onMissionLeftOnFcAfterCompletion()
                             }
 
                             // The flight is over, so the next one must re-prove the flow
@@ -2441,15 +2580,19 @@ class MavlinkTelemetryRepository(
                     // confusion about why the drone won't arm.
                     val isFenceMessage = message.contains("fence", ignoreCase = true)
 
-                    // ...but NOT the home-centred range cylinder. That fence is armed on
-                    // connect (FENCE_RADIUS + FENCE_TYPE bit 1) independently of the GCS's
-                    // polygon toggle, so its breach messages are always genuine. Suppressing
-                    // them with the polygon's would silently swallow a real 300m breach
-                    // whenever the mission geofence happened to be switched off.
-                    val isRangeFenceMessage = message.contains("circle", ignoreCase = true) ||
-                            message.contains("radius", ignoreCase = true)
+                    // ...but NOT the fences that are armed independently of the GCS's polygon
+                    // toggle. The home-centred range cylinder (FENCE_RADIUS + FENCE_TYPE bit 1)
+                    // and the altitude fence (FENCE_ALT_MAX + bit 0, armed on every connect by
+                    // SharedViewModel.armFcAltitudeFence) are both live regardless of whether a
+                    // mission geofence is switched on, so their messages are always genuine.
+                    // Suppressing them alongside the polygon's silently swallowed real 300m and
+                    // altitude-ceiling breaches — the altitude case matching the SYS_STATUS gate
+                    // in startFenceMonitoring, which had the same blind spot.
+                    val isAlwaysArmedFenceMessage = message.contains("circle", ignoreCase = true) ||
+                            message.contains("radius", ignoreCase = true) ||
+                            message.contains("alt", ignoreCase = true)
 
-                    if (isFenceMessage && !isRangeFenceMessage &&
+                    if (isFenceMessage && !isAlwaysArmedFenceMessage &&
                         !sharedViewModel.geofenceEnabled.value) {
                         // GCS geofence is off but FC is sending fence messages - stale fence data
                         // Log it but don't show to user as a notification
@@ -2480,14 +2623,16 @@ class MavlinkTelemetryRepository(
 
                     if (!isRecoveryOrPreArm) {
                         // Fence breach has its own entry point: it is also detectable via
-                        // SYS_STATUS bit 8, and notifyFenceBreach de-dupes the two paths. The
+                        // the SYS_STATUS geofence bit (bit 20, MAV_SYS_STATUS_GEOFENCE), and
+                        // notifyFenceBreach de-dupes the two paths. The
                         // SYS_STATUS path alone was not enough — it only reports while the FC
                         // holds the fence sensor enabled-and-unhealthy, which short breaches and
                         // some fence types never do, which is why breaches showed no popup.
                         if (isFenceMessage && message.contains("breach", ignoreCase = true)) {
                             // ArduPilot names the fence in the text ("Polygon breached",
-                            // "Circle breached", "Max Alt breached"), which SYS_STATUS bit 8
-                            // cannot tell us — it is one flag for every fence type. Pass the
+                            // "Circle breached", "Max Alt breached"), which the SYS_STATUS
+                            // geofence bit cannot tell us — it is one flag for every fence
+                            // type. Pass the
                             // name through so the pilot is told WHICH boundary was crossed.
                             val which = when {
                                 message.contains("circle", ignoreCase = true) -> "Range"
@@ -2956,6 +3101,19 @@ class MavlinkTelemetryRepository(
                 .filterIsInstance<AutopilotVersion>()
                 .collect { autopilotVersion ->
                     try {
+                        // Capability bitmask — the fence mission-protocol path checks this
+                        // before attempting an upload. See fenceMissionProtocolUnsupported().
+                        val caps = autopilotVersion.capabilities.value
+                        if (_autopilotCapabilities.value != caps) {
+                            _autopilotCapabilities.value = caps
+                            Timber.i(
+                                "Capabilities: 0x%08X (MISSION_INT=%b, MISSION_FENCE=%b)",
+                                caps.toInt(),
+                                caps and MAV_PROTOCOL_CAPABILITY_MISSION_INT != 0u,
+                                caps and MAV_PROTOCOL_CAPABILITY_MISSION_FENCE != 0u
+                            )
+                        }
+
                         // Format firmware version (4 bytes: major.minor.patch.type)
                         val fwVersion = autopilotVersion.flightSwVersion
                         val major = (fwVersion shr 24) and 0xFFu
@@ -3023,8 +3181,9 @@ class MavlinkTelemetryRepository(
             val items = mutableListOf<MissionItemInt>()
             val expectedCountDeferred = CompletableDeferred<Int?>()
             val perSeqMap = mutableMapOf<Int, CompletableDeferred<Unit>>()
+            // Buffered flow — see uploadMissionWithAck.
             val job = AppScope.launch {
-                connection.mavFrame.collect { frame ->
+                mavFrame.collect { frame ->
                     when (val msg = frame.message) {
                         is MissionCount -> {
                             expectedCountDeferred.complete(msg.count.toInt())
@@ -3345,6 +3504,15 @@ class MavlinkTelemetryRepository(
             9u -> "Land"
             16u -> "PosHold"
             17u -> "Brake"
+            // The pilot modes below are not modes the GCS commands on its own initiative;
+            // they are here so the altitude wall can hand control BACK to whichever mode the
+            // pilot was flying when it intervened. Without a name, changeMode refuses the
+            // request outright (see below) and the vehicle would stay parked in BRAKE.
+            1u -> "Acro"
+            2u -> "AltHold"
+            7u -> "Circle"
+            11u -> "Drift"
+            13u -> "Sport"
             else -> "Unknown"
         }
 
@@ -3404,7 +3572,12 @@ class MavlinkTelemetryRepository(
         missionItems: List<MissionItemInt>,
         timeoutMs: Long = 45000,
         onProgress: ((currentItem: Int, totalItems: Int) -> Unit)? = null
-    ): Boolean {
+    ): Boolean = missionProtocolMutex.withLock {
+        // Serialized against clearMissionFromFC: both speak the MISSION-type protocol on one
+        // link, and their MISSION_ACKs are indistinguishable once in flight. Filtering on
+        // missionType keeps FENCE traffic out; only this lock keeps two MISSION operations
+        // from consuming each other's acks.
+        //
         // Mark upload as in progress to prevent global listener from showing notifications
         isMissionUploadInProgress = true
 
@@ -3437,57 +3610,87 @@ class MavlinkTelemetryRepository(
             }
 
 
-            // Phase 1: Clear existing mission
-
+            // ═══ Phase 1: Clear the existing mission, and PROVE it is gone ═══
+            //
+            // The contract is: nothing of Phase 2 happens until the FC has confirmed the
+            // clear. Two things that looked like they did that, but didn't:
+            //
+            //  1. The ack collector was launched and then given `delay(50)` to "ensure it is
+            //     running". mavFrame is shareIn(replay = 0), so a subscription that has not
+            //     landed yet does not merely arrive late — it misses the frame entirely. A
+            //     fast FC answers inside 50 ms, the ack is dropped, and we then burn the full
+            //     3 s timeout on an ack that already came and went. The send now goes out
+            //     from onSubscription, so it is issued only once the collector is attached —
+            //     the same fix setParameter/readParameter already use in this codebase.
+            //
+            //  2. An ACCEPTED ack is not proof the FC's mission is empty. So after the ack we
+            //     read the count back and require 0. This is the actual "only start after
+            //     acknowledgment" guarantee: not "an ack arrived", but "the FC says it has no
+            //     mission". If the readback says otherwise we retry the clear rather than
+            //     uploading onto a mission that is still there.
             var clearSuccess = false
-            for (attempt in 1..2) {
-
-                // Use CompletableDeferred to avoid race condition
-                val clearAckDeferred = CompletableDeferred<Boolean>()
-
-                val clearCollectorJob = AppScope.launch {
-                    mavFrame
-                        .filter { it.systemId == fcuSystemId && it.componentId == fcuComponentId }
-                        .map { it.message }
-                        .filterIsInstance<MissionAck>()
-                        .collect { ack ->
-                            if (ack.type.value == MavMissionResult.MAV_MISSION_ACCEPTED.value) {
-                                if (!clearAckDeferred.isCompleted) {
-                                    clearAckDeferred.complete(true)
-                                }
-                            }
-                        }
-                }
-
-                // Small delay to ensure collector is running
-                delay(50)
-
+            for (attempt in 1..3) {
                 val clearAll = MissionClearAll(
                     targetSystem = fcuSystemId,
                     targetComponent = fcuComponentId,
                     missionType = MavEnumValue.of(MavMissionType.MISSION)
                 )
-                connection.trySendUnsignedV2(gcsSystemId, gcsComponentId, clearAll)
 
-                val ackReceived = withTimeoutOrNull(3000L) {
-                    clearAckDeferred.await()
-                } ?: false
+                val ack = withTimeoutOrNull(3000L) {
+                    mavFrame
+                        .onSubscription {
+                            val ok = connection.trySendUnsignedV2(gcsSystemId, gcsComponentId, clearAll)
+                            LogUtils.i("MissionUpload", "📤 MISSION_CLEAR_ALL sent (attempt $attempt, sendOk=$ok)")
+                        }
+                        .filter { it.systemId == fcuSystemId && it.componentId == fcuComponentId }
+                        .map { it.message }
+                        .filterIsInstance<MissionAck>()
+                        // Only MISSION acks. Without this filter a FENCE ack — or the ack of a
+                        // concurrent mission clear — satisfied this wait. missionType is a v2
+                        // extension that decodes to 0 (= MISSION) on v1 frames, so this stays
+                        // correct on older links.
+                        .filter { it.missionType.value == MavMissionType.MISSION.value }
+                        .first()
+                }
 
-                clearCollectorJob.cancel()
+                if (ack == null) {
+                    LogUtils.w("MissionUpload", "⚠️ No clear ACK within 3s (attempt $attempt)")
+                    if (attempt < 3) delay(500L)
+                    continue
+                }
 
-                if (ackReceived) {
+                LogUtils.i("MissionUpload", "📬 Clear ACK: type=${ack.type.entry?.name ?: ack.type.value} opaqueId=${ack.opaqueId} (attempt $attempt)")
+
+                if (ack.type.value != MavMissionResult.MAV_MISSION_ACCEPTED.value) {
+                    LogUtils.w("MissionUpload", "⚠️ FC rejected the clear: ${ack.type.entry?.name ?: ack.type.value}")
+                    if (attempt < 3) delay(500L)
+                    continue
+                }
+
+                // Verify the clear actually took effect before trusting it.
+                val remaining = getMissionCount(timeoutMs = 3000L)
+                if (remaining == null) {
+                    // Could not read back. The ack was positive, so proceed rather than
+                    // blocking an upload on a readback the FC may simply be slow to answer.
+                    LogUtils.w("MissionUpload", "⚠️ Could not read back mission count after clear — proceeding on the ACK alone")
                     clearSuccess = true
                     break
-                } else if (attempt < 2) {
-                    delay(500L)
                 }
+                if (remaining == 0) {
+                    LogUtils.i("MissionUpload", "✓ Clear verified: FC reports 0 mission items")
+                    clearSuccess = true
+                    break
+                }
+
+                LogUtils.w("MissionUpload", "⚠️ FC still reports $remaining mission items after an ACCEPTED clear (attempt $attempt) — retrying")
+                if (attempt < 3) delay(500L)
             }
 
             if (!clearSuccess) {
+                LogUtils.e("MissionUpload", "✗ Could not clear the existing mission after 3 attempts — aborting before upload")
                 return false
             }
-
-            delay(500L)
+            LogUtils.i("MissionUpload", "✓ Existing mission cleared — starting upload of ${missionItems.size} items")
 
             // Phase 2: Upload mission items
 
@@ -3498,17 +3701,27 @@ class MavlinkTelemetryRepository(
                 missionType = MavEnumValue.of(MavMissionType.MISSION)
             )
 
-            connection.trySendUnsignedV2(gcsSystemId, gcsComponentId, missionCount)
+            val countSendOk = connection.trySendUnsignedV2(gcsSystemId, gcsComponentId, missionCount)
+            LogUtils.i("MissionUpload", "📤 MISSION_COUNT=${missionItems.size} sent to sys=$fcuSystemId comp=$fcuComponentId (sendOk=$countSendOk)")
 
             val finalAckDeferred = CompletableDeferred<Pair<Boolean, String>>()
-            val sentSeqs = mutableSetOf<Int>()
-            var firstRequestReceived = false
-            var lastRequestTime = System.currentTimeMillis()
+            // Concurrent: the collector runs on the shared flow and is dispatched across
+            // Dispatchers.Default pool threads (the logs show request/send pairs hopping
+            // tids), while the watchdog and the tail read size/sorted(). A plain HashSet
+            // mutated from several threads can corrupt or miscount.
+            val sentSeqs = java.util.concurrent.ConcurrentHashMap.newKeySet<Int>()
+            // seq -> when we last sent that item. Drives the retransmit guard in the handler.
+            val lastSentAtMs = java.util.concurrent.ConcurrentHashMap<Int, Long>()
+            // Atomic: written on the collector coroutine, read by the resend and watchdog
+            // coroutines. Plain vars gave those no guaranteed visibility, so the watchdog
+            // could judge a live upload against a stale lastRequestTime and call it stalled.
+            val firstRequestReceived = java.util.concurrent.atomic.AtomicBoolean(false)
+            val lastRequestTime = AtomicLong(System.currentTimeMillis())
 
             // Simplified resend logic - only if no response
             val resendJob = AppScope.launch {
                 delay(3000L)
-                if (!firstRequestReceived && !finalAckDeferred.isCompleted) {
+                if (!firstRequestReceived.get() && !finalAckDeferred.isCompleted) {
                     connection.trySendUnsignedV2(gcsSystemId, gcsComponentId, missionCount)
                 }
             }
@@ -3517,9 +3730,10 @@ class MavlinkTelemetryRepository(
             val watchdogJob = AppScope.launch {
                 while (isActive && !finalAckDeferred.isCompleted) {
                     delay(2000)
-                    if (firstRequestReceived) {
-                        val timeSinceLastRequest = System.currentTimeMillis() - lastRequestTime
+                    if (firstRequestReceived.get()) {
+                        val timeSinceLastRequest = System.currentTimeMillis() - lastRequestTime.get()
                         if (timeSinceLastRequest > 10000L) {
+                            LogUtils.e("MissionUpload", "✗ STALLED: ${timeSinceLastRequest}ms since the last request. Sent ${sentSeqs.size}/${missionItems.size} (highest seq=${sentSeqs.maxOrNull() ?: -1}) — FC stopped asking for items")
                             finalAckDeferred.complete(false to "Upload stalled - no FCU response")
                             break
                         }
@@ -3527,9 +3741,23 @@ class MavlinkTelemetryRepository(
                 }
             }
 
-            // Main message collector
+            // Main message collector.
+            //
+            // MUST collect the buffered `mavFrame`, NOT raw `connection.mavFrame`. The
+            // library's own connection flow is extraBufferCapacity=128 / DROP_OLDEST, so it
+            // silently discards frames whenever a consumer falls behind — see the comment on
+            // the `mavFrame` assignment for the full reasoning. This collector suspends while
+            // it sends each item, and on a real link carrying the full telemetry stream
+            // (10Hz position + 12Hz battery + attitude) those 128 slots overrun during the
+            // suspension, dropping the FC's next MISSION_REQUEST_INT. Both sides then wait
+            // forever and the upload reports a stall.
+            //
+            // This is why uploads worked in SITL but failed on the aircraft: an idle SITL
+            // link never fills 128 frames. It failed at the SECOND waypoint specifically
+            // because the per-item delay below is gated on seq > 0, so the very first
+            // in-collector suspension happened right after item 0 was sent.
             val collectorJob = AppScope.launch {
-                connection.mavFrame.collect { frame ->
+                mavFrame.collect { frame ->
                     if (finalAckDeferred.isCompleted ||
                         frame.systemId != fcuSystemId ||
                         frame.componentId != fcuComponentId) {
@@ -3538,16 +3766,56 @@ class MavlinkTelemetryRepository(
 
                     when (val msg = frame.message) {
                         is MissionRequestInt, is MissionRequest -> {
-                            if (!firstRequestReceived) {
-                            }
-                            firstRequestReceived = true
-                            lastRequestTime = System.currentTimeMillis()
+                            val wasFirst = !firstRequestReceived.getAndSet(true)
+                            lastRequestTime.set(System.currentTimeMillis())
 
                             val seq = if (msg is MissionRequestInt) msg.seq.toInt() else (msg as MissionRequest).seq.toInt()
+                            val reqKind = if (msg is MissionRequestInt) "MISSION_REQUEST_INT" else "MISSION_REQUEST"
+                            if (wasFirst) {
+                                LogUtils.i("MissionUpload", "📥 First $reqKind received (seq=$seq) — FC is pulling items")
+                            }
+                            LogUtils.i("MissionUpload", "📥 $reqKind seq=$seq")
 
                             if (seq !in 0 until missionItems.size) {
+                                LogUtils.e("MissionUpload", "✗ FC requested seq=$seq but mission has ${missionItems.size} items — aborting")
                                 finalAckDeferred.complete(false to "Invalid sequence $seq")
                                 return@collect
+                            }
+
+                            // ═══ DROP STALE RETRANSMITS ═══
+                            // THE bug behind MAV_MISSION_INVALID_SEQUENCE. If our reply to a
+                            // request is slow, ArduPilot retransmits that request. The old code
+                            // answered every request unconditionally, so a retransmit of seq N
+                            // that arrived after the FC had already advanced to N+1 sent item N
+                            // a second time — out of sequence — and the FC rejected the whole
+                            // upload with INVALID_SEQUENCE (13). Observed exactly: seq 0 was
+                            // requested at T+0.266 and again at T+0.792 (our first reply took
+                            // 526 ms), we sent item 0 twice, and the next ack was error 13.
+                            //
+                            // A blanket "never send the same seq twice" would be wrong: the FC
+                            // legitimately re-requests an item genuinely lost in flight, and
+                            // then it is still waiting on that seq and we must answer.
+                            //
+                            // The two cases look identical in the request itself, so they are
+                            // told apart by TIME. ArduPilot retransmits a request roughly half
+                            // a second after asking, so a repeat arriving shortly after we
+                            // replied is its retransmit crossing our in-flight item — the FC
+                            // already has the item and has moved on, and answering again sends
+                            // an item it no longer wants: INVALID_SEQUENCE. A repeat arriving
+                            // much later means our item never landed and the FC is still stuck
+                            // on that seq, so re-sending is exactly right.
+                            //
+                            // (An earlier attempt compared against the highest seq requested.
+                            // That was wrong: the duplicate arrives AT the frontier, not below
+                            // it — seq 0 repeated while the frontier was still 0 — so `seq <
+                            // frontier` was false and the guard never fired.)
+                            val sentAt = lastSentAtMs[seq]
+                            if (sentAt != null && System.currentTimeMillis() - sentAt < MISSION_ITEM_RETRANSMIT_WINDOW_MS) {
+                                LogUtils.w("MissionUpload", "⏭️ Ignoring duplicate request for seq=$seq (already sent ${System.currentTimeMillis() - sentAt}ms ago — FC's retransmit crossed our reply); answering it would trip INVALID_SEQUENCE")
+                                return@collect
+                            }
+                            if (sentAt != null) {
+                                LogUtils.w("MissionUpload", "↻ FC re-requested seq=$seq ${System.currentTimeMillis() - sentAt}ms after our send — treating as a genuine loss, re-sending")
                             }
 
                             val item = missionItems[seq].copy(
@@ -3556,37 +3824,78 @@ class MavlinkTelemetryRepository(
                                 seq = seq.toUShort()
                             )
 
-                            // Adaptive delay: 50ms for BT/serial
-                            if (seq > 0) delay(50L)
-
-                            connection.trySendUnsignedV2(gcsSystemId, gcsComponentId, item)
+                            // Sent inline, and deliberately WITHOUT the old per-item delay.
+                            //
+                            // The delay was pacing for BT/serial, but it ran ON the collector,
+                            // which is precisely what let frames back up and cost us the next
+                            // MISSION_REQUEST_INT. Sending from a spawned coroutine instead
+                            // would fix the suspension but introduce two worse problems: items
+                            // could reach the link out of order, and sentSeqs would record
+                            // "sent" before the write actually happened — and the final ACK is
+                            // gated on sentSeqs being complete. The buffered flow above is what
+                            // actually fixes the drop, so the correct move is to keep the send
+                            // inline, in order, and not block the stream at all.
+                            val sendOk = connection.trySendUnsignedV2(gcsSystemId, gcsComponentId, item)
                             sentSeqs.add(seq)
+                            lastSentAtMs[seq] = System.currentTimeMillis()
 
                             // Emit progress update to UI
                             onProgress?.invoke(seq + 1, missionItems.size)
 
-                            // Log progress: first, last, and every 10 items for verification
-                            if (seq == 0 || seq == missionItems.size - 1 || seq % 10 == 0) {
-                                val cmdName = item.command.entry?.name ?: "CMD_${item.command.value}"
+                            // Full detail on every item. This is the log that distinguishes
+                            // "the FC never asked again" from "the FC rejected what we sent",
+                            // and it must show the exact field values the FC is judging —
+                            // frame and command are the usual culprits on a 4.6.x rejection.
+                            val cmdName = item.command.entry?.name ?: "CMD_${item.command.value}"
+                            val frameName = item.frame.entry?.name ?: "FRAME_${item.frame.value}"
+                            LogUtils.i(
+                                "MissionUpload",
+                                "📤 seq=$seq $cmdName frame=$frameName " +
+                                    "lat=${item.x / 1e7} lon=${item.y / 1e7} alt=${item.z} " +
+                                    "p1=${item.param1} p2=${item.param2} p3=${item.param3} p4=${item.param4} " +
+                                    "current=${item.current} autocontinue=${item.autocontinue} sendOk=$sendOk"
+                            )
+                            if (!sendOk) {
+                                LogUtils.e("MissionUpload", "✗ Link REFUSED the write for seq=$seq — item never reached the FC")
                             }
                         }
 
                         is MissionAck -> {
-                            if (!firstRequestReceived) {
+                            if (!firstRequestReceived.get()) {
+                                return@collect
+                            }
+                            // A FENCE ack must never complete a MISSION upload. The fence
+                            // upload runs on its own scope and its ack lands on this same
+                            // shared flow.
+                            if (msg.missionType.value != MavMissionType.MISSION.value) {
+                                LogUtils.i("MissionUpload", "Ignoring ${msg.missionType.entry?.name ?: msg.missionType.value} ack during mission upload")
                                 return@collect
                             }
 
                             val ackType = msg.type.entry?.name ?: msg.type.value.toString()
+                            // THE decisive line. Every branch below used to fail silently,
+                            // so a rejection was indistinguishable from a timeout in the log.
+                            LogUtils.i(
+                                "MissionUpload",
+                                "📬 MISSION_ACK type=$ackType (${msg.type.value}) missionType=${msg.missionType.entry?.name ?: msg.missionType.value} " +
+                                    "after ${sentSeqs.size}/${missionItems.size} items sent (highest seq sent=${sentSeqs.maxOrNull() ?: -1})"
+                            )
 
                             when (msg.type.value) {
                                 MavMissionResult.MAV_MISSION_ACCEPTED.value -> {
                                     // Verify all items sent before accepting
                                     if (sentSeqs.size == missionItems.size) {
+                                        LogUtils.i("MissionUpload", "✅ Mission accepted — all ${missionItems.size} items uploaded")
                                         finalAckDeferred.complete(true to "")
                                     } else {
+                                        LogUtils.w("MissionUpload", "⚠️ FC sent ACCEPTED but only ${sentSeqs.size}/${missionItems.size} items were sent — ignoring, waiting for the rest")
                                     }
                                 }
                                 MavMissionResult.MAV_MISSION_INVALID_SEQUENCE.value -> {
+                                    // Should no longer happen now that stale re-requests are
+                                    // dropped. If it does, say what we had sent when it hit —
+                                    // that is what identifies which item went out of order.
+                                    LogUtils.e("MissionUpload", "✗ INVALID_SEQUENCE after ${sentSeqs.size}/${missionItems.size} (sent=${sentSeqs.sorted()})")
                                     finalAckDeferred.complete(false to "Invalid sequence error")
                                 }
                                 MavMissionResult.MAV_MISSION_DENIED.value -> {
@@ -3616,7 +3925,8 @@ class MavlinkTelemetryRepository(
                                     finalAckDeferred.complete(false to "Upload cancelled")
                                 }
                                 else -> {
-                                    finalAckDeferred.complete(false to "Unknown error")
+                                    LogUtils.e("MissionUpload", "✗ Upload rejected: $ackType (raw ${msg.type.value})")
+                                    finalAckDeferred.complete(false to "Unknown error ($ackType)")
                                 }
                             }
                         }
@@ -3626,12 +3936,13 @@ class MavlinkTelemetryRepository(
 
             // Wait for first request (simplified timeout)
             var waitTime = 0L
-            while (!firstRequestReceived && !finalAckDeferred.isCompleted && waitTime < 10000L) {
+            while (!firstRequestReceived.get() && !finalAckDeferred.isCompleted && waitTime < 10000L) {
                 delay(100)
                 waitTime += 100
             }
 
-            if (!firstRequestReceived && !finalAckDeferred.isCompleted) {
+            if (!firstRequestReceived.get() && !finalAckDeferred.isCompleted) {
+                LogUtils.e("MissionUpload", "✗ FC never requested a single item after MISSION_COUNT (waited ${waitTime}ms)")
                 finalAckDeferred.complete(false to "No response from FCU")
             }
 
@@ -3639,6 +3950,12 @@ class MavlinkTelemetryRepository(
             val (success, errorMsg) = withTimeoutOrNull(timeoutMs) {
                 finalAckDeferred.await()
             } ?: (false to "Upload timeout (${timeoutMs}ms)")
+
+            if (success) {
+                LogUtils.i("MissionUpload", "✅ Upload complete: ${missionItems.size} items")
+            } else {
+                LogUtils.e("MissionUpload", "✗ Upload FAILED: $errorMsg (sent ${sentSeqs.size}/${missionItems.size}, seqs=${sentSeqs.sorted()})")
+            }
 
             collectorJob.cancel()
             resendJob.cancel()
@@ -3659,6 +3976,7 @@ class MavlinkTelemetryRepository(
 
             return success
         } catch (e: Exception) {
+            LogUtils.e("MissionUpload", "✗ Upload threw: ${e.message}", e)
             return false
         } finally {
             // Always reset flag when upload completes (success or failure)
@@ -4013,16 +4331,31 @@ class MavlinkTelemetryRepository(
 
             // Step 2: Wait for mission requests and send fence items
             val finalAckDeferred = CompletableDeferred<Pair<Boolean, String>>()
-            val sentSeqs = mutableSetOf<Int>()
+            // Concurrent + frontier guard, for the same reasons as uploadMissionWithAck: the
+            // collector hops pool threads, and answering a stale re-request after the FC has
+            // advanced trips MAV_MISSION_INVALID_SEQUENCE. Fences are small enough that this
+            // has not bitten yet, but the defect is identical.
+            val sentSeqs = java.util.concurrent.ConcurrentHashMap.newKeySet<Int>()
+            val lastSentAtMs = java.util.concurrent.ConcurrentHashMap<Int, Long>()
 
+            // Buffered `mavFrame`, not raw `connection.mavFrame` — same DROP_OLDEST hazard
+            // that stalled mission upload at the second item. See uploadMissionWithAck.
             val job = AppScope.launch {
-                connection.mavFrame.collect { frame ->
+                mavFrame.collect { frame ->
                     when (val msg = frame.message) {
                         is MissionRequest, is MissionRequestInt -> {
                             val seq = if (msg is MissionRequestInt) msg.seq.toInt() else (msg as MissionRequest).seq.toInt()
 
                             if (seq !in 0 until fenceItems.size) {
                                 finalAckDeferred.complete(false to "Invalid fence sequence $seq")
+                                return@collect
+                            }
+
+                            // Drop retransmits that crossed our reply — see the guard in
+                            // uploadMissionWithAck for why this is time-based.
+                            val sentAt = lastSentAtMs[seq]
+                            if (sentAt != null && System.currentTimeMillis() - sentAt < MISSION_ITEM_RETRANSMIT_WINDOW_MS) {
+                                Timber.w("Geofence: ⏭️ Ignoring duplicate request for seq=$seq (sent ${System.currentTimeMillis() - sentAt}ms ago)")
                                 return@collect
                             }
 
@@ -4035,6 +4368,7 @@ class MavlinkTelemetryRepository(
                             delay(50L) // Small delay for stability
                             connection.trySendUnsignedV2(gcsSystemId, gcsComponentId, fenceItem)
                             sentSeqs.add(seq)
+                            lastSentAtMs[seq] = System.currentTimeMillis()
                         }
 
                         is MissionAck -> {
@@ -4089,8 +4423,9 @@ class MavlinkTelemetryRepository(
             val expectedCountDeferred = CompletableDeferred<Int?>()
             val perSeqMap = mutableMapOf<Int, CompletableDeferred<Unit>>()
 
+            // Buffered flow — see uploadMissionWithAck.
             val job = AppScope.launch {
-                connection.mavFrame.collect { frame ->
+                mavFrame.collect { frame ->
                     when (val msg = frame.message) {
                         is MissionCount -> {
                             expectedCountDeferred.complete(msg.count.toInt())
@@ -4145,8 +4480,16 @@ class MavlinkTelemetryRepository(
             delay(200)
             job.cancel()
 
-            // Sort items by sequence number
-            val sortedItems = receivedItems.sortedBy { it.seq.toInt() }
+            // Sort by sequence, and keep ONE item per sequence.
+            //
+            // The collector above appends every MISSION_ITEM_INT it sees, and the FC
+            // re-sends an item whenever a MISSION_REQUEST_INT looks unanswered — which on a
+            // loaded link is often. Without the dedupe the list comes back with duplicate
+            // seqs, and every consumer that reasons positionally (filterWaypointsForResume,
+            // resequenceWaypoints) then builds a mission with repeated legs in it.
+            val sortedItems = receivedItems
+                .distinctBy { it.seq.toInt() }
+                .sortedBy { it.seq.toInt() }
 
 
             if (sortedItems.size != expectedCount) {
@@ -4171,8 +4514,9 @@ class MavlinkTelemetryRepository(
         try {
             val expectedCountDeferred = CompletableDeferred<Int?>()
 
+            // Buffered flow — see uploadMissionWithAck.
             val job = AppScope.launch {
-                connection.mavFrame.collect { frame ->
+                mavFrame.collect { frame ->
                     when (val msg = frame.message) {
                         is MissionCount -> {
                             expectedCountDeferred.complete(msg.count.toInt())
@@ -4280,6 +4624,89 @@ class MavlinkTelemetryRepository(
     }
 
     /**
+     * Start a RESUMED mission — deliberately NOT [startMission].
+     *
+     * [startMission] is the cold-start path: pre-arm checks, arm-with-retries, then
+     * MAV_CMD_MISSION_START with param1 = 0. That last command means "begin at the first
+     * item", and it is what broke resume. The sequence was:
+     *
+     *   1. The resumed mission is uploaded and DO_SET_MISSION_CURRENT(1) points the FC at
+     *      the inserted transit waypoint.
+     *   2. The pilot flicks to AUTO; onModeChangedToAuto calls startMission().
+     *   3. MISSION_START resets the index straight back to 0, discarding step 1.
+     *
+     * The drone then flew the resumed mission from its start instead of from the resume
+     * waypoint — landing it two or three waypoints back up the grid, re-flying ground it had
+     * already covered. The arm/pre-arm work in startMission is wrong here too: the vehicle is
+     * already armed and airborne, so pre-arm checks are meaningless and a failed "arm" would
+     * abort a resume that needed no arming.
+     *
+     * This path therefore: verifies the vehicle is actually flying, re-asserts the mission
+     * index, and only then puts it in AUTO. Setting the index BEFORE the mode change matters
+     * — done the other way round the FC starts running item 0 in the window between the two.
+     *
+     * On the usual trigger the pilot has ALREADY flicked to AUTO (that mode change is what
+     * calls this), so the changeMode below is a confirmed no-op and re-asserting the index is
+     * the whole job. The FC may therefore fly a few seconds towards the wrong item before the
+     * index lands; that is unavoidable once the pilot owns the switch, and is why
+     * processResumePoint also sets the index at upload time — this is the backstop, not the
+     * only attempt. resumeMission is written to work from either direction so the
+     * GCS-initiated paths can share it.
+     *
+     * @param resumeSeq mission index the resumed mission must start from (the inserted
+     *                  transit waypoint, normally 1)
+     * @return true only if the index was confirmed AND the vehicle is in AUTO
+     */
+    suspend fun resumeMission(resumeSeq: Int = 1): Boolean {
+        if (!state.value.fcuDetected) {
+            sharedViewModel.addNotification(
+                Notification("Cannot resume mission - FCU not detected", NotificationType.ERROR)
+            )
+            return false
+        }
+
+        // A resume only makes sense on an armed vehicle. If it somehow disarmed while parked,
+        // fall back to the cold-start path rather than half-starting a mission in mid-air.
+        if (!state.value.armed) {
+            LogUtils.w("ResumeMission", "Vehicle is disarmed — falling back to the full start path")
+            return startMission()
+        }
+
+        // Step 1: re-assert the mission index. This is the whole point of the function, so a
+        // failure here aborts rather than handing the FC to AUTO with an unknown index.
+        val indexSet = setCurrentWaypoint(resumeSeq)
+        if (!indexSet) {
+            LogUtils.e("ResumeMission", "✗ Could not set mission index to $resumeSeq — NOT switching to AUTO")
+            sharedViewModel.addNotification(
+                Notification(
+                    "⛔ Resume aborted — the drone did not accept the resume point. It is still holding position.",
+                    NotificationType.ERROR
+                )
+            )
+            return false
+        }
+
+        // Step 2: AUTO. changeMode retries and confirms against the heartbeat, and returns
+        // true immediately if the pilot already put the vehicle in AUTO by hand.
+        val modeChanged = try {
+            changeMode(MavMode.AUTO)
+        } catch (e: Exception) {
+            LogUtils.e("ResumeMission", "✗ Exception switching to AUTO", e)
+            false
+        }
+
+        if (!modeChanged) {
+            sharedViewModel.addNotification(
+                Notification("Failed to switch to AUTO mode for resume.", NotificationType.ERROR)
+            )
+            return false
+        }
+
+        LogUtils.i("ResumeMission", "✅ Resume started from mission index $resumeSeq")
+        return true
+    }
+
+    /**
      * Sends MISSION_START as CommandLong (param1=0, param2=0, ...)
      */
     suspend fun sendMissionStartCommand() {
@@ -4303,6 +4730,10 @@ class MavlinkTelemetryRepository(
         try {
             // Stop fence monitoring to prevent stale state from old connection
             stopFenceMonitoring()
+            // Capabilities describe the vehicle we are leaving, not the next one. Dropping
+            // them back to "unknown" keeps the fence check permissive on reconnect rather
+            // than judging a new FC by the old one's bitmask.
+            _autopilotCapabilities.value = null
             // Mark this as an intentional disconnect to prevent auto-reconnect
             intentionalDisconnect = true
             // Reset voltage smoothing and the learned cell count. Cleared here rather than on
@@ -4367,31 +4798,111 @@ class MavlinkTelemetryRepository(
     }
 
     /**
-     * Set the current mission waypoint
+     * Set the current mission waypoint, and confirm the flight controller took it.
+     *
+     * This used to fire DO_SET_MISSION_CURRENT once, sleep 500ms and return true
+     * unconditionally. COMMAND_LONG is unacknowledged at the transport level, so a packet
+     * dropped on a busy link reported success while the FC kept its old mission index — the
+     * resume then continued from wherever the FC happened to be, several waypoints back up
+     * the grid, with nothing in the logs to say why.
+     *
+     * So: re-send on a cadence for the whole window and confirm, exactly as [changeMode]
+     * does. Confirmation accepts EITHER a COMMAND_ACK for DO_SET_MISSION_CURRENT or
+     * MISSION_CURRENT reporting the requested seq — older ArduPilot builds update the index
+     * and emit MISSION_CURRENT without ever ACKing the command. Re-sending is harmless: the
+     * command is idempotent.
+     *
      * @param seq Waypoint sequence number to resume from
+     * @return true only if the FC was observed to accept the new index
      */
     suspend fun setCurrentWaypoint(seq: Int): Boolean {
-        return try {
-            val cmd = CommandLong(
-                targetSystem = fcuSystemId,
-                targetComponent = fcuComponentId,
-                command = MavCmd.DO_SET_MISSION_CURRENT.wrap(),
-                confirmation = 0u,
-                param1 = seq.toFloat(),
-                param2 = 0f,
-                param3 = 0f,
-                param4 = 0f,
-                param5 = 0f,
-                param6 = 0f,
-                param7 = 0f
-            )
+        val timeoutMs = 4000L
+        val resendEveryMs = 700L
 
-            connection.trySendUnsignedV2(gcsSystemId, gcsComponentId, cmd)
-            delay(500)
+        // The MISSION_CURRENT fallback below must only trust a report that arrived AFTER our
+        // first send. uploadMissionWithAck nulls currentWaypoint, but on the paths that do not
+        // re-upload, the FC's index can already read `seq` from the previous mission — and
+        // accepting that would confirm a command we had not yet sent.
+        val missionCurrentAtStart = lastMissionCurrentAtMs
 
-            true
-        } catch (e: Exception) {
-            false
+        // Subscribe BEFORE the first send, or a fast ACK arrives while we are not listening.
+        // AppScope, not the caller's scope: `scope` in this class is a local inside start().
+        val ackSeen = CompletableDeferred<Boolean>()
+        val ackJob = AppScope.launch {
+            try {
+                commandAck
+                    .filter { it.command.value == MavCmd.DO_SET_MISSION_CURRENT.value }
+                    .first()
+                    .let { ack ->
+                        val accepted = ack.result.entry == MavResult.ACCEPTED
+                        if (!accepted) {
+                            LogUtils.e(
+                                "ResumeMission",
+                                "✗ DO_SET_MISSION_CURRENT($seq) rejected by FC: ${ack.result.entry?.name ?: ack.result.value}"
+                            )
+                        }
+                        ackSeen.complete(accepted)
+                    }
+            } catch (_: Throwable) {
+                // Scope cancelled or flow terminated; the polling loop below still decides.
+            }
+        }
+
+        try {
+            val start = System.currentTimeMillis()
+            var lastSendAt = 0L
+            var attempts = 0
+
+            while (System.currentTimeMillis() - start < timeoutMs) {
+                val now = System.currentTimeMillis()
+                if (now - lastSendAt >= resendEveryMs) {
+                    lastSendAt = now
+                    attempts++
+                    try {
+                        val cmd = CommandLong(
+                            targetSystem = fcuSystemId,
+                            targetComponent = fcuComponentId,
+                            command = MavCmd.DO_SET_MISSION_CURRENT.wrap(),
+                            confirmation = 0u,
+                            param1 = seq.toFloat(),
+                            param2 = 0f,
+                            param3 = 0f,
+                            param4 = 0f,
+                            param5 = 0f,
+                            param6 = 0f,
+                            param7 = 0f
+                        )
+                        connection.trySendUnsignedV2(gcsSystemId, gcsComponentId, cmd)
+                        if (attempts > 1) {
+                            LogUtils.w("ResumeMission", "↻ DO_SET_MISSION_CURRENT($seq) not confirmed — resending (attempt $attempts)")
+                        }
+                    } catch (e: Exception) {
+                        LogUtils.e("ResumeMission", "✗ Failed to send DO_SET_MISSION_CURRENT($seq)", e)
+                    }
+                }
+
+                if (ackSeen.isCompleted) {
+                    val accepted = ackSeen.await()
+                    if (accepted) {
+                        LogUtils.i("ResumeMission", "✓ FC acknowledged mission index = $seq (attempt $attempts)")
+                    }
+                    return accepted
+                }
+
+                // Fallback confirmation for firmware that does not ACK this command. Only a
+                // MISSION_CURRENT newer than our first send counts — see missionCurrentAtStart.
+                if (lastMissionCurrentAtMs > missionCurrentAtStart && state.value.currentWaypoint == seq) {
+                    LogUtils.i("ResumeMission", "✓ MISSION_CURRENT confirms mission index = $seq (attempt $attempts)")
+                    return true
+                }
+
+                delay(150)
+            }
+
+            LogUtils.e("ResumeMission", "✗ FC never confirmed mission index = $seq after ${attempts} attempts (${timeoutMs}ms)")
+            return false
+        } finally {
+            ackJob.cancel()
         }
     }
 
@@ -4514,10 +5025,25 @@ class MavlinkTelemetryRepository(
      */
     fun currentMissionTargetSeq(): Int {
         val snapshot = state.value
-        val target = snapshot.lastAutoWaypoint.takeIf { it > 0 }
+        val known = snapshot.lastAutoWaypoint.takeIf { it > 0 }
             ?: snapshot.currentWaypoint
-            ?: 1
-        return maxOf(target, snapshot.lastReachedWaypoint + 1).coerceAtLeast(1)
+
+        // No MISSION_CURRENT seen yet. uploadMissionWithAck clears these counters on every
+        // successful upload, so this is the normal state immediately after a resume has been
+        // uploaded — and the old silent `?: 1` made a SECOND pause in that window resume from
+        // index 1, the previous resume's transit waypoint, which sits several waypoints back
+        // up the grid. It is still the only safe default (resuming too early re-flies ground
+        // rather than skipping it), but it must not pass unnoticed.
+        if (known == null) {
+            LogUtils.w(
+                "ResumeMission",
+                "⚠️ No mission progress known from the FC (lastAutoWaypoint=${snapshot.lastAutoWaypoint}, " +
+                    "currentWaypoint=${snapshot.currentWaypoint}) — defaulting the resume target to 1. " +
+                    "Check the resume point on the map before engaging AUTO."
+            )
+        }
+
+        return maxOf(known ?: 1, snapshot.lastReachedWaypoint + 1).coerceAtLeast(1)
     }
 
     /**
@@ -4753,6 +5279,20 @@ class MavlinkTelemetryRepository(
                     return@withContext false
                 }
 
+                // Step 0: Does this vehicle take fence geometry as mission items at all?
+                // Only refuses when the FC has actually told us it cannot (see
+                // fenceMissionProtocolUnsupported) — an absent AUTOPILOT_VERSION does not block.
+                fenceMissionProtocolUnsupported()?.let { missing ->
+                    Timber.e("Geofence: ❌ Vehicle does not support $missing - cannot upload fence geometry")
+                    sharedViewModel.addNotification(
+                        Notification(
+                            message = "❌ This drone does not support fence uploads ($missing missing)",
+                            type = NotificationType.ERROR
+                        )
+                    )
+                    return@withContext false
+                }
+
                 // Step 1: Convert fence zones to MAVLink mission items
                 val fenceItems = convertFenceToMissionItems(configuration.zones)
 
@@ -4774,17 +5314,32 @@ class MavlinkTelemetryRepository(
                 // Step 3: Configure fence parameters
                 delay(500)  // Let FC process fence upload
 
-                val paramsSet = configureFenceParameters(configuration)
+                val appliedTypeBits = configureFenceParameters(configuration)
 
-                if (!paramsSet) {
-                    Timber.e("Geofence: ❌ Failed at Step 3: configureFenceParameters returned false")
+                if (appliedTypeBits == null) {
+                    Timber.e("Geofence: ❌ Failed at Step 3: configureFenceParameters could not write the fence parameters")
                     return@withContext false
                 }
-                Timber.i("Geofence: Step 3 OK - fence parameters configured")
+                Timber.i("Geofence: Step 3 OK - fence parameters configured, FENCE_TYPE=$appliedTypeBits")
 
                 // Step 4: Enable fence
                 //
+                // A plain write of 1 is not enough when the fence is ALREADY enabled — which
+                // it now usually is, because SharedViewModel.armFcAltitudeFence() turns the
+                // altitude fence on at connect. AC_Fence rebuilds its live _enabled_fences
+                // mask only when FENCE_ENABLE changes VALUE, so the polygon bit that
+                // configureFenceParameters just ORed into FENCE_TYPE would show up in the
+                // parameter (and in every UI reading it back) while never being evaluated.
+                // Bounce through 0 so the mask is rebuilt.
+                //
+                // Only on a disarmed aircraft: dropping the fence for 300 ms mid-flight is
+                // not a trade worth making, and fence uploads are a ground-planning action.
                 delay(500)
+                if (readFenceParameter("FENCE_ENABLE")?.toInt() == 1 && !state.value.armed) {
+                    Timber.i("Geofence: fence already enabled - bouncing FENCE_ENABLE so the new FENCE_TYPE goes live")
+                    setFenceParameter("FENCE_ENABLE", 0f)
+                    delay(300)
+                }
                 val enabled = enableFence(true)
 
                 if (!enabled) {
@@ -4793,12 +5348,26 @@ class MavlinkTelemetryRepository(
                 }
                 Timber.i("Geofence: Step 4 OK - fence enabled")
 
-                // Step 5: Verify fence is actually enabled by reading back parameters
+                // Step 5: Verify the fence is actually live by reading the parameters back.
+                //
+                // The result is now RETURNED rather than just logged. It used to be
+                // discarded — uploadGeofence returned an unconditional `true` — so a fence
+                // that was uploaded but not enforcing reported success all the way up to the
+                // pilot, which is the failure mode this whole path exists to prevent.
                 delay(300)
-                val verified = verifyFenceEnabled()
+                val verified = verifyFenceEnabled(appliedTypeBits)
+                if (!verified) {
+                    Timber.e("Geofence: ❌ Failed at Step 5: the fence did not verify as live on the FC")
+                    sharedViewModel.addNotification(
+                        Notification(
+                            message = "⚠️ Geofence uploaded but the drone did not confirm it is enforcing — check FENCE_ENABLE / FENCE_TYPE",
+                            type = NotificationType.WARNING
+                        )
+                    )
+                }
                 Timber.i("Geofence: Step 5 - verifyFenceEnabled returned $verified")
 
-                true
+                verified
 
             } catch (e: Exception) {
                 Timber.e(e, "Geofence: ❌ Upload failed with exception")
@@ -4834,7 +5403,11 @@ class MavlinkTelemetryRepository(
                                 command = MavEnumValue.of(command),
                                 current = 0u,
                                 autocontinue = 0u,
-                                param1 = zone.points.size.toFloat(),  // Total vertex count
+                                // Vertex count of THIS polygon — NOT the total item count of
+                                // the upload. ArduPilot (and Mission Planner's parser) use it
+                                // as the "close the polygon" signal, so with two polygons in
+                                // one fence each one's vertices carry its own count.
+                                param1 = zone.points.size.toFloat(),
                                 param2 = 0f,
                                 param3 = 0f,
                                 param4 = 0f,
@@ -5030,13 +5603,33 @@ class MavlinkTelemetryRepository(
                         if (ack.type.value == MavMissionResult.MAV_MISSION_ACCEPTED.value) {
                             continuation.resume(true)
                         } else {
+                            Timber.e("Geofence: ❌ Fence upload rejected, MISSION_ACK type=${ack.type.value}")
                             continuation.resume(false)
                         }
                     } else {
-                        // No ACK received - but fence might still be uploaded
-                        // Some FCs don't send ACK for fence uploads
-                        // Return true anyway as the items were uploaded
-                        continuation.resume(true)
+                        // No MISSION_ACK. This used to return true on the theory that "some
+                        // FCs don't ACK fence uploads" — which let the caller go on to set
+                        // FENCE_ENABLE=1 over geometry nothing had confirmed. ArduPilot 4.6.3
+                        // always ACKs, so a missing ACK means the upload did not land.
+                        //
+                        // Rather than fail outright on one dropped packet, cross-check the
+                        // vehicle's own stored item count. FENCE_TOTAL matching what we sent
+                        // is stronger evidence than an ACK; anything else is a failure.
+                        val storedCount = readFenceParameter("FENCE_TOTAL")?.toInt()
+                        when {
+                            storedCount == items.size -> {
+                                Timber.w("Geofence: ⚠️ No MISSION_ACK, but FENCE_TOTAL=$storedCount matches the ${items.size} items sent - accepting")
+                                continuation.resume(true)
+                            }
+                            storedCount == null -> {
+                                Timber.e("Geofence: ❌ No MISSION_ACK and FENCE_TOTAL unreadable - treating the upload as FAILED")
+                                continuation.resume(false)
+                            }
+                            else -> {
+                                Timber.e("Geofence: ❌ No MISSION_ACK and FENCE_TOTAL=$storedCount != ${items.size} items sent - upload FAILED")
+                                continuation.resume(false)
+                            }
+                        }
                     }
 
                 } catch (e: Exception) {
@@ -5061,13 +5654,13 @@ class MavlinkTelemetryRepository(
      * whatever the operator had configured. The GCS now reads both and reports them
      * (see SharedViewModel.syncFenceParametersOnConnect / getCurrentFenceAction).
      */
-    private suspend fun configureFenceParameters(config: FenceConfiguration): Boolean {
+    private suspend fun configureFenceParameters(config: FenceConfiguration): Int? {
         try {
             // Set the home-centred cylinder radius (FENCE_RADIUS) before enabling its bit,
             // so the fence never goes live at a stale radius.
             config.circleRadiusMeters?.let { radius ->
                 if (!setFenceParameter("FENCE_RADIUS", radius)) {
-                    return false
+                    return null
                 }
                 delay(200)
             }
@@ -5094,7 +5687,7 @@ class MavlinkTelemetryRepository(
 
             if (fenceType != currentType) {
                 if (!setFenceParameter("FENCE_TYPE", fenceType.toFloat())) {
-                    return false
+                    return null
                 }
                 delay(200)
             } else {
@@ -5104,22 +5697,97 @@ class MavlinkTelemetryRepository(
             // Set altitude limits if provided
             if (config.altitudeMax != null) {
                 if (!setFenceParameter("FENCE_ALT_MAX", config.altitudeMax)) {
-                    return false
+                    return null
                 }
+                delay(200)
+
+                // RTL_ALT must stay under the ceiling we just wrote. If it does not, the
+                // breach action begins by climbing to RTL_ALT — straight back through the
+                // fence it is recovering from — and the vehicle can loop: breach, RTL,
+                // climb, breach. syncRtlAltOnConnect enforces this at connect and from
+                // Options; doing it here too means no upload path can leave the pair
+                // inconsistent, including a caller that passes its own altitudeMax.
+                clampRtlAltBelowFenceCeiling(config.altitudeMax)
                 delay(200)
             }
 
             if (config.altitudeMin != null) {
                 if (!setFenceParameter("FENCE_ALT_MIN", config.altitudeMin)) {
-                    return false
+                    return null
                 }
                 delay(200)
             }
 
-            return true
+            return fenceType
 
         } catch (e: Exception) {
+            Timber.e(e, "Geofence: failed configuring fence parameters")
+            return null
+        }
+    }
+
+    /**
+     * Lower RTL_ALT if it sits at or above [fenceAltMaxM], the FC's altitude fence ceiling.
+     *
+     * Only ever LOWERED, never raised: an operator who deliberately set a conservative RTL
+     * altitude keeps it. Units matter — RTL_ALT is CENTIMETRES, and RTL_ALT=0 means "return
+     * at the current altitude", so the written value is floored rather than allowed to reach
+     * zero. Same policy as [SharedViewModel.syncRtlAltOnConnect], whose constants it borrows
+     * so there is one definition of "how far under the ceiling RTL belongs".
+     *
+     * Measured from FENCE_ALT_MAX, which sits FC_ALT_FENCE_SAFETY_OFFSET_M below the pilot's
+     * nominal ceiling — so the target here is ~1 m lower than syncRtlAltOnConnect computes
+     * from the ceiling itself. That is deliberate, not drift: RTL has to clear the fence that
+     * is actually armed, and because both paths only ever LOWER RTL_ALT the difference
+     * settles once rather than ratcheting down on every upload.
+     *
+     * Best-effort: a failure here is logged and surfaced but does not fail the fence upload.
+     * A fence that is live with a too-high RTL_ALT is still better than no fence, and
+     * SharedViewModel.handleAltitudeFailsafe brakes before RTL as the in-flight backstop.
+     */
+    private suspend fun clampRtlAltBelowFenceCeiling(fenceAltMaxM: Float): Boolean {
+        val headroomM = sharedViewModel.RTL_ALT_BELOW_CEILING_M
+        val floorM = sharedViewModel.RTL_ALT_MIN_M
+        val desiredM = (fenceAltMaxM - headroomM).coerceAtLeast(floorM)
+
+        if (desiredM >= fenceAltMaxM) {
+            // Ceiling at or under the floor: no RTL altitude is both legal and sane.
+            Timber.e("Geofence: FENCE_ALT_MAX=${fenceAltMaxM}m is too low for a safe RTL_ALT (floor ${floorM}m) - RTL will breach it")
             return false
+        }
+
+        val currentCm = readFenceParameter("RTL_ALT", timeoutMs = 4000L)
+        if (currentCm == null) {
+            Timber.w("Geofence: could not read RTL_ALT - cannot confirm RTL stays under the ${fenceAltMaxM}m fence ceiling")
+            return false
+        }
+
+        val currentM = currentCm / 100f
+        if (currentM <= desiredM) {
+            Timber.i("Geofence: RTL_ALT=${currentM}m already clears the ${fenceAltMaxM}m fence ceiling - left as configured")
+            return true
+        }
+
+        return if (setFenceParameter("RTL_ALT", desiredM * 100f)) {
+            Timber.i("Geofence: ✓ RTL_ALT lowered ${currentM}m -> ${desiredM}m (${headroomM}m under the ${fenceAltMaxM}m fence ceiling)")
+            // Said out loud, not just logged: an operator who set RTL_ALT deliberately and
+            // then sees the drone return lower needs to know it was overridden on purpose.
+            sharedViewModel.addNotification(
+                Notification(
+                    message = "RTL altitude lowered to ${desiredM.toInt()} m so an RTL stays under the ${fenceAltMaxM.toInt()} m fence ceiling",
+                    type = NotificationType.INFO
+                )
+            )
+            true
+        } else {
+            Timber.e("Geofence: ✗ Failed to lower RTL_ALT - an RTL may climb through the ${fenceAltMaxM}m fence ceiling")
+            sharedViewModel.addNotification(
+                Notification(
+                    message = "⚠️ Could not lower RTL_ALT below the fence ceiling — an RTL may exceed it",
+                    type = NotificationType.WARNING
+                )
+            )
+            false
         }
     }
 
@@ -5131,85 +5799,42 @@ class MavlinkTelemetryRepository(
     }
 
     /**
-     * Verify that fence is actually enabled by reading back parameters
+     * Confirm the fence really is live, by reading back the parameters the whole thing rests on.
+     *
+     * Rewritten because the old version could not actually verify anything:
+     *
+     *  1. It matched PARAM_VALUE.param_id with `== "FENCE_ENABLE"`, WITHOUT stripping
+     *     MAVLink's fixed-width NUL padding — the exact bug [setFenceParameter] documents.
+     *     A perfectly good reply arrives as "FENCE_ENABLE" followed by NUL padding out
+     *     to 16 bytes, and was discarded — so a live fence could verify as dead.
+     *  2. It then requested FENCE_TYPE and FENCE_ACTION and threw both replies away, which
+     *     was pure parameter traffic competing with the fence upload it was verifying.
+     *  3. FENCE_ENABLE=1 alone is not enough. AC_Fence rebuilds its live _enabled_fences
+     *     mask only when FENCE_ENABLE changes VALUE, so the bit that matters is whether
+     *     FENCE_TYPE actually carries the fence we just uploaded.
+     *
+     * @param expectedTypeBits FENCE_TYPE bits this upload requires (e.g. the polygon bit).
+     *   Verified as a subset, not an equality: other fences the operator armed stay set.
      */
-    private suspend fun verifyFenceEnabled(): Boolean {
-        return suspendCancellableCoroutine { continuation ->
-            val job = AppScope.launch {
-                try {
-                    // Request FENCE_ENABLE parameter
-                    val paramRequest = ParamRequestRead(
-                        targetSystem = fcuSystemId,
-                        targetComponent = fcuComponentId,
-                        paramId = "FENCE_ENABLE",
-                        paramIndex = -1
-                    )
-                    connection.trySendUnsignedV2(gcsSystemId, gcsComponentId, paramRequest)
-
-                    // Wait for response
-                    val response = withTimeoutOrNull(2000) {
-                        mavFrame
-                            .filter { it.systemId == fcuSystemId }
-                            .map { it.message }
-                            .filterIsInstance<ParamValue>()
-                            .first { it.paramId == "FENCE_ENABLE" }
-                    }
-
-                    if (response != null) {
-                        val isEnabled = response.paramValue >= 1.0f
-
-                        // Also check FENCE_TYPE to confirm polygon fence is configured
-                        if (isEnabled) {
-                            delay(100)
-                            val typeRequest = ParamRequestRead(
-                                targetSystem = fcuSystemId,
-                                targetComponent = fcuComponentId,
-                                paramId = "FENCE_TYPE",
-                                paramIndex = -1
-                            )
-                            connection.trySendUnsignedV2(gcsSystemId, gcsComponentId, typeRequest)
-
-                            withTimeoutOrNull(2000) {
-                                mavFrame
-                                    .filter { it.systemId == fcuSystemId }
-                                    .map { it.message }
-                                    .filterIsInstance<ParamValue>()
-                                    .first { it.paramId == "FENCE_TYPE" }
-                            }
-
-                            // Check FENCE_ACTION
-                            delay(100)
-                            val actionRequest = ParamRequestRead(
-                                targetSystem = fcuSystemId,
-                                targetComponent = fcuComponentId,
-                                paramId = "FENCE_ACTION",
-                                paramIndex = -1
-                            )
-                            connection.trySendUnsignedV2(gcsSystemId, gcsComponentId, actionRequest)
-
-                            withTimeoutOrNull(2000) {
-                                mavFrame
-                                    .filter { it.systemId == fcuSystemId }
-                                    .map { it.message }
-                                    .filterIsInstance<ParamValue>()
-                                    .first { it.paramId == "FENCE_ACTION" }
-                            }
-                        }
-
-                        continuation.resume(isEnabled)
-                    } else {
-                        continuation.resume(false)
-                    }
-
-                } catch (e: Exception) {
-                    continuation.resume(false)
-                }
-            }
-
-            continuation.invokeOnCancellation {
-                job.cancel()
-            }
+    private suspend fun verifyFenceEnabled(expectedTypeBits: Int): Boolean {
+        val enable = readFenceParameter("FENCE_ENABLE")?.toInt()
+        if (enable != 1) {
+            Timber.e("Geofence: ✗ verify failed - FENCE_ENABLE reads back as ${enable ?: "unreadable"}")
+            return false
         }
+
+        val type = readFenceParameter("FENCE_TYPE")?.toInt()
+        if (type == null) {
+            Timber.e("Geofence: ✗ verify failed - FENCE_TYPE unreadable")
+            return false
+        }
+        if (type and expectedTypeBits != expectedTypeBits) {
+            Timber.e("Geofence: ✗ verify failed - FENCE_TYPE=$type is missing bits from expected $expectedTypeBits")
+            return false
+        }
+
+        Timber.i("Geofence: ✓ verified - FENCE_ENABLE=1, FENCE_TYPE=$type covers $expectedTypeBits")
+        return true
     }
 
     /**
@@ -5337,6 +5962,11 @@ class MavlinkTelemetryRepository(
     suspend fun downloadGeofence(): List<FenceZone> {
         return withContext(Dispatchers.IO) {
             try {
+                fenceMissionProtocolUnsupported()?.let { missing ->
+                    Timber.e("Geofence: ❌ Vehicle does not support $missing - cannot download fence geometry")
+                    return@withContext emptyList()
+                }
+
                 // Request fence items using mission protocol
                 val fenceItems = requestFenceItemsFromFcu()
 
@@ -5382,31 +6012,60 @@ class MavlinkTelemetryRepository(
                         return@launch
                     }
 
-                    // Request each item
+                    // Request each item.
+                    //
+                    // Each seq is retried, and a seq that never arrives fails the WHOLE
+                    // download. A missing vertex used to be silently skipped, which is worse
+                    // than it sounds: the polygon's param1 vertex count then never matches the
+                    // vertices actually collected, so convertMissionItemsToFence drops the
+                    // polygon and a partial download reads as "this drone has no fence".
+                    // Failing loudly means the caller knows it does not have the truth.
+                    val perSeqAttempts = 3
                     for (seq in 0 until count) {
-                        val request = MissionRequestInt(
-                            targetSystem = fcuSystemId,
-                            targetComponent = fcuComponentId,
-                            seq = seq.toUShort(),
-                            missionType = MavEnumValue.of(MavMissionType.FENCE)
-                        )
-                        connection.trySendUnsignedV2(gcsSystemId, gcsComponentId, request)
+                        var item: MissionItemInt? = null
+                        repeat(perSeqAttempts) { attempt ->
+                            if (item != null) return@repeat
 
-                        val item = withTimeoutOrNull(2000) {
-                            mavFrame
-                                .filter { it.systemId == fcuSystemId }
-                                .map { it.message }
-                                .filterIsInstance<MissionItemInt>()
-                                .first { it.seq.toInt() == seq && it.missionType.value == MavMissionType.FENCE.value }
+                            // Subscribe before requesting so a fast reply cannot land in the
+                            // gap, matching the discipline in readFenceParameter.
+                            val itemDeferred = async {
+                                withTimeoutOrNull(2000) {
+                                    mavFrame
+                                        .filter { it.systemId == fcuSystemId }
+                                        .map { it.message }
+                                        .filterIsInstance<MissionItemInt>()
+                                        .first { it.seq.toInt() == seq && it.missionType.value == MavMissionType.FENCE.value }
+                                }
+                            }
+                            delay(50)
+
+                            connection.trySendUnsignedV2(
+                                gcsSystemId, gcsComponentId,
+                                MissionRequestInt(
+                                    targetSystem = fcuSystemId,
+                                    targetComponent = fcuComponentId,
+                                    seq = seq.toUShort(),
+                                    missionType = MavEnumValue.of(MavMissionType.FENCE)
+                                )
+                            )
+
+                            item = itemDeferred.await()
+                            if (item == null) {
+                                Timber.w("Geofence: ↻ no fence item for seq=$seq (attempt ${attempt + 1}/$perSeqAttempts)")
+                            }
                         }
 
-                        if (item != null) {
-                            receivedItems.add(item)
+                        val received = item
+                        if (received == null) {
+                            Timber.e("Geofence: ✗ fence download FAILED - seq=$seq never arrived after $perSeqAttempts attempts (expected $count items)")
+                            continuation.resume(emptyList())
+                            return@launch
                         }
-
+                        receivedItems.add(received)
                         delay(50)
                     }
 
+                    Timber.i("Geofence: ✓ downloaded all $count fence items")
                     continuation.resume(receivedItems)
 
                 } catch (e: Exception) {
@@ -5546,20 +6205,30 @@ class MavlinkTelemetryRepository(
                     val fenceEnabled = (sysStatus.onboardControlSensorsEnabled.value and MAV_SYS_STATUS_GEOFENCE) != 0u
                     val fenceBreached = fenceEnabled && !fenceHealthy
 
-                    // IMPORTANT: Only report breach if a fence we actually armed is active.
-                    // The FC may have stale fence data from a previous session, so with the
-                    // polygon off we ignore FC fence status to prevent false "approaching
-                    // polygon fence" warnings and arm blocks.
+                    // IMPORTANT: Only report a breach if a fence we actually armed is active.
+                    // The FC may hold stale fence data from a previous session, and reporting
+                    // on that produces false "approaching polygon fence" warnings and arm
+                    // blocks — which is why this gate exists at all.
                     //
-                    // The home-centred range cylinder counts too: it is armed on connect
-                    // independently of the polygon toggle, and SYS_STATUS bit 8 is a single
-                    // flag for ALL fence types. Gating on the polygon alone would discard a
-                    // genuine 300m breach whenever the mission geofence was switched off.
-                    // Only the polygon is FC-enforced; the range limit and altitude ceiling
-                    // are GCS-side, so this reports on the polygon fence alone.
+                    // But the gate used to be the POLYGON toggle alone, and that stopped
+                    // being correct when SharedViewModel.armFcAltitudeFence() started arming
+                    // the FC's altitude fence on EVERY connect, independently of the polygon.
+                    // MAV_SYS_STATUS_GEOFENCE is one flag for all fence types, so gating on
+                    // the polygon discarded every genuine altitude-ceiling breach the FC
+                    // reported whenever the mission geofence happened to be switched off —
+                    // i.e. on most flights. The FC fence is the layer that actually holds the
+                    // ceiling at 400Hz, so its breach must reach the pilot.
+                    //
+                    // So: report when the GCS is flying a polygon, OR when FENCE_TYPE says
+                    // the FC is holding an altitude/circle fence. A stale polygon with no
+                    // other fence bits set is still suppressed, which is what this guard was
+                    // for in the first place.
                     val gcsGeofenceEnabled = sharedViewModel.geofenceEnabled.value
-                    if (!gcsGeofenceEnabled) {
-                        // GCS says geofence is off - ensure we report clean state
+                    val fcNonPolygonFenceArmed =
+                        (sharedViewModel.fenceTypeBits.value ?: 0) and
+                            (FENCE_TYPE_ALT_MAX or FENCE_TYPE_CIRCLE or FENCE_TYPE_ALT_MIN) != 0
+                    if (!gcsGeofenceEnabled && !fcNonPolygonFenceArmed) {
+                        // No fence we armed is active - ensure we report clean state
                         if (_fenceStatus.value.enabled || _fenceStatus.value.breached) {
                             _fenceStatus.value = FenceStatus()
                         }
@@ -5657,9 +6326,43 @@ class MavlinkTelemetryRepository(
                 }
 
                 if (ack?.type?.value == MavMissionResult.MAV_MISSION_ACCEPTED.value) {
-                    // Disable fence
                     delay(200)
-                    enableFence(false)
+
+                    // Take the POLYGON fence down, not every fence.
+                    //
+                    // This used to be a flat enableFence(false), which was correct back when
+                    // the polygon was the only reason FENCE_ENABLE was ever 1. It is not any
+                    // more: SharedViewModel.armFcAltitudeFence() enables the fence at connect
+                    // so the FC enforces the altitude ceiling itself, and clearing a mission
+                    // polygon must not quietly hand that ceiling back to the telemetry link.
+                    //
+                    // So: clear bit 2 and keep the rest. FENCE_ENABLE only goes to 0 when the
+                    // polygon was genuinely the last fence in the mask — or when FENCE_TYPE
+                    // cannot be read, where the old behaviour is the safe thing to fall back
+                    // to rather than leaving an enabled fence in an unknown state.
+                    val currentType = readFenceParameter("FENCE_TYPE")?.toInt()
+                    if (currentType == null) {
+                        Timber.w("Geofence: could not read FENCE_TYPE while clearing - disabling the fence outright")
+                        enableFence(false)
+                    } else {
+                        val remaining = currentType and FENCE_TYPE_POLYGON.inv()
+                        if (remaining != currentType) {
+                            setFenceParameter("FENCE_TYPE", remaining.toFloat())
+                            delay(200)
+                        }
+                        if (remaining == 0) {
+                            Timber.i("Geofence: polygon was the last fence in the mask - disabling FENCE_ENABLE")
+                            enableFence(false)
+                        } else {
+                            // Bounce so AC_Fence rebuilds its live mask without the polygon.
+                            Timber.i("Geofence: polygon bit cleared, FENCE_TYPE=$remaining stays armed")
+                            if (remaining != currentType && !state.value.armed) {
+                                enableFence(false)
+                                delay(300)
+                                enableFence(true)
+                            }
+                        }
+                    }
 
                     // Reset fence status
                     _fenceStatus.value = FenceStatus()
@@ -5681,6 +6384,7 @@ class MavlinkTelemetryRepository(
      */
     suspend fun clearMissionFromFC(): Boolean {
         return withContext(Dispatchers.IO) {
+            missionProtocolMutex.withLock {
             try {
                 val clearAckDeferred = CompletableDeferred<Boolean>()
 
@@ -5689,6 +6393,9 @@ class MavlinkTelemetryRepository(
                         .filter { it.systemId == fcuSystemId && it.componentId == fcuComponentId }
                         .map { it.message }
                         .filterIsInstance<MissionAck>()
+                        // Same reasoning as uploadMissionWithAck's clear: match only MISSION
+                        // acks, or a fence ack (or another clear's ack) satisfies this one.
+                        .filter { it.missionType.value == MavMissionType.MISSION.value }
                         .collect { ack ->
                             if (ack.type.value == MavMissionResult.MAV_MISSION_ACCEPTED.value) {
                                 if (!clearAckDeferred.isCompleted) {
@@ -5713,9 +6420,10 @@ class MavlinkTelemetryRepository(
 
                 clearCollectorJob.cancel()
 
-                return@withContext ackReceived
+                return@withLock ackReceived
             } catch (e: Exception) {
                 false
+            }
             }
         }
     }

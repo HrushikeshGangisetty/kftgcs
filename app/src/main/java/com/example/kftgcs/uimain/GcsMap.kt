@@ -682,7 +682,8 @@ fun GcsMap(
                     points = geofencePolygon,
                     fillColor = Color.Red.copy(alpha = 0.05f),
                     strokeColor = LEMON_YELLOW, // Lemon yellow
-                    strokeWidth = 4f
+                    strokeWidth = 4f,
+                    zIndex = 1f // Above base overlays but still below the mission boundary/labels
                 )
 
                 // Add draggable markers for geofence adjustment when enabled
@@ -789,11 +790,15 @@ fun GcsMap(
                         createSmallLabelMarker(areaText, android.graphics.Color.rgb(255, 235, 59)) // Yellow background
                     }
 
+                    // The geofence is a buffer drawn around the mission's survey polygon, so its
+                    // centroid sits almost exactly on top of the mission area label's centroid.
+                    // Anchor this one above its point (rather than centered) so the two labels
+                    // stack instead of overlapping and becoming unreadable.
                     Marker(
                         state = MarkerState(position = centroid),
                         title = "Geofence Area: $areaText",
                         icon = areaLabelIcon,
-                        anchor = Offset(0.5f, 0.5f),
+                        anchor = Offset(0.5f, 1.6f),
                         zIndex = 8f // Below geofence markers but above other elements
                     )
 
@@ -1126,6 +1131,7 @@ fun GcsMap(
                         icon = markerIcon,
                         anchor = Offset(0.5f, 0.5f),
                         draggable = true,  // Enable dragging
+                        zIndex = 11f, // Above geofence corner markers so mission vertices stay reachable
                         onClick = {
                             // Marker clicked, can be dragged now
                             onPolygonPointClick(index) // Handle polygon point click
@@ -1138,7 +1144,9 @@ fun GcsMap(
             if (surveyPolygon.size > 2) {
                 // Close the polygon by connecting last point to first
                 val closedPolygon = surveyPolygon + surveyPolygon.first()
-                Polyline(points = closedPolygon, width = 6f, color = LEMON_YELLOW) // Lemon yellow boundary
+                // zIndex above the geofence fill/outer-fence polygons so the mission boundary
+                // stays visible instead of being painted over when the geofence is enabled.
+                Polyline(points = closedPolygon, width = 6f, color = LEMON_YELLOW, zIndex = 5f) // Lemon yellow boundary
 
                 // Show area and dimensions when enabled
                 if (showGridInfo) {
@@ -1162,7 +1170,8 @@ fun GcsMap(
                         state = MarkerState(position = centroid),
                         title = "Area: $areaText",
                         icon = areaLabelIcon,
-                        anchor = Offset(0.5f, 0.5f)
+                        anchor = Offset(0.5f, 0.5f),
+                        zIndex = 8.5f // Above the geofence area label so mission area stays legible
                     )
 
                     // Display edge dimensions for each side of the polygon
@@ -1192,7 +1201,8 @@ fun GcsMap(
                             state = MarkerState(position = midPoint),
                             title = "Edge ${index + 1}: $distanceText",
                             icon = dimLabelIcon,
-                            anchor = Offset(0.5f, 0.5f)
+                            anchor = Offset(0.5f, 0.5f),
+                            zIndex = 6f // Above the geofence fill/outer fence so mission edges stay legible
                         )
                     }
                 }

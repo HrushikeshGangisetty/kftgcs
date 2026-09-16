@@ -206,9 +206,15 @@ data class TelemetryState(
     //Speeds
     val airspeed: Float? = null,
     val groundspeed: Float? = null,
-    // Vertical speed in m/s from VFR_HUD.climb; positive = climbing. Feeds the altitude
-    // ceiling failsafe's action margin so a fast climb triggers the action earlier.
+    // Vertical speed in m/s, derived by differentiating relative altitude (NOT VFR_HUD.climb
+    // — see TelemetryRepository). Positive = climbing. This is the RAW, unfiltered value:
+    // responsive, and correspondingly noisy. Use it to answer "is the vehicle moving?".
     val climbRate: Float? = null,
+    // The same signal low-pass filtered (see TelemetryRepository.climbEmaMps). The altitude
+    // ceiling projects the vehicle's stopping altitude from THIS one: predicting off the raw
+    // value let barometric noise read as several m/s of climb and pushed the intervention
+    // metres further down the envelope than the vehicle's real motion justified.
+    val climbRateSmoothed: Float? = null,
     //Battery
     val voltage: Float? = null,
     val batteryPercent: Int? = null,

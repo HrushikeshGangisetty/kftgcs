@@ -77,6 +77,11 @@ fun PlanScreen(
     // sprayer master switch. Shared by both spray panels below.
     val sprayEffectiveOutput by telemetryViewModel.sprayEffectiveOutputPct.collectAsState()
     val sprayEnableParam by telemetryViewModel.sprayEnableParam.collectAsState()
+    // Pump mode (AUTO = speed-scaled SPRAY_PUMP_RATE, MANUAL = direct SPRAY_PUMP_PCT duty).
+    // Distinct from the `autoSpray` flag below, which embeds DO_SPRAYER items into the mission.
+    val sprayManualMode by telemetryViewModel.sprayManualMode.collectAsState()
+    val sprayManualPct by telemetryViewModel.sprayManualPct.collectAsState()
+    val sprayManualSupported by telemetryViewModel.sprayManualParamsSupported.collectAsState()
     val context = LocalContext.current
     val uploadProgress by telemetryViewModel.missionUploadProgress.collectAsState()
 
@@ -1914,7 +1919,7 @@ fun PlanScreen(
                             }
                             Row(verticalAlignment = Alignment.CenterVertically) {
                                 IconButton(
-                                    onClick = { if (!isPlanSaved) lineSpacing = (lineSpacing - 0.1f).coerceAtLeast(3f) },
+                                    onClick = { if (!isPlanSaved) lineSpacing = (lineSpacing - 0.1f).coerceAtLeast(0.5f) },
                                     enabled = !isPlanSaved,
                                     modifier = Modifier.size(32.dp)
                                 ) {
@@ -1929,8 +1934,10 @@ fun PlanScreen(
                                     value = lineSpacing,
                                     onValueChange = { if (!isPlanSaved) lineSpacing = it },
                                     enabled = !isPlanSaved,
-                                    valueRange = 2f..15f,
-                                    steps = 129,
+                                    // 0.5 m floor. steps = 144 keeps the detents at 0.1 m
+                                    // across the 0.5..15 range (14.5 m / 0.1 = 145 intervals).
+                                    valueRange = 0.5f..15f,
+                                    steps = 144,
                                     modifier = Modifier.weight(1f),
                                     colors = SliderDefaults.colors(
                                         thumbColor = if (isPlanSaved) Color.Gray else MaterialTheme.colorScheme.primary,
@@ -2194,19 +2201,65 @@ fun PlanScreen(
                             }
                         }
 
-                        // Spray Rate Slider (moved above Auto Spray)
-                        // Written to the FC as SPRAY_PUMP_RATE 1:1 by setSprayRate(), applied
-                        // immediately — even mid-mission.
+                        // Spray controls (moved above Auto Spray).
+                        // AUTO mode writes SPRAY_PUMP_RATE (% per 1 m/s) via setSprayRate();
+                        // MANUAL mode writes SPRAY_PUMP_PCT (direct duty) via setSprayManualPct().
+                        // Both are debounced and applied immediately — even mid-mission.
                         Column(modifier = Modifier.padding(vertical = 4.dp)) {
+                            // Pump mode toggle. NOTE: this is the FC's pump-output MODE — it is
+                            // NOT the "Auto Spray" switch further down, which decides whether the
+                            // planned mission gets DO_SPRAYER items embedded at line boundaries.
                             Row(verticalAlignment = Alignment.CenterVertically) {
-                                Text("Spray Rate", color = Color.White, modifier = Modifier.weight(1f))
-                                Text("${sprayRate.toInt()} %", color = Color.White, fontWeight = FontWeight.Bold)
+                                Text("Pump Mode", color = Color.White, modifier = Modifier.weight(1f))
+                                Text(
+                                    if (sprayManualMode) "Manual" else "Auto (rate-based)",
+                                    color = if (sprayManualSupported == false) Color.Gray else Color.White,
+                                    fontWeight = FontWeight.Bold
+                                )
+                                Switch(
+                                    checked = sprayManualMode,
+                                    onCheckedChange = { telemetryViewModel.setSprayManualMode(it) },
+                                    enabled = sprayManualSupported != false,
+                                    colors = SwitchDefaults.colors(
+                                        checkedThumbColor = Color.White,
+                                        checkedTrackColor = Color(0xFF1E88E5), // Blue = manual
+                                        uncheckedThumbColor = Color.White,
+                                        uncheckedTrackColor = Color.Green      // Green = auto
+                                    )
+                                )
+                            }
+                            if (sprayManualSupported == false) {
+                                Text(
+                                    "Manual mode not supported by this firmware",
+                                    color = Color(0xFFFF6D00),
+                                    style = MaterialTheme.typography.bodySmall,
+                                    modifier = Modifier.padding(bottom = 4.dp)
+                                )
+                            }
+
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Text(
+                                    if (sprayManualMode) "Pump Duty" else "Spray Rate",
+                                    color = Color.White,
+                                    modifier = Modifier.weight(1f)
+                                )
+                                Text(
+                                    "${if (sprayManualMode) sprayManualPct.toInt() else sprayRate.toInt()} %",
+                                    color = Color.White,
+                                    fontWeight = FontWeight.Bold
+                                )
                             }
                             Row(verticalAlignment = Alignment.CenterVertically) {
+                                // Step matches the active mode: 10 for the rate multiplier,
+                                // 5 for the direct duty cycle.
+                                val sprayStep = if (sprayManualMode) 5f else 10f
                                 IconButton(
                                     onClick = {
-                                        val newRate = (sprayRate - 10f).coerceAtLeast(10f)
-                                        telemetryViewModel.setSprayRate(newRate)
+                                        if (sprayManualMode) {
+                                            telemetryViewModel.setSprayManualPct((sprayManualPct - sprayStep).coerceAtLeast(0f))
+                                        } else {
+                                            telemetryViewModel.setSprayRate((sprayRate - sprayStep).coerceAtLeast(10f))
+                                        }
                                     },
                                     modifier = Modifier.size(32.dp)
                                 ) {
@@ -2218,14 +2271,22 @@ fun PlanScreen(
                                     )
                                 }
                                 Slider(
-                                    value = sprayRate,
-                                    onValueChange = { newRate ->
-                                        // Snap to nearest 10%
-                                        val snappedRate = (Math.round(newRate / 10f) * 10f).coerceIn(10f, 100f)
-                                        telemetryViewModel.setSprayRate(snappedRate)
+                                    value = if (sprayManualMode) sprayManualPct else sprayRate,
+                                    onValueChange = { raw ->
+                                        if (sprayManualMode) {
+                                            // Snap to nearest 5%
+                                            telemetryViewModel.setSprayManualPct(
+                                                (Math.round(raw / 5f) * 5f).coerceIn(0f, 100f)
+                                            )
+                                        } else {
+                                            // Snap to nearest 10%
+                                            telemetryViewModel.setSprayRate(
+                                                (Math.round(raw / 10f) * 10f).coerceIn(10f, 100f)
+                                            )
+                                        }
                                     },
-                                    valueRange = 10f..100f,
-                                    steps = 8, // 9 positions: 10%, 20%, 30%... 100%
+                                    valueRange = if (sprayManualMode) 0f..100f else 10f..100f,
+                                    steps = if (sprayManualMode) 19 else 8, // 21 vs 9 positions
                                     modifier = Modifier.weight(1f),
                                     colors = SliderDefaults.colors(
                                         thumbColor = if (autoSpray) Color.Green else MaterialTheme.colorScheme.primary,
@@ -2235,8 +2296,11 @@ fun PlanScreen(
                                 )
                                 IconButton(
                                     onClick = {
-                                        val newRate = (sprayRate + 10f).coerceAtMost(100f)
-                                        telemetryViewModel.setSprayRate(newRate)
+                                        if (sprayManualMode) {
+                                            telemetryViewModel.setSprayManualPct((sprayManualPct + sprayStep).coerceAtMost(100f))
+                                        } else {
+                                            telemetryViewModel.setSprayRate((sprayRate + sprayStep).coerceAtMost(100f))
+                                        }
                                     },
                                     modifier = Modifier.size(32.dp)
                                 ) {
@@ -2252,7 +2316,10 @@ fun PlanScreen(
                                 // Name the parameter and its value, so cross-checking on the
                                 // param screen agrees with the slider. The old "PWM: ..." text
                                 // was invented here — nothing in this flow writes a servo PWM.
-                                "SPRAY_PUMP_RATE: ${sprayRate.toInt()} (% pump per 1 m/s)",
+                                if (sprayManualMode)
+                                    "SPRAY_PUMP_PCT: ${sprayManualPct.toInt()} (% duty, speed-independent)"
+                                else
+                                    "SPRAY_PUMP_RATE: ${sprayRate.toInt()} (% pump per 1 m/s)",
                                 color = Color.Gray,
                                 style = MaterialTheme.typography.bodySmall,
                                 modifier = Modifier.padding(top = 2.dp)
@@ -2264,13 +2331,15 @@ fun PlanScreen(
                             // visible instead of looking like the app failed to write the rate.
                             Text(
                                 text = sprayEffectiveOutput?.let { pct ->
-                                    val saturated = pct >= 100f
+                                    // In MANUAL the slider and the pump output agree by
+                                    // definition, so the saturation warning would be noise.
+                                    val saturated = pct >= 100f && !sprayManualMode
                                     "Pump now: ${pct.toInt()}%" + if (saturated) " (max — slider has no effect at this speed)" else ""
                                 } ?: "Pump now: — (no groundspeed)",
                                 color = sprayEffectiveOutput.let { pct ->
                                     when {
                                         pct == null -> Color.Gray
-                                        pct >= 100f -> Color(0xFFFFA000)
+                                        pct >= 100f && !sprayManualMode -> Color(0xFFFFA000)
                                         else -> Color.LightGray
                                     }
                                 },
@@ -2612,18 +2681,64 @@ fun PlanScreen(
                             }
                         }
 
-                        // Spray Rate Slider
-                        // Written to the FC as SPRAY_PUMP_RATE 1:1 by setSprayRate().
+                        // Spray controls.
+                        // AUTO mode writes SPRAY_PUMP_RATE (% per 1 m/s) via setSprayRate();
+                        // MANUAL mode writes SPRAY_PUMP_PCT (direct duty) via setSprayManualPct().
                         Column(modifier = Modifier.padding(vertical = 4.dp)) {
+                            // Pump mode toggle. NOTE: this is the FC's pump-output MODE — it is
+                            // NOT the "Auto Spray" switch further down, which decides whether the
+                            // planned mission gets DO_SPRAYER items embedded at line boundaries.
                             Row(verticalAlignment = Alignment.CenterVertically) {
-                                Text("Spray Rate", color = Color.White, modifier = Modifier.weight(1f))
-                                Text("${sprayRate.toInt()} %", color = Color.White, fontWeight = FontWeight.Bold)
+                                Text("Pump Mode", color = Color.White, modifier = Modifier.weight(1f))
+                                Text(
+                                    if (sprayManualMode) "Manual" else "Auto (rate-based)",
+                                    color = if (sprayManualSupported == false) Color.Gray else Color.White,
+                                    fontWeight = FontWeight.Bold
+                                )
+                                Switch(
+                                    checked = sprayManualMode,
+                                    onCheckedChange = { telemetryViewModel.setSprayManualMode(it) },
+                                    enabled = sprayManualSupported != false,
+                                    colors = SwitchDefaults.colors(
+                                        checkedThumbColor = Color.White,
+                                        checkedTrackColor = Color(0xFF1E88E5), // Blue = manual
+                                        uncheckedThumbColor = Color.White,
+                                        uncheckedTrackColor = Color.Green      // Green = auto
+                                    )
+                                )
+                            }
+                            if (sprayManualSupported == false) {
+                                Text(
+                                    "Manual mode not supported by this firmware",
+                                    color = Color(0xFFFF6D00),
+                                    style = MaterialTheme.typography.bodySmall,
+                                    modifier = Modifier.padding(bottom = 4.dp)
+                                )
+                            }
+
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Text(
+                                    if (sprayManualMode) "Pump Duty" else "Spray Rate",
+                                    color = Color.White,
+                                    modifier = Modifier.weight(1f)
+                                )
+                                Text(
+                                    "${if (sprayManualMode) sprayManualPct.toInt() else sprayRate.toInt()} %",
+                                    color = Color.White,
+                                    fontWeight = FontWeight.Bold
+                                )
                             }
                             Row(verticalAlignment = Alignment.CenterVertically) {
+                                // Step matches the active mode: 10 for the rate multiplier,
+                                // 5 for the direct duty cycle.
+                                val sprayStep = if (sprayManualMode) 5f else 10f
                                 IconButton(
                                     onClick = {
-                                        val newRate = (sprayRate - 10f).coerceAtLeast(10f)
-                                        telemetryViewModel.setSprayRate(newRate)
+                                        if (sprayManualMode) {
+                                            telemetryViewModel.setSprayManualPct((sprayManualPct - sprayStep).coerceAtLeast(0f))
+                                        } else {
+                                            telemetryViewModel.setSprayRate((sprayRate - sprayStep).coerceAtLeast(10f))
+                                        }
                                     },
                                     modifier = Modifier.size(32.dp)
                                 ) {
@@ -2635,14 +2750,22 @@ fun PlanScreen(
                                     )
                                 }
                                 Slider(
-                                    value = sprayRate,
-                                    onValueChange = { newRate ->
-                                        // Snap to nearest 10%
-                                        val snappedRate = (Math.round(newRate / 10f) * 10f).coerceIn(10f, 100f)
-                                        telemetryViewModel.setSprayRate(snappedRate)
+                                    value = if (sprayManualMode) sprayManualPct else sprayRate,
+                                    onValueChange = { raw ->
+                                        if (sprayManualMode) {
+                                            // Snap to nearest 5%
+                                            telemetryViewModel.setSprayManualPct(
+                                                (Math.round(raw / 5f) * 5f).coerceIn(0f, 100f)
+                                            )
+                                        } else {
+                                            // Snap to nearest 10%
+                                            telemetryViewModel.setSprayRate(
+                                                (Math.round(raw / 10f) * 10f).coerceIn(10f, 100f)
+                                            )
+                                        }
                                     },
-                                    valueRange = 10f..100f,
-                                    steps = 8, // 9 positions: 10%, 20%, 30%... 100%
+                                    valueRange = if (sprayManualMode) 0f..100f else 10f..100f,
+                                    steps = if (sprayManualMode) 19 else 8, // 21 vs 9 positions
                                     modifier = Modifier.weight(1f),
                                     colors = SliderDefaults.colors(
                                         thumbColor = if (autoSpray) Color.Green else MaterialTheme.colorScheme.primary,
@@ -2652,8 +2775,11 @@ fun PlanScreen(
                                 )
                                 IconButton(
                                     onClick = {
-                                        val newRate = (sprayRate + 10f).coerceAtMost(100f)
-                                        telemetryViewModel.setSprayRate(newRate)
+                                        if (sprayManualMode) {
+                                            telemetryViewModel.setSprayManualPct((sprayManualPct + sprayStep).coerceAtMost(100f))
+                                        } else {
+                                            telemetryViewModel.setSprayRate((sprayRate + sprayStep).coerceAtMost(100f))
+                                        }
                                     },
                                     modifier = Modifier.size(32.dp)
                                 ) {
@@ -2669,7 +2795,10 @@ fun PlanScreen(
                                 // Name the parameter and its value, so cross-checking on the
                                 // param screen agrees with the slider. The old "PWM: ..." text
                                 // was invented here — nothing in this flow writes a servo PWM.
-                                "SPRAY_PUMP_RATE: ${sprayRate.toInt()} (% pump per 1 m/s)",
+                                if (sprayManualMode)
+                                    "SPRAY_PUMP_PCT: ${sprayManualPct.toInt()} (% duty, speed-independent)"
+                                else
+                                    "SPRAY_PUMP_RATE: ${sprayRate.toInt()} (% pump per 1 m/s)",
                                 color = Color.Gray,
                                 style = MaterialTheme.typography.bodySmall,
                                 modifier = Modifier.padding(top = 2.dp)
@@ -2681,13 +2810,15 @@ fun PlanScreen(
                             // visible instead of looking like the app failed to write the rate.
                             Text(
                                 text = sprayEffectiveOutput?.let { pct ->
-                                    val saturated = pct >= 100f
+                                    // In MANUAL the slider and the pump output agree by
+                                    // definition, so the saturation warning would be noise.
+                                    val saturated = pct >= 100f && !sprayManualMode
                                     "Pump now: ${pct.toInt()}%" + if (saturated) " (max — slider has no effect at this speed)" else ""
                                 } ?: "Pump now: — (no groundspeed)",
                                 color = sprayEffectiveOutput.let { pct ->
                                     when {
                                         pct == null -> Color.Gray
-                                        pct >= 100f -> Color(0xFFFFA000)
+                                        pct >= 100f && !sprayManualMode -> Color(0xFFFFA000)
                                         else -> Color.LightGray
                                     }
                                 },

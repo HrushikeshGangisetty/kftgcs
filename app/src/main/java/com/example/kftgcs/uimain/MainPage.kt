@@ -36,6 +36,7 @@ import com.example.kftgcs.telemetry.SharedViewModel
 import androidx.compose.runtime.getValue
 import com.example.kftgcs.usersettings.UserSettingsViewModel
 import androidx.compose.ui.text.style.TextOverflow
+import com.example.kftgcs.grid.GridUtils
 import com.example.kftgcs.utils.AppStrings
 import com.example.kftgcs.ui.components.MissionCompletionDialog
 import com.example.kftgcs.ui.components.DroneCameraFeedOverlay
@@ -59,8 +60,10 @@ fun MainPage(
     val surveyAreaFormatted by telemetryViewModel.surveyAreaFormatted.collectAsState()
     val missionUploaded by telemetryViewModel.missionUploaded.collectAsState()
 
-    // Decide which area string to show in the status panel
-    val areaToDisplay = if (missionUploaded) {
+    // Area enclosed by the mission's waypoints. Once a mission is uploaded this is the area
+    // captured at upload time (what the drone will actually fly); before that it tracks the
+    // polygon being drawn.
+    val waypointAreaToDisplay = if (missionUploaded) {
         if (missionAreaFormatted.isNotBlank()) missionAreaFormatted else "N/A"
     } else {
         if (surveyAreaFormatted.isNotBlank()) surveyAreaFormatted else "N/A"
@@ -73,6 +76,17 @@ fun MainPage(
     val gridWaypoints by telemetryViewModel.gridWaypoints.collectAsState()
     val geofenceEnabled by telemetryViewModel.geofenceEnabled.collectAsState()
     val geofencePolygon by telemetryViewModel.geofencePolygon.collectAsState()
+
+    // Area enclosed by the geofence, shown alongside (never instead of) the waypoint area.
+    // Null when there is no fence to measure, which the panel renders as "N/A" rather than a
+    // misleading 0. Computed with the same GridUtils helper the map label uses, so the two
+    // readouts cannot disagree. remember() keyed on the polygon: this is a geodesic area
+    // calculation over every vertex and must not run on every unrelated recomposition.
+    val fenceAreaToDisplay = remember(geofencePolygon, geofenceEnabled) {
+        if (geofenceEnabled && geofencePolygon.size >= 3) {
+            GridUtils.calculateAndFormatPolygonArea(geofencePolygon)
+        } else null
+    }
     // FC-side home cylinder (FENCE_RADIUS / FENCE_TYPE bit 1) — drawn only when armed.
     val rangeFenceRadius by telemetryViewModel.fenceRadiusMeters.collectAsState()
     val rangeFenceArmed by telemetryViewModel.rangeFenceArmed.collectAsState()
@@ -164,6 +178,57 @@ fun MainPage(
     val isAutoModeActive = userSelectedFlightMode == SharedViewModel.UserFlightMode.AUTOMATIC
         && missionUploaded
 
+    // ===== CLEAR MISSION (moved here from the flying-method screen) =====
+    // The pilot needs this where the mission actually is - on the map - not behind a
+    // navigation step. Same view model calls and the same two dialogs as before; only the
+    // button's location changed.
+    val missionLoadedOnFc by telemetryViewModel.missionLoadedOnFc.collectAsState()
+    val clearMissionState by telemetryViewModel.clearMissionState.collectAsState()
+    var showClearMissionConfirm by remember { mutableStateOf(false) }
+
+    // Disabled rather than hidden while armed, so the control is visibly present and its
+    // unavailability is explained. clearMissionFromFcConfirmed re-checks both conditions
+    // before touching the FC - this is a courtesy, not the safety interlock.
+    val clearMissionEnabled = !telemetryState.armed && telemetryState.connected &&
+        clearMissionState != SharedViewModel.ClearMissionState.CLEARING
+
+    if (showClearMissionConfirm) {
+        AlertDialog(
+            onDismissRequest = { showClearMissionConfirm = false },
+            title = { Text(AppStrings.clearMission, fontWeight = FontWeight.Bold) },
+            text = { Text(AppStrings.clearMissionConfirmMessage) },
+            confirmButton = {
+                Button(onClick = {
+                    showClearMissionConfirm = false
+                    telemetryViewModel.clearMissionFromFcConfirmed()
+                }) { Text(AppStrings.proceed) }
+            },
+            dismissButton = {
+                Button(onClick = { showClearMissionConfirm = false }) { Text(AppStrings.cancel) }
+            }
+        )
+    }
+
+    // Result acknowledged explicitly rather than auto-dismissed: whether the mission actually
+    // left the drone is exactly the thing the pilot must not misread.
+    if (clearMissionState == SharedViewModel.ClearMissionState.SUCCESS ||
+        clearMissionState == SharedViewModel.ClearMissionState.FAILED
+    ) {
+        val clearSucceeded = clearMissionState == SharedViewModel.ClearMissionState.SUCCESS
+        AlertDialog(
+            onDismissRequest = { telemetryViewModel.acknowledgeClearMissionResult() },
+            title = { Text(AppStrings.clearMission, fontWeight = FontWeight.Bold) },
+            text = {
+                Text(if (clearSucceeded) AppStrings.clearMissionSuccess else AppStrings.clearMissionFailed)
+            },
+            confirmButton = {
+                Button(onClick = { telemetryViewModel.acknowledgeClearMissionResult() }) {
+                    Text(AppStrings.ok)
+                }
+            }
+        )
+    }
+
     Column(
         modifier = Modifier
             .fillMaxSize()
@@ -187,6 +252,11 @@ fun MainPage(
                 heading = telemetryState.heading,
                 geofencePolygon = geofencePolygon,
                 geofenceEnabled = geofenceEnabled,
+                // Draw the waypoint-area label (and per-edge dimensions) on the map, the same
+                // way PlanScreen does. The geofence already labels its own area here, so
+                // without this the main screen showed the fence area and nothing to compare
+                // it against. GcsMap gates this on surveyPolygon.size > 2 internally.
+                showGridInfo = surveyPolygon.size >= 3,
                 rangeFenceRadiusMeters = rangeFenceRadius,
                 rangeFenceArmed = rangeFenceArmed,
                 // Geofence adjustment parameters
@@ -241,7 +311,8 @@ fun MainPage(
                     .align(Alignment.BottomStart)
                     .padding(12.dp),
                 telemetryState = telemetryState,
-                areaFormatted = areaToDisplay
+                waypointAreaFormatted = waypointAreaToDisplay,
+                fenceAreaFormatted = fenceAreaToDisplay
             )
 
 
@@ -299,7 +370,13 @@ fun MainPage(
                 ProximityMapOverlay(
                     terrain = telemetryState.terrainData,
                     proximity = telemetryState.proximityData,
-                    thresholds = radarThresholds
+                    thresholds = radarThresholds,
+                    onClearMission = { showClearMissionConfirm = true },
+                    clearMissionEnabled = clearMissionEnabled
+                    // Label left at its short default: AppStrings.clearMission and
+                    // clearMissionClearing are full sentences in several languages and would
+                    // overflow a 70dp FAB. Progress is shown by the button dimming (it is
+                    // disabled while CLEARING) and by the result dialog.
                 )
             }
 
@@ -785,7 +862,17 @@ fun MainPage(
 fun StatusPanel(
     modifier: Modifier = Modifier,
     telemetryState: TelemetryState,
-    areaFormatted: String
+    /** Area enclosed by the mission's waypoints — the ground actually being sprayed. */
+    waypointAreaFormatted: String,
+    /**
+     * Area enclosed by the geofence, or null when no fence is set.
+     *
+     * Shown separately from [waypointAreaFormatted] because the two are never the same
+     * number: the fence is a buffer drawn AROUND the mission polygon, so it is always the
+     * larger of the two. Collapsing them into one "Area" readout (which is what this panel
+     * used to do) left the pilot unable to tell which one they were looking at.
+     */
+    fenceAreaFormatted: String? = null
 ) {
     // Shortest (great-circle) distance between the drone and the FC-reported home point.
     // Null whenever either fix is missing, so the readout falls back to "N/A".
@@ -806,7 +893,10 @@ fun StatusPanel(
 
     Surface(
         modifier = modifier
-            .widthIn(min = 180.dp, max = 560.dp)
+            // Widened from 560dp when the single "Area" column became two (WP Area + Fence
+            // Area). At 560 the top row's five columns fell to ~112dp each and the area
+            // figures ellipsized to "5.2..." - which defeats the point of separating them.
+            .widthIn(min = 180.dp, max = 660.dp)
             .heightIn(min = 48.dp, max = 74.dp),
         color = Color.Black.copy(alpha = 0.22f),
         shape = RoundedCornerShape(10.dp)
@@ -837,9 +927,20 @@ fun StatusPanel(
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis
                 )
+                // The two areas, always distinguishable. Labelled with the same wording the
+                // map labels use, so the panel and the map agree.
                 Text(
-                    "${AppStrings.area}: ${areaFormatted}",
+                    "${AppStrings.wpArea}: $waypointAreaFormatted",
                     color = Color.White,
+                    fontSize = 11.sp,
+                    modifier = Modifier.weight(1f),
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+                Text(
+                    "${AppStrings.fenceArea}: ${fenceAreaFormatted ?: "N/A"}",
+                    // Yellow to match the geofence's colour on the map and its area label.
+                    color = if (fenceAreaFormatted != null) Color(0xFFFFEB3B) else Color.White,
                     fontSize = 11.sp,
                     modifier = Modifier.weight(1f),
                     maxLines = 1,

@@ -45,6 +45,7 @@ object PhoneLocationProvider {
     /** How often we ask for a fix. 1 s keeps the marker in step with the drone marker. */
     private const val UPDATE_INTERVAL_MS = 1000L
     private const val FASTEST_UPDATE_INTERVAL_MS = 500L
+    private const val MAX_CACHED_FIX_AGE_MS = 120_000L
 
     private val _location = MutableStateFlow<LatLng?>(null)
 
@@ -121,10 +122,22 @@ object PhoneLocationProvider {
             started = true
 
             // Seed the marker from the cached fix so it shows up without waiting a full second.
+            // getFusedLocationProviderClient().lastLocation is Android's system-wide last-known
+            // fix, not this app's — it can be whatever ANY app last requested, anywhere, up to
+            // hours or days ago (e.g. still sitting at home/office before the drive to the
+            // field). Showing it unconditionally is what made the RC marker jump to "an entirely
+            // different location": a stale fix from far away rendered as if it were current until
+            // the first real update arrived (which in the field, with weak GPS, can take a while
+            // or never beat a wrong cached value the pilot already walked away trusting).
+            // Age-gate it so a fix from more than 2 minutes ago is treated as absent instead.
             locationClient.lastLocation.addOnSuccessListener { fix ->
-                if (fix != null && _location.value == null) {
-                    _location.value = LatLng(fix.latitude, fix.longitude)
+                if (fix == null || _location.value != null) return@addOnSuccessListener
+                val ageMs = System.currentTimeMillis() - fix.time
+                if (ageMs > MAX_CACHED_FIX_AGE_MS) {
+                    LogUtils.w("PhoneLocation", "Ignoring stale cached fix (${ageMs / 1000}s old) — waiting for a fresh one")
+                    return@addOnSuccessListener
                 }
+                _location.value = LatLng(fix.latitude, fix.longitude)
             }
         } catch (e: SecurityException) {
             LogUtils.e("PhoneLocation", "Location permission denied while starting updates", e)

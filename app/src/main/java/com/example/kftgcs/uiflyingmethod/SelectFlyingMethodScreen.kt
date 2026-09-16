@@ -32,23 +32,23 @@ import com.example.kftgcs.utils.AppStrings
 
 @Composable
 fun SelectFlyingMethodScreen(navController: NavController, sharedViewModel: SharedViewModel) {
-    // Get the telemetry state to check if mission is paused
-    val telemetryState by sharedViewModel.telemetryState.collectAsState()
-    val resumePointLocation by sharedViewModel.resumePointLocation.collectAsState()
-
-    // Always clear mission data when user navigates to this screen (home tab / back)
-    // This clears mission from FC, map, and resets all pause/resume state
+    // Clear the MAP on arrival here, and only the map.
+    //
+    // This used to call clearMissionCompletely() - which also wipes the mission off the
+    // flight controller - whenever the mission was paused or had a resume point. Combined
+    // with the automatic wipe on disarm, that meant the drone's mission could vanish from
+    // two different places, neither of which the pilot asked for, and one of which fired
+    // simply because they tapped the Home tab while a mission was paused.
+    //
+    // Clearing the FC is now one explicit, confirmed action: the Clear Mission button in the
+    // main screen's left-hand map overlay.
     LaunchedEffect(Unit) {
-        val missionPaused = telemetryState.missionPaused
-        val hasResumePoint = resumePointLocation != null
-
-        if (missionPaused || hasResumePoint) {
-            // Mission is paused or has resume point - clear everything including FC
-            sharedViewModel.clearMissionCompletely()
-        } else {
-            sharedViewModel.clearMissionFromMap()
-        }
+        sharedViewModel.clearMissionFromMap()
     }
+
+    // The Clear Mission button and its two dialogs moved to MainPage, next to the map. Only
+    // the read-only "mission still loaded" notice is kept here.
+    val missionLoadedOnFc by sharedViewModel.missionLoadedOnFc.collectAsState()
 
     Surface(
         modifier = Modifier.fillMaxSize(),
@@ -135,7 +135,20 @@ fun SelectFlyingMethodScreen(navController: NavController, sharedViewModel: Shar
                     )
                 }
 
-                Spacer(modifier = Modifier.height(12.dp))
+                Spacer(modifier = Modifier.height(20.dp))
+
+                // The Clear Mission button used to sit here. It now lives on the main screen,
+                // in the left-hand overlay under Terrain and Obstacles, where the pilot is
+                // already looking at the mission it clears. This screen keeps only the
+                // "mission still on the drone" notice, so the state is still visible from here.
+                if (missionLoadedOnFc) {
+                    Text(
+                        "A mission is still loaded on the drone",
+                        color = Color.White.copy(alpha = 0.6f),
+                        fontSize = 12.sp
+                    )
+                    Spacer(modifier = Modifier.height(12.dp))
+                }
 
                 Text(AppStrings.changeLanguageLater, color = Color.White.copy(alpha = 0.6f), fontSize = 12.sp)
             }

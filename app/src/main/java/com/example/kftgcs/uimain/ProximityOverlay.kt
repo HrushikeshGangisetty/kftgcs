@@ -19,6 +19,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.DeleteSweep
 import androidx.compose.material.icons.filled.Radar
 import androidx.compose.material.icons.filled.Remove
 import androidx.compose.material.icons.filled.Terrain
@@ -50,6 +51,7 @@ import androidx.compose.ui.text.drawText
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.rememberTextMeasurer
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.kftgcs.telemetry.ProximityData
@@ -96,13 +98,28 @@ private fun obstacleRingsForRange(maxRange: Float): List<Float> = when {
  *
  * Toggle state is owned here; each widget renders only while its toggle is ON, so closed widgets
  * never intercept map touch. [terrain] and [proximity] come from `TelemetryState` and stream live.
+ *
+ * The buttons stack VERTICALLY. They used to sit side by side, but a third control (Clear
+ * Mission) would have pushed the row into the map's pan area on a phone-width screen; a column
+ * keeps every control against the left edge and leaves the map clear.
+ *
+ * Clear Mission is optional: pass [onClearMission] to show it. Left null (the default) the
+ * button is not composed at all, so this overlay stays usable anywhere the action makes no
+ * sense. The caller owns the confirm/result dialogs and the enablement rule — this composable
+ * only draws the button.
  */
 @Composable
 fun ProximityMapOverlay(
     terrain: TerrainData?,
     proximity: ProximityData?,
     thresholds: RadarThresholds,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    onClearMission: (() -> Unit)? = null,
+    clearMissionEnabled: Boolean = false,
+    // Two short words, not AppStrings.clearMission: that is a full phrase in several of the
+    // supported languages and will not fit a 70dp FAB. The confirm dialog carries the
+    // translated wording.
+    clearMissionLabel: String = "Clear\nMission"
 ) {
     var isTerrainWidgetOpen by remember { mutableStateOf(false) }
     var isObstacleWidgetOpen by remember { mutableStateOf(false) }
@@ -111,18 +128,29 @@ fun ProximityMapOverlay(
         modifier = modifier,
         verticalArrangement = Arrangement.spacedBy(8.dp)
     ) {
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        ToggleButton(
+            icon = Icons.Default.Terrain,
+            label = "Terrain",
+            active = isTerrainWidgetOpen,
+            onClick = { isTerrainWidgetOpen = !isTerrainWidgetOpen }
+        )
+        ToggleButton(
+            icon = Icons.Default.Radar,
+            label = "Obstacles",
+            active = isObstacleWidgetOpen,
+            onClick = { isObstacleWidgetOpen = !isObstacleWidgetOpen }
+        )
+
+        if (onClearMission != null) {
             ToggleButton(
-                icon = Icons.Default.Terrain,
-                label = "Terrain",
-                active = isTerrainWidgetOpen,
-                onClick = { isTerrainWidgetOpen = !isTerrainWidgetOpen }
-            )
-            ToggleButton(
-                icon = Icons.Default.Radar,
-                label = "Obstacles",
-                active = isObstacleWidgetOpen,
-                onClick = { isObstacleWidgetOpen = !isObstacleWidgetOpen }
+                icon = Icons.Default.DeleteSweep,
+                label = clearMissionLabel,
+                // Never "active": this is an action, not a toggle. Red rather than the accent
+                // colour so it does not read as a third view to switch on.
+                active = false,
+                enabled = clearMissionEnabled,
+                containerColor = ClearMissionRed.copy(alpha = 0.75f),
+                onClick = onClearMission
             )
         }
 
@@ -137,17 +165,41 @@ fun ProximityMapOverlay(
     }
 }
 
-/** Labeled 70×56 FAB matching MainPage's FloatingButtons; turns accent when its widget is open. */
+/** Destructive-action red, matching the Clear Mission button on the flying-method screen. */
+private val ClearMissionRed = Color(0xFFEF5350)
+
+/**
+ * Labeled 70×56 FAB matching MainPage's FloatingButtons; turns accent when its widget is open.
+ *
+ * [enabled] exists for the action buttons (Clear Mission), which must stay VISIBLE but inert
+ * when the action is unavailable — hiding them would leave the pilot hunting for a control
+ * that is simply disabled. A disabled button dims and ignores taps.
+ *
+ * [containerColor] overrides the inactive background, for actions that should not read as a
+ * view toggle. It is ignored while [active] is true.
+ */
 @Composable
 private fun ToggleButton(
     icon: androidx.compose.ui.graphics.vector.ImageVector,
     label: String,
     active: Boolean,
-    onClick: () -> Unit
+    onClick: () -> Unit,
+    enabled: Boolean = true,
+    containerColor: Color? = null
 ) {
+    val background = when {
+        active -> Accent.copy(alpha = 0.85f)
+        containerColor != null -> containerColor
+        else -> Color.Black.copy(alpha = 0.7f)
+    }
+    val contentColor = if (active) Color.Black else Color.White
+    // Dim the whole button rather than just the text, so "unavailable" reads at a glance in
+    // sunlight without changing the layout.
+    val alpha = if (enabled) 1f else 0.4f
+
     FloatingActionButton(
-        onClick = onClick,
-        containerColor = if (active) Accent.copy(alpha = 0.85f) else Color.Black.copy(alpha = 0.7f),
+        onClick = { if (enabled) onClick() },
+        containerColor = background.copy(alpha = background.alpha * alpha),
         modifier = Modifier.size(width = 70.dp, height = 56.dp)
     ) {
         Column(
@@ -157,15 +209,18 @@ private fun ToggleButton(
             Icon(
                 icon,
                 contentDescription = label,
-                tint = if (active) Color.Black else Color.White,
+                tint = contentColor.copy(alpha = alpha),
                 modifier = Modifier.size(20.dp)
             )
             Spacer(modifier = Modifier.height(2.dp))
             Text(
                 text = label,
-                color = if (active) Color.Black else Color.White,
+                color = contentColor.copy(alpha = alpha),
                 fontSize = 9.sp,
-                fontWeight = FontWeight.Medium
+                fontWeight = FontWeight.Medium,
+                maxLines = 2,
+                textAlign = TextAlign.Center,
+                lineHeight = 10.sp
             )
         }
     }

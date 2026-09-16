@@ -171,38 +171,220 @@ class SharedViewModel : ViewModel() {
     /** Recovery must exceed the threshold by this much before the condition is cleared. */
     private val VOLTAGE_RECOVERY_HYSTERESIS_V = 0.5f
 
-    // Altitude ceiling failsafe tracking (FENCE_ALT_MAX)
+    // ═════════════════════════════════════════════════════════════════════════════
+    //  Altitude ceiling (FENCE_ALT_MAX) — TWO LAYERS
+    // ═════════════════════════════════════════════════════════════════════════════
+    //
+    // The ceiling used to be a single one-shot failsafe: a fixed margin below the limit,
+    // cross it, get the operator's FENCE_ACTION (usually RTL). That design could not satisfy
+    // both of the things asked of it.
+    //
+    //   1. It taxed the top of the envelope unconditionally. The margin had a 6 m FLOOR, so
+    //      on a 48 m ceiling the action fired at 42 m even in dead-level flight. A pilot who
+    //      wanted to work at 47 m simply could not — the limit they set was not the limit
+    //      they got.
+    //   2. It still let the drone cross. Once the one-shot was consumed, the band between the
+    //      trigger and the old 1.5 m backstop was covered by TTS and nothing else: ~4.5 m of
+    //      unopposed climb, after which the re-command happened so close to the line that
+    //      link latency plus vertical momentum carried the vehicle straight through it.
+    //
+    // Both follow from treating a CONSTRAINT as an EVENT. A trip-wire has to be set back from
+    // the line (costing envelope) and fires once (permitting the overshoot). The replacement
+    // is a wall: continuous, non-latching, costing nothing until the vehicle actually moves
+    // toward the limit.
+    //
+    //   LAYER 1 — THE WALL ([handleAltitudeWall]). Every frame, project where the vehicle
+    //   would come to rest if BRAKE were commanded now (fix age + command latency + v²/2a).
+    //   If that projection reaches the line, BRAKE immediately. Level flight at 47.5 m under
+    //   a 48 m ceiling projects to 47.5 m and is left entirely alone; a 4 m/s climb at 40 m
+    //   projects to 47.6 m and is stopped at 40 m. The vehicle is then handed back to the
+    //   pilot's own mode so work continues. No RTL, no latch, no notification.
+    //
+    //   LAYER 2 — THE BREACH ([handleAltitudeFailsafe]). The operator's FENCE_ACTION, fired
+    //   only if the wall FAILED and the vehicle reached the line anyway. This is recovery,
+    //   not prevention; prevention is layer 1's job and the FC's FENCE_ALT_MAX (written
+    //   [FC_ALT_FENCE_SAFETY_OFFSET_M] lower still) is the third line under both.
+    //
+    // DGCA's requirement is that the boundary is not crossed. Layer 1 is what delivers that,
+    // because it is the only one of the three that acts BEFORE the vehicle is committed.
+
     private var altitudeLimitActionTriggered = false // One-shot per arm cycle, like the voltage action
     private var lastAltitudeWarnTime = 0L
     private var lastAltitudeLimitTime = 0L
     private val ALTITUDE_WARN_INTERVAL_MS = 4000L
     private val ALTITUDE_LIMIT_INTERVAL_MS = 5000L
-    /** Start warning this far below the ceiling so the pilot can level off before hitting it. */
-    private val ALTITUDE_WARN_MARGIN_M = 10f
     /**
-     * How far back below the action threshold the drone must descend before the altitude
-     * action re-arms, in metres.
+     * Largest "approaching the limit" warning band, in metres.
+     *
+     * Capped at a fraction of the ceiling as well (see [altitudeWarnMargin]): a flat 10 m
+     * meant a 48 m ceiling started nagging at 38 m and never stopped, which is most of the
+     * useful working height. The warning is also only spoken while the vehicle is actually
+     * climbing — a drone parked below its ceiling is not approaching anything.
+     */
+    private val ALTITUDE_WARN_MARGIN_M = 10f
+    /** The warning band may never exceed this fraction of the ceiling. */
+    private val ALTITUDE_WARN_MAX_FRACTION = 0.2f
+
+    // ─── Layer 1: the wall ───────────────────────────────────────────────────────
+
+    /**
+     * How far below the ceiling the wall holds the vehicle, in metres.
+     *
+     * This is the altitude the pilot loses, and the three layers have to stack in the right
+     * order or the gentlest one never gets a turn:
+     *
+     *     ceiling − WALL_BUFFER   →  GCS wall: BRAKE, hand straight back, no RTL, no latch
+     *     ceiling − FC offset     →  the FC's own fence: the operator's FENCE_ACTION
+     *     ceiling                 →  GCS layer 2: last-resort FENCE_ACTION
+     *
+     * It is derived from [FC_ALT_FENCE_SAFETY_OFFSET_M] rather than set independently because
+     * of what happens when the two cross. The FC fence is now armed at connect
+     * ([armFcAltitudeFence]) and evaluated at 400Hz, so it is genuinely the first thing the
+     * vehicle meets. With the old flat 0.5 m the wall sat at 47.5 m while the FC fence sat at
+     * 47.0 m on a 48 m ceiling — the FC would fire its FENCE_ACTION (usually RTL) half a metre
+     * BEFORE the wall's soft stop, and every approach to the ceiling would become a flight
+     * home. Deriving it keeps the wall unconditionally below the FC line.
+     *
+     * The extra metre on top is what the projection cannot know: barometric bias between the
+     * FC's altitude and the number the wall is judging. The stopping distance itself is not in
+     * here — [projectedStopAltitude] handles that, proportionally to how fast the vehicle is
+     * actually moving.
+     */
+    // A computed accessor, not an initialiser: FC_ALT_FENCE_SAFETY_OFFSET_M is declared
+    // further down the class, and a property initialiser that reads a later property would
+    // capture 0f. Evaluating on read also means the two can never drift apart.
+    private val ALTITUDE_WALL_BUFFER_M: Float
+        get() = FC_ALT_FENCE_SAFETY_OFFSET_M + 1.0f
+    /**
+     * Below this climb rate the predictive arm of the wall does not engage.
+     *
+     * A hovering multirotor's derived climb rate is not exactly zero even after smoothing,
+     * and braking a vehicle that is not going anywhere would make the top of the envelope
+     * unusable for exactly the reason this rework exists. The proximity arm of the wall
+     * (vehicle already at the line) has no such gate, so a slow creep is still caught.
+     */
+    private val ALTITUDE_WALL_MIN_CLIMB_MPS = 0.3f
+    /**
+     * Upward drift at or below this, with the vehicle already at the wall line, is treated
+     * as station-keeping noise rather than a climb.
+     *
+     * The proximity arm of the wall has to be gated on SOMETHING, or a vehicle handed back
+     * to the pilot while parked on the line would re-trigger the wall on the very next
+     * frame and sawtooth between BRAKE and Loiter forever. Gating on a small positive climb
+     * breaks that loop while still catching the case it exists for: a slow creep that the
+     * predictive arm ignores because the projected stop distance of a 0.2 m/s climb is
+     * essentially zero.
+     */
+    private val ALTITUDE_WALL_CREEP_CLIMB_MPS = 0.15f
+    /** True while the wall is holding the vehicle; cleared on hand-back or on disarm. */
+    private var altitudeWallEngaged = false
+    /** Guards against launching a second BRAKE/hand-back coroutine on the next frame. */
+    private var altitudeWallBusy = false
+    /** When the current wall engagement commanded BRAKE. */
+    private var altitudeWallEngagedAtMs = 0L
+    /**
+     * The mode the pilot was flying when the wall intervened, to be restored on hand-back.
+     * Null when the interrupted mode was not one a pilot flies (AUTO, RTL, LAND, GUIDED) —
+     * handing those back would resume the very climb the wall just stopped, or restart a
+     * mission leg the operator has not seen fail.
+     */
+    private var altitudeWallPreviousMode: UInt? = null
+    private var altitudeWallPreviousModeName: String? = null
+    /** Timestamps of recent wall engagements, used to detect a pilot holding up-stick. */
+    private val altitudeWallFireTimes = ArrayDeque<Long>()
+    /**
+     * Once the wall has fired this many times inside [ALTITUDE_WALL_REFIRE_WINDOW_MS] it
+     * stops handing control back and simply holds.
+     *
+     * Hand-back is right for a pilot who climbed into the limit and then flew on. It is
+     * wrong for one holding the stick up: they would get a BRAKE/restore cycle every couple
+     * of seconds, the vehicle would sawtooth against the ceiling, and each cycle spends a
+     * little of the altitude budget. After three of them the wall concludes the climb demand
+     * is standing, holds in BRAKE, and says so. The pilot takes a mode of their own to leave.
+     */
+    private val ALTITUDE_WALL_MAX_REFIRES = 3
+    private val ALTITUDE_WALL_REFIRE_WINDOW_MS = 20_000L
+    /** True once the re-fire cap has latched the wall into hold-without-hand-back. */
+    private var altitudeWallHoldLatched = false
+    /**
+     * Descend this far below the ceiling to clear the hold latch.
+     *
+     * Measured from the ceiling, not from the wall line, for the same reason the breach
+     * re-arm is (see [ALTITUDE_REARM_BELOW_CEILING_M]) — a fixed, predictable altitude the
+     * pilot can actually fly to, rather than one that moves with the vehicle's own speed.
+     */
+    private val ALTITUDE_WALL_LATCH_CLEAR_M = 5f
+    /**
+     * How long the climb must stay arrested before the wall hands control back.
+     *
+     * Short, because the pilot is waiting: long enough that BRAKE has demonstrably settled
+     * the vehicle, not so long that the interruption feels like a failsafe.
+     */
+    private val ALTITUDE_WALL_HANDBACK_HOLD_MS = 1500L
+    /**
+     * Give up on a hand-back that is taking this long and leave the vehicle in BRAKE.
+     * Holding under the ceiling is always an acceptable outcome; guessing is not.
+     */
+    private val ALTITUDE_WALL_ARREST_TIMEOUT_MS = 6000L
+    /**
+     * Grace given to a freshly commanded BRAKE before layer 2 is allowed to escalate.
+     *
+     * The wall reports "holding" so the breach layer stays out of its way, and it can only
+     * report that once the heartbeat confirms BRAKE — a round trip the vehicle spends still
+     * flying. Without a grace window, a wall that engaged close to the line would be
+     * overtaken by its own breach layer during that round trip and the pilot would get an
+     * RTL for a stop that was about to succeed.
+     *
+     * Conditional on the vehicle being slow: the grace is only ever extended to a vehicle
+     * climbing no faster than [ALTITUDE_ARRESTED_CLIMB_MPS], where two seconds buys at most
+     * ~0.6 m. Anything climbing harder gets no grace at all and escalates immediately — the
+     * ceiling must not be crossed, and a fast climb is not a stop in progress.
+     */
+    private val ALTITUDE_WALL_GRACE_MS = 2000L
+    /** Rate limit on the wall's spoken announcements. */
+    private val ALTITUDE_WALL_SPEAK_INTERVAL_MS = 5000L
+    private var lastAltitudeWallSpeakTime = 0L
+
+    // ─── Layer 2: the breach ──────────────────────────────────────────────────
+
+    /**
+     * How far below the ceiling the operator's FENCE_ACTION fires, in metres. Zero: it fires
+     * when the vehicle has actually reached the configured limit.
+     *
+     * This is not a trigger point chosen to leave room for a stop — it is the point at which
+     * we conclude the wall did not work. The old speed-aware 6-25 m margin lived here and was
+     * what made the ceiling unusable; all of that prediction has moved into
+     * [projectedStopAltitude], where it sizes a BRAKE rather than an RTL.
+     *
+     * Zero rather than a small positive margin for two reasons. First, it costs nothing:
+     * firing RTL at 47.7 m instead of 48 m does not change whether a vehicle the wall failed
+     * to stop crosses the line — by then the outcome is set by momentum, not by 0.3 m of
+     * lead. Second, a margin here is actively harmful, because the wall deliberately parks
+     * the vehicle in the last half-metre under the ceiling: a breach line inside that band
+     * would turn every successful stop into an RTL the moment the wall handed control back.
+     *
+     * The rule this expresses: layer 1 prevents, layer 2 recovers. Only layer 1 is allowed to
+     * have an opinion about altitude the pilot has not yet used.
+     */
+    private val ALTITUDE_BREACH_MARGIN_M = 0f
+    /**
+     * How far back below the CEILING the drone must descend before the breach action
+     * re-arms, in metres.
      *
      * The one-shot exists so a pilot who deliberately takes back control is not fought on
-     * every telemetry frame. But it used to clear ONLY on disarm, which meant a pilot who
-     * recovered, flew back down and then climbed through the ceiling a second time got no
-     * action at all for the rest of the flight — the protection was single-use per power
-     * cycle. It now re-arms on genuine recovery.
+     * every telemetry frame. It used to clear only on disarm, which meant a pilot who
+     * recovered and later climbed into the ceiling again got no action for the rest of the
+     * flight — the protection was single-use per power cycle.
      *
-     * The band must be wide enough that noise and a normal descent overshoot cannot toggle
-     * the latch: sitting exactly on the threshold would otherwise re-fire the action every
-     * few seconds.
+     * MEASURED FROM THE CEILING, NOT FROM THE TRIGGER. Hung off a speed-aware trigger the
+     * band moved with climb rate, so a pilot who fired the action during a fast climb and
+     * then settled into a hover was left ABOVE the re-arm point and the latch never cleared.
      *
-     * MEASURED FROM THE CEILING, NOT FROM THE ACTION THRESHOLD. The threshold is
-     * speed-aware and slides downward as the drone climbs faster, so a band hung off it
-     * moved too — which is how the "warnings but no RTL" bug happened. A pilot who fired
-     * the action at a 5 m/s climb (threshold ~ceiling−11 m), cancelled, and settled into a
-     * hover at ceiling−10 m was ABOVE the re-arm point (ceiling−21 m), so the latch stayed
-     * set; the next climb sailed through the ceiling into the "action already taken" branch,
-     * which only speaks. Anchoring to the ceiling makes the re-arm altitude a fixed,
-     * predictable number that a hover below the limit actually reaches.
+     * 5 m rather than the old 12 m: the trigger no longer sits 6 m or more down the
+     * envelope, so the band no longer has to clear it. It only has to sit clear of the wall
+     * line, which it does by 4.5 m — comfortably more than noise or a descent overshoot.
      */
-    private val ALTITUDE_REARM_BELOW_CEILING_M = 12f
+    private val ALTITUDE_REARM_BELOW_CEILING_M = 5f
     /**
      * A climb slower than this counts as "not climbing" for the purpose of re-arming.
      * Re-arm needs BOTH a descent below [ALTITUDE_REARM_BELOW_CEILING_M] and a vehicle
@@ -211,28 +393,16 @@ class SharedViewModel : ViewModel() {
      */
     private val ALTITUDE_REARM_MAX_CLIMB_MPS = 0.5f
     /**
-     * Hard backstop: once the drone is within this distance of the ceiling (or above it),
-     * the action fires again even if the one-shot is already consumed.
+     * Upper clamp so a bogus climb rate or a stale fix cannot consume the whole envelope.
      *
-     * The one-shot's purpose is to avoid fighting a pilot who is managing the situation
-     * INSIDE the envelope — it was never meant to license an actual breach. DGCA requires
-     * the ceiling not to be crossed, so a latch can suppress the repeat action only while
-     * the drone stays clear of the limit. At the limit, protection wins over politeness.
-     * Rate-limited by [ALTITUDE_LIMIT_INTERVAL_MS] so it re-commands at most every 5 s.
+     * 40 m rather than the old 25: with the deceleration figure lowered to a realistic
+     * 2.0 m/s², a genuine 8 m/s climb already needs 24 m and a 10 m/s climb needs 35 — a
+     * clamp below those would silently under-size the stop on exactly the climbs that most
+     * need it. The clamp is a guard against a nonsense sample, not a policy about how much
+     * altitude the wall may use, and the EMA on the climb rate now filters the nonsense that
+     * made a tight clamp feel necessary.
      */
-    private val ALTITUDE_BACKSTOP_MARGIN_M = 1.5f
-    /**
-     * Smallest buffer below the ceiling where the action fires. Applies when the drone is
-     * barely climbing; a faster climb gets the projected stopping distance below instead.
-     *
-     * Raised from 4 m: a "barely climbing" drone still carries the command round trip plus
-     * the FC's mode-entry delay, and the observed overshoot at low climb rates ate most of
-     * a 4 m buffer. 6 m keeps the stop comfortably under the line without costing usable
-     * altitude that matters at survey heights.
-     */
-    private val ALTITUDE_MIN_ACTION_MARGIN_M = 6f
-    /** Upper clamp so a bogus climb rate or a stale fix can't consume the whole envelope. */
-    private val ALTITUDE_MAX_ACTION_MARGIN_M = 25f
+    private val ALTITUDE_MAX_STOP_DISTANCE_M = 40f
     /**
      * Seconds of latency budgeted between crossing the trigger point and the mode change
      * biting: DO_SET_MODE round trip + the FC's own mode-entry delay. The age of the
@@ -243,8 +413,54 @@ class SharedViewModel : ViewModel() {
      * from.
      */
     private val ALTITUDE_LATENCY_S = 0.8f
-    /** Conservative vertical deceleration (ArduCopter PILOT_ACCEL_Z ≈ 2.5 m/s²). */
-    private val ALTITUDE_DECEL_MPS2 = 2.5f
+    /**
+     * Vertical deceleration assumed when sizing the stopping distance, m/s².
+     *
+     * 2.0 rather than ArduCopter's nominal PILOT_ACCEL_Z of 2.5: that parameter is the
+     * commanded maximum, and the average actually achieved over a real stop is lower — a
+     * sprayer with a loaded tank does not hit the book figure. Assuming less deceleration
+     * buys a longer stopping distance, which is the conservative direction for a limit we
+     * are not allowed to cross. The same reasoning, and the same correction, as
+     * [MAX_RANGE_DECEL_MPS2].
+     */
+    private val ALTITUDE_DECEL_MPS2 = 2.0f
+    /**
+     * One evaluation interval, in seconds, budgeted on top of the fix age.
+     *
+     * The wall only gets to look at the vehicle when a position message arrives. The age term
+     * accounts for how stale the CURRENT reading is; this accounts for the fact that the next
+     * chance to act is a sample away. Without it the trigger is systematically one sample
+     * late, and at 8 m/s one sample is 0.8 m — enough, on its own, to put the stop above the
+     * line on exactly the fast climbs the wall exists for.
+     */
+    private val ALTITUDE_EVAL_INTERVAL_S = 0.15f
+    /**
+     * A climb at or below this counts as arrested, so the breach action may proceed.
+     * Not zero: a braked multirotor settles with a little residual vertical noise, and
+     * holding out for a true 0 would spend the whole settle budget every time.
+     */
+    private val ALTITUDE_ARRESTED_CLIMB_MPS = 0.3f
+    /**
+     * Longest the ceiling waits for BRAKE to stop the climb before handing over to the
+     * operator's action anyway. Proceeding late beats not proceeding.
+     */
+    private val ALTITUDE_BRAKE_SETTLE_TIMEOUT_MS = 3000L
+    /**
+     * Headroom kept between RTL_ALT and the ceiling, in metres.
+     *
+     * RTL_ALT must sit far enough below the ceiling that RTL's climb stage cannot carry the
+     * vehicle through it, with room for ArduPilot's own altitude tolerance on the way.
+     *
+     * Visible to [MavlinkTelemetryRepository] so the fence-upload path
+     * (clampRtlAltBelowFenceCeiling) applies the same headroom rather than defining a
+     * second, silently divergent one.
+     */
+    val RTL_ALT_BELOW_CEILING_M = 10f
+    /**
+     * Floor for a written RTL_ALT, in metres. ArduPilot treats RTL_ALT=0 as "return at the
+     * current altitude", so a low ceiling must not drive the value to or below zero.
+     */
+    val RTL_ALT_MIN_M = 10f
 
     // ═══ Max range failsafe (GCS-enforced, limit read from FENCE_RADIUS) ═══
     //
@@ -303,8 +519,8 @@ class SharedViewModel : ViewModel() {
     private val MAX_RANGE_REARM_MAX_SPEED_MPS = 2.0f
     /**
      * Hard backstop: within this distance of the radius (or beyond it), the action fires
-     * again even if the one-shot is already consumed. Same reasoning as
-     * [ALTITUDE_BACKSTOP_MARGIN_M] — the latch may spare a pilot who is managing the
+     * again even if the one-shot is already consumed. Same reasoning the altitude ceiling
+     * uses for [ALTITUDE_BREACH_MARGIN_M] — the latch may spare a pilot who is managing the
      * situation inside the envelope, never one about to cross the line.
      */
     private val MAX_RANGE_BACKSTOP_MARGIN_M = 3f
@@ -374,6 +590,17 @@ class SharedViewModel : ViewModel() {
                     altitudeLimitActionTriggered = false
                     lastAltitudeWarnTime = 0L
                     lastAltitudeLimitTime = 0L
+                    // The wall is per-flight state too: a hold latched against a pilot who
+                    // was leaning on the stick last flight must not greet them on the next
+                    // one, and a remembered "previous mode" from a landed aircraft is stale.
+                    altitudeWallEngaged = false
+                    altitudeWallBusy = false
+                    altitudeWallEngagedAtMs = 0L
+                    altitudeWallPreviousMode = null
+                    altitudeWallPreviousModeName = null
+                    altitudeWallHoldLatched = false
+                    altitudeWallFireTimes.clear()
+                    lastAltitudeWallSpeakTime = 0L
 
                     maxRangeActionTriggered = false
                     lastMaxRangeWarnTime = 0L
@@ -691,19 +918,23 @@ class SharedViewModel : ViewModel() {
     }
 
     /**
-     * Altitude ceiling failsafe, backed by the FENCE_ALT_MAX parameter.
+     * Altitude ceiling, layer 2: the operator's FENCE_ACTION on a genuine breach.
      *
-     * Why the GCS enforces this rather than leaving it to the FC: the flight controller
-     * only acts on FENCE_ALT_MAX when FENCE_ENABLE is on AND bit 0 (altitude) is set in
-     * FENCE_TYPE. On a drone flying without a geofence uploaded neither is guaranteed, so
-     * the ceiling would silently do nothing. This mirrors how the GCS already owns the
-     * critical-battery action (see [handleBatteryVoltageFailsafe]) instead of letting the
-     * FC race it.
+     * Also the host for layer 1 ([handleAltitudeWall]), which runs first on every frame and
+     * is what actually keeps the vehicle under the limit. See the constants block for why
+     * the ceiling is two layers rather than one trigger.
      *
-     * Warning zone: within [ALTITUDE_WARN_MARGIN_M] of the ceiling → TTS + notification only.
-     * At/above the ceiling: the configured action (HOVER→BRAKE / RTL / LAND) fires ONCE per
-     * arm cycle. One-shot for the same reason the battery action is: a pilot who deliberately
-     * takes back control must not be fought on every telemetry frame. TTS keeps repeating.
+     * Why the GCS enforces this at all rather than leaving it to the FC: the flight
+     * controller only acts on FENCE_ALT_MAX when FENCE_ENABLE is on AND bit 0 (altitude) is
+     * set in FENCE_TYPE. On a drone flying without a geofence uploaded neither is
+     * guaranteed, so the ceiling would silently do nothing. This mirrors how the GCS already
+     * owns the critical-battery action (see [handleBatteryVoltageFailsafe]) instead of
+     * letting the FC race it.
+     *
+     * Layer 2 is deliberately quiet. It fires the configured action (HOVER/BRAKE, RTL, LAND)
+     * once per breach, at [ALTITUDE_BREACH_MARGIN_M] below the ceiling, and ONLY when the
+     * wall is not already holding the vehicle. If the wall is doing its job the pilot never
+     * sees this code run.
      */
     private fun handleAltitudeFailsafe(altitude: Float, state: TelemetryState) {
         val context = GCSApplication.getInstance() ?: return
@@ -717,7 +948,7 @@ class SharedViewModel : ViewModel() {
 
         // How old is the altitude we are about to judge? Under a saturated telemetry link
         // GLOBAL_POSITION_INT can degrade from 10Hz to 1-2Hz, and the drone keeps climbing
-        // in the gap. Both the hard gate and the margin below depend on this.
+        // in the gap. Both the hard gate and the projection below depend on this.
         val positionAgeMs = state.positionReceivedAtMs?.let { now - it } ?: Long.MAX_VALUE
 
         if (positionAgeMs > POSITION_STALE_HARD_MS) {
@@ -730,27 +961,49 @@ class SharedViewModel : ViewModel() {
             return
         }
 
-        val actionMargin = altitudeActionMargin(state.climbRate, positionAgeMs)
-        val actionThreshold = ceiling - actionMargin
+        // Two readings of the same signal, used for different questions.
+        //   climbRaw    — unfiltered, answers "is the vehicle moving right now?" (arrest
+        //                 detection, re-arm gating). Responsiveness matters more than noise.
+        //   climbSmooth — EMA-filtered, answers "how far will it travel before it stops?".
+        //                 Noise here would inflate the projected stop altitude and pull the
+        //                 wall down the envelope, which is the failure mode this rework
+        //                 exists to remove.
+        val climbRaw = (state.climbRate ?: 0f).let { if (it.isFinite()) it else 0f }
+        val climbSmooth = (state.climbRateSmoothed ?: state.climbRate ?: 0f)
+            .let { if (it.isFinite()) it else 0f }
+
+        val wallLine = ceiling - ALTITUDE_WALL_BUFFER_M
+        val projectedAlt = projectedStopAltitude(altitude, climbSmooth, positionAgeMs)
+
+        // ═══ LAYER 1: the wall ═══
+        // Runs first and unconditionally. Returns true while it is actively holding the
+        // vehicle — i.e. prevention is working and layer 2 must stay out of the way.
+        val wallHolding = handleAltitudeWall(
+            altitude = altitude,
+            ceiling = ceiling,
+            wallLine = wallLine,
+            projectedAlt = projectedAlt,
+            climbRaw = climbRaw,
+            climbSmooth = climbSmooth,
+            now = now
+        )
+
+        // ═══ LAYER 2: the breach ═══
+        val breachThreshold = ceiling - ALTITUDE_BREACH_MARGIN_M
 
         // ═══ RECOVERED: re-arm the one-shot ═══
-        // Checked before the action branch, not as an else-if: actionThreshold is
-        // speed-aware and moves with climb rate, so a re-arm band expressed as an else-if
-        // could be shadowed by the warn branch and never run.
+        // Checked before the action branch, not as an else-if, so it cannot be shadowed.
         //
         // The one-shot exists so a pilot who takes back control is not fought every frame,
         // but it used to clear only on disarm — a pilot who recovered and later climbed
-        // through the ceiling again got no action for the rest of the flight. Re-arming on
+        // into the ceiling again got no action for the rest of the flight. Re-arming on
         // genuine recovery restores protection for the second and subsequent breaches.
         //
-        // The band is measured from the CEILING, not from actionThreshold: the threshold
-        // slides down as climb rate rises, so a band hung off it could sit below the
-        // altitude the pilot actually levelled off at, leaving the latch permanently set —
-        // and the next climb then reached the ceiling with nothing but TTS to show for it.
-        // Re-arming also requires the vehicle to have stopped climbing, so a momentary dip
-        // during a continuous climb does not clear and immediately re-fire the action.
+        // The band is measured from the CEILING, and re-arming also requires the vehicle to
+        // have stopped climbing, so a momentary dip during a continuous climb does not clear
+        // the latch and immediately re-fire the action.
         val rearmAltitude = ceiling - ALTITUDE_REARM_BELOW_CEILING_M
-        val climbingHard = (state.climbRate ?: 0f).let { it.isFinite() && it > ALTITUDE_REARM_MAX_CLIMB_MPS }
+        val climbingHard = climbRaw > ALTITUDE_REARM_MAX_CLIMB_MPS
         if (altitudeLimitActionTriggered && altitude < rearmAltitude && !climbingHard) {
             altitudeLimitActionTriggered = false
             lastAltitudeLimitTime = 0L
@@ -758,26 +1011,74 @@ class SharedViewModel : ViewModel() {
             // in the notification list. It fires on recovery, i.e. once things are already
             // going right, and pairing it with the breach entry doubled the list's length
             // for every excursion.
-            LogUtils.i("AltitudeFailsafe", "✓ Recovered to ${altitude}m (below ${rearmAltitude}m, climb=${state.climbRate}m/s) — altitude action re-armed")
+            LogUtils.i("AltitudeFailsafe", "✓ Recovered to ${altitude}m (below ${rearmAltitude}m, climb=${climbRaw}m/s) — altitude action re-armed")
         }
 
-        // ═══ HARD BACKSTOP ═══
-        // True once the drone is at (or within a whisker of) the ceiling itself, as opposed
-        // to merely past the speed-aware trigger point. The one-shot latch must not suppress
-        // the action here: its job is to avoid fighting a pilot who is managing the situation
-        // INSIDE the envelope, and DGCA does not permit the ceiling to be crossed at all.
-        // This is the second half of the "warnings but no RTL" fix — even if the latch is
-        // somehow still set, reaching the limit re-commands the action.
-        val atBackstop = altitude >= ceiling - ALTITUDE_BACKSTOP_MARGIN_M
+        // ═══ LAYER 1b: the pilot asked for an ACTION at the limit, not a hold ═══
+        //
+        // "Action at Limit" (max_altitude_action) has always offered Hover / RTL / Land, but
+        // it was only ever consulted at the breach line AND only when FENCE_ACTION could not
+        // be read — and layer 1 exists precisely to stop the vehicle ever reaching that line.
+        // So on a healthy vehicle, selecting RTL did nothing whatsoever: the drone stopped a
+        // couple of metres short, control was handed back, and no action ever ran. The
+        // dropdown was dead.
+        //
+        // HOVER preserves exactly that hand-back behaviour and remains the default, so normal
+        // work near the ceiling is untouched. Anything else escalates once the wall has the
+        // climb ARRESTED: the limit has been reached, the vehicle is stopped and stable, and
+        // the pilot has said they want the breach action anyway.
+        //
+        // WHICH action is still the vehicle's own FENCE_ACTION (see [runAltitudeLimitAction]);
+        // the dropdown decides whether to escalate, not what the escalation is.
+        // [warnIfLimitActionMismatch] flags a disagreement between the two on connect, so it
+        // is discovered on the ground rather than in the air.
+        //
+        // Placed AFTER the re-arm check above so a pilot who descends and climbs again gets
+        // the action a second time, and gated on the one-shot so it fires once per approach
+        // instead of on every frame the wall is holding. Setting that one-shot also makes
+        // [handleAltitudeWall] stand down (its "LAYER 2 HAS THE VEHICLE" guard), so the wall
+        // cannot re-engage BRAKE on top of the RTL this starts.
+        if (wallHolding && !action.equals("HOVER", ignoreCase = true) &&
+            !altitudeLimitActionTriggered
+        ) {
+            runAltitudeLimitAction(
+                altitude = altitude,
+                ceiling = ceiling,
+                optionsAction = action,
+                breached = false,
+                isRefire = false,
+                now = now
+            )
+            return
+        }
 
-        if (altitude >= actionThreshold) {
+        if (altitude >= breachThreshold) {
+
+            // ═══ THE WALL IS HANDLING IT ═══
+            // The vehicle is over the breach line but BRAKE has it stopped. That is the
+            // system working, not a breach to escalate: commanding RTL on top of a
+            // successful arrest would turn a 2-second interruption into a flight home.
+            // The instant the arrest stops holding — the vehicle starts climbing again, or
+            // BRAKE never engaged — wallHolding goes false and the action below fires.
+            if (wallHolding) {
+                if (now - lastAltitudeLimitTime >= ALTITUDE_LIMIT_INTERVAL_MS) {
+                    lastAltitudeLimitTime = now
+                    LogUtils.i("AltitudeFailsafe", "⛔ ${altitude}m is past the breach line ${breachThreshold}m (ceiling ${ceiling}m) but the wall has the climb arrested — holding, no $action")
+                }
+                return
+            }
 
             // ═══ PRIORITY GUARDS: never cancel a higher-priority recovery ═══
-            // Same reasoning as the voltage failsafe's geofence guard: while the FC is
-            // pulling the drone back inside a breached fence, or while the critical-battery
-            // action is bringing it home, issuing our own DO_SET_MODE here would override
-            // that recovery and strand the drone. Suppress the action WITHOUT consuming the
+            // While the FC is pulling the drone back inside a breached fence, or while the
+            // critical-battery action is bringing it home, issuing our own DO_SET_MODE would
+            // override that recovery and strand the drone. Suppress WITHOUT consuming the
             // one-shot, and keep warning the pilot.
+            //
+            // Unlike the old code this no longer yields on proximity alone — it yields only
+            // while the competing recovery is demonstrably not making things worse (the
+            // vehicle is level or descending). A recovery that is still carrying the drone
+            // UP through the ceiling has forfeited its priority.
+            //
             // NOTE: tests voltageCriticalActive (the LIVE condition), not the
             // voltageAlertLevel2Triggered one-shot latch. The latch never clears until
             // disarm, so testing it meant a single voltage trigger — including a spurious
@@ -787,113 +1088,56 @@ class SharedViewModel : ViewModel() {
                 voltageCriticalActive -> "critical-battery action in progress"
                 else -> null
             }
-            // Deferring is safe only while the drone is still clear of the ceiling. At the
-            // backstop the competing recovery is demonstrably NOT keeping us under the
-            // limit, so the ceiling stops yielding to it — a breach in progress outranks a
-            // recovery that is failing to prevent it.
-            if (!altitudeLimitActionTriggered && deferReason != null && !atBackstop) {
+            if (!altitudeLimitActionTriggered && deferReason != null &&
+                climbRaw <= ALTITUDE_ARRESTED_CLIMB_MPS
+            ) {
                 if (now - lastAltitudeLimitTime >= ALTITUDE_LIMIT_INTERVAL_MS) {
                     lastAltitudeLimitTime = now
-                    LogUtils.w("AltitudeFailsafe", "⏸️ Altitude ${altitude}m over action threshold ${actionThreshold}m (ceiling ${ceiling}m) but $deferReason — deferring $action (one-shot NOT consumed)")
+                    LogUtils.w("AltitudeFailsafe", "⏸️ Altitude ${altitude}m past breach line ${breachThreshold}m (ceiling ${ceiling}m) but $deferReason and the climb is arrested — deferring $action (one-shot NOT consumed)")
                     ttsManager?.speak("Above altitude limit.")
                 }
                 return
             }
 
-            // Fire on the first crossing of the trigger point, and fire AGAIN whenever the
-            // drone reaches the backstop despite the latch (rate-limited below) — a
-            // consumed one-shot may never be the reason a breach goes unactioned.
-            val backstopRefire = altitudeLimitActionTriggered && atBackstop &&
+            // Fire on the first crossing, and fire AGAIN while the vehicle stays past the
+            // line without recovering (rate-limited below) — a consumed one-shot may never
+            // be the reason a breach goes unactioned.
+            //
+            // ═══ BUT NOT WHILE THE RECOVERY IS WORKING ═══
+            // The re-fire exists for a breach that is NOT being handled. Once the vehicle is
+            // in the commanded mode and no longer climbing, the action has done its job and
+            // re-commanding it only interrupts it.
+            //
+            // This matters far more now that the action is two steps. Re-commanding RTL
+            // alone was harmless (changeMode returns immediately when the heartbeat already
+            // reports the mode), but re-running the BRAKE pre-step CANCELS the in-progress
+            // RTL, waits for the climb to settle, then re-commands RTL — every 5s, forever.
+            // And the vehicle cannot break the cycle itself: with RTL_ALT synced to
+            // ceiling−[RTL_ALT_BELOW_CEILING_M], a drone stopped near the ceiling is ABOVE
+            // RTL_ALT, so RTL cruises home level instead of descending and altitude never
+            // falls to the ceiling−[ALTITUDE_REARM_BELOW_CEILING_M] re-arm point. The pilot
+            // has to take Loiter and fly it down by hand. Hence: a recovery that is holding
+            // or descending is left alone; only a vehicle still CLIMBING past the line gets
+            // the action re-commanded.
+            val recoveryHolding = !climbingHard && inCommandedRecoveryMode()
+            val breachRefire = altitudeLimitActionTriggered && !recoveryHolding &&
                 now - lastAltitudeLimitTime >= ALTITUDE_LIMIT_INTERVAL_MS
 
-            if (!altitudeLimitActionTriggered || backstopRefire) {
-                // ═══ TRIGGER: stop the climb ═══
-                altitudeLimitActionTriggered = true
-                lastAltitudeLimitTime = now
-
-                // Announce the action the vehicle is actually configured with, not the
-                // Options dropdown value — the mode below comes from FENCE_ACTION.
-                val announcedAction = _fenceAction.value?.pilotLabel ?: action
-
-                if (backstopRefire) {
-                    LogUtils.w("AltitudeFailsafe", "⛔ ALTITUDE BACKSTOP: ${altitude}m is at/over the ${ceiling}m ceiling and the one-shot was already consumed — RE-COMMANDING $announcedAction, mode=${_telemetryState.value.mode}")
-                } else {
-                    LogUtils.i("AltitudeFailsafe", "⛔ ALTITUDE LIMIT: ${altitude}m >= action threshold ${actionThreshold}m (FENCE_ALT_MAX ${ceiling}m, margin ${String.format(Locale.US, "%.1f", actionMargin)}m from climb=${state.climbRate}m/s age=${positionAgeMs}ms) — triggering $announcedAction (one-shot), mode=${_telemetryState.value.mode}")
-                }
-
-                ttsManager?.speak("Above altitude limit. Activating $announcedAction.")
-
-                // One notification per breach, not per re-command. The backstop keeps
-                // re-issuing the mode change every ALTITUDE_LIMIT_INTERVAL_MS while the
-                // drone sits at the ceiling — that repetition is the safety behaviour and
-                // must stay — but repeating the LIST entry alongside it would turn a single
-                // event into a wall of identical rows. The re-fire still logs (above), still
-                // speaks, and still refreshes the popup.
-                if (!backstopRefire) {
-                    addNotification(
-                        Notification(
-                            message = "⛔ ALTITUDE LIMIT: ${String.format(Locale.US, "%.0f", altitude)}m of ${String.format(Locale.US, "%.0f", ceiling)}m ceiling — activating $announcedAction",
-                            type = NotificationType.ERROR
-                        )
-                    )
-                }
-                showFailsafePopup("Max Altitude")
-
-                viewModelScope.launch {
-                    // The mode comes from the vehicle's FENCE_ACTION, not from the Options
-                    // dropdown. DGCA requires the drone to act on the parameter actually set
-                    // on it, and the GCS reaches the ceiling FIRST (its speed-aware margin is
-                    // metres below FENCE_ALT_MAX, see getFcAltitudeFenceMax) — so if this
-                    // used its own action the FC's FENCE_ACTION would never get to run, and
-                    // an operator who set RTL would watch the drone merely stop and hover.
-                    //
-                    // The Options action remains the fallback for when FENCE_ACTION could not
-                    // be read, so the ceiling still protects a vehicle we failed to query.
-                    val fenceAction = _fenceAction.value
-                    val targetMode = when (fenceAction) {
-                        FenceAction.RTL, FenceAction.SMART_RTL, FenceAction.SMART_RTL_LAND -> MavMode.RTL
-                        FenceAction.ALWAYS_LAND -> MavMode.LAND
-                        FenceAction.BRAKE -> MavMode.BRAKE
-                        // REPORT_ONLY: the operator asked for no automatic intervention.
-                        FenceAction.REPORT_ONLY -> null
-                        null -> when (action.uppercase()) {
-                            "RTL" -> MavMode.RTL
-                            "LAND" -> MavMode.LAND
-                            else -> MavMode.BRAKE
-                        }
-                    }
-                    val targetModeName = when (targetMode) {
-                        MavMode.RTL -> "RTL"
-                        MavMode.LAND -> "LAND"
-                        MavMode.BRAKE -> "BRAKE"
-                        else -> "REPORT ONLY"
-                    }
-
-                    if (targetMode == null) {
-                        LogUtils.i("AltitudeFailsafe", "FENCE_ACTION=Report Only — alerting the pilot, taking no mode action")
-                    } else {
-                        LogUtils.i("AltitudeFailsafe", "Acting on FENCE_ACTION=${fenceAction?.pilotLabel ?: "unset, using Options '$action'"} → $targetModeName")
-                        executeFailsafeModeChange("AltitudeFailsafe", targetMode, targetModeName)
-                    }
-
-                    try {
-                        WebSocketManager.getInstance().sendMissionEvent(
-                            eventType = "ALTITUDE_LIMIT",
-                            eventStatus = "CRITICAL",
-                            description = "Altitude ${String.format(Locale.US, "%.1f", altitude)}m reached ceiling ${String.format(Locale.US, "%.1f", ceiling)}m - $targetModeName activated"
-                        )
-                    } catch (e: Exception) {
-                        LogUtils.e("AltitudeFailsafe", "Failed to send altitude limit event", e)
-                    }
-                }
+            if (!altitudeLimitActionTriggered || breachRefire) {
+                runAltitudeLimitAction(
+                    altitude = altitude,
+                    ceiling = ceiling,
+                    optionsAction = action,
+                    breached = true,
+                    isRefire = breachRefire,
+                    now = now
+                )
             } else if (now - lastAltitudeLimitTime >= ALTITUDE_LIMIT_INTERVAL_MS) {
                 // ═══ REPEAT: TTS only ═══
-                // Reached only when the latch is set AND the drone is below the backstop,
-                // i.e. past the speed-aware trigger but still clear of the ceiling — the
-                // one case where staying quiet and letting the pilot fly is right. At the
-                // backstop, backstopRefire above takes the action branch instead.
+                // Reached only when the latch is set AND a commanded recovery is holding the
+                // vehicle, i.e. the action has already been taken and is working.
                 lastAltitudeLimitTime = now
-                LogUtils.i("AltitudeFailsafe", "⛔ Past altitude trigger: ${altitude}m (ceiling ${ceiling}m, action already taken; below backstop)")
+                LogUtils.i("AltitudeFailsafe", "⛔ Past altitude breach line: ${altitude}m (ceiling ${ceiling}m, $action already running and holding)")
                 ttsManager?.speak("Above altitude limit. ${altitude.toInt()} meters.")
             }
         }
@@ -906,18 +1150,460 @@ class SharedViewModel : ViewModel() {
         // at the aircraft rather than the screen, and it does not accumulate. The
         // notification list is reserved for things that HAPPENED (the breach and its mode
         // change), not for things that merely might.
-        else if (altitude >= ceiling - ALTITUDE_WARN_MARGIN_M) {
+        //
+        // Gated on an actual climb: the band is a fifth of the ceiling wide, a sprayer works
+        // inside it for whole passes at a time, and announcing "approaching" to a vehicle
+        // flying dead level is how the warning became background noise.
+        else if (altitude >= ceiling - altitudeWarnMargin(ceiling) &&
+            climbSmooth > ALTITUDE_WALL_CREEP_CLIMB_MPS
+        ) {
             if (now - lastAltitudeWarnTime >= ALTITUDE_WARN_INTERVAL_MS) {
                 lastAltitudeWarnTime = now
-                LogUtils.i("AltitudeFailsafe", "⚠️ Approaching altitude limit: ${altitude}m of ${ceiling}m")
+                LogUtils.i("AltitudeFailsafe", "⚠️ Approaching altitude limit: ${altitude}m of ${ceiling}m (climb=${climbSmooth}m/s)")
                 ttsManager?.speak("Approaching altitude limit. ${altitude.toInt()} meters.")
             }
         }
         // NOTE: altitudeLimitActionTriggered re-arms mid-flight once the drone descends
         // ALTITUDE_REARM_BELOW_CEILING_M below the CEILING with the climb arrested (and on
-        // disarm), so a second climb through the ceiling is protected just like the first.
-        // Even if it somehow does not re-arm, the backstop above still acts at the ceiling.
+        // disarm), so a second breach is protected just like the first.
     }
+
+    /**
+     * Run the configured action at the altitude ceiling.
+     *
+     * Shared by both paths that can decide the pilot needs more than a hold:
+     *
+     *   LAYER 1b — the wall has the climb arrested at the limit and the pilot's
+     *   "Action at Limit" is RTL or Land rather than Hover ([breached] = false).
+     *   LAYER 2  — the vehicle actually crossed the ceiling ([breached] = true).
+     *
+     * Extracted rather than duplicated: the BRAKE-before-RTL pre-step, the escalation to
+     * LAND when a mode change is refused, the one-shot and the re-fire suppression are all
+     * load-bearing, and a second copy of them would drift.
+     *
+     * WHICH MODE is always the vehicle's own FENCE_ACTION when it could be read, falling
+     * back to [optionsAction] only when it could not — DGCA requires the drone to act on
+     * the parameters actually set on it. The Options dropdown decides WHETHER to escalate,
+     * not what the escalation is; [warnIfLimitActionMismatch] tells the pilot on the ground
+     * when the two disagree, so a surprise never arrives in the air.
+     *
+     * @param breached true if the ceiling was crossed, false if the wall held at the limit.
+     *   Only changes the wording — saying "breached" for a vehicle the wall stopped two
+     *   metres short would be a lie in the log a regulator reads.
+     * @param isRefire true when re-commanding an action already taken (layer 2 only).
+     */
+    private fun runAltitudeLimitAction(
+        altitude: Float,
+        ceiling: Float,
+        optionsAction: String,
+        breached: Boolean,
+        isRefire: Boolean,
+        now: Long
+    ) {
+        val reachedWord = if (breached) "breached" else "reached"
+        val headlineWord = if (breached) "BREACH" else "LIMIT"
+        // ═══ TRIGGER ═══
+        altitudeLimitActionTriggered = true
+        lastAltitudeLimitTime = now
+
+        // The wall has been overtaken by events; drop its claim on the vehicle so it
+        // cannot try to hand control back to the pilot in the middle of an RTL.
+        releaseAltitudeWall("breach action taking over")
+
+        // Announce the action the vehicle is actually configured with, not the
+        // Options dropdown value — the mode below comes from FENCE_ACTION.
+        val announcedAction = _fenceAction.value?.pilotLabel ?: optionsAction
+
+        val climbNow = _telemetryState.value.climbRate ?: 0f
+        when {
+            isRefire -> LogUtils.w("AltitudeFailsafe", "⛔ ALTITUDE BREACH (repeat): ${altitude}m is still past the ${ceiling}m ceiling and not recovering — RE-COMMANDING $announcedAction, mode=${_telemetryState.value.mode}")
+            breached -> LogUtils.e("AltitudeFailsafe", "⛔ ALTITUDE BREACH: ${altitude}m >= ${ceiling}m ceiling (climb=${climbNow}m/s) — the wall did not hold, triggering $announcedAction, mode=${_telemetryState.value.mode}")
+            // Layer 1b: the wall DID hold. This is not a failure — it is the pilot
+            // having asked for an action at the limit instead of a hover.
+            else -> LogUtils.i("AltitudeFailsafe", "⛔ ALTITUDE LIMIT: wall holding at ${altitude}m under the ${ceiling}m ceiling, 'Action at Limit' is $optionsAction — escalating to $announcedAction, mode=${_telemetryState.value.mode}")
+        }
+
+        ttsManager?.speak("Altitude limit $reachedWord. Activating $announcedAction.")
+
+        // One notification per breach, not per re-command. The re-fire keeps
+        // re-issuing the mode change every ALTITUDE_LIMIT_INTERVAL_MS while the
+        // drone sits past the line — that repetition is the safety behaviour and
+        // must stay — but repeating the LIST entry alongside it would turn a single
+        // event into a wall of identical rows. The re-fire still logs (above), still
+        // speaks, and still refreshes the popup.
+        if (!isRefire) {
+            addNotification(
+                Notification(
+                    message = "⛔ ALTITUDE $headlineWord: ${String.format(Locale.US, "%.1f", altitude)}m of ${String.format(Locale.US, "%.0f", ceiling)}m ceiling — activating $announcedAction",
+                    type = NotificationType.ERROR
+                )
+            )
+        }
+        showFailsafePopup("Max Altitude")
+
+        viewModelScope.launch {
+            // ═══ ARREST THE CLIMB FIRST ═══
+            // RTL does not stop a climb. ArduCopter's RTL begins with RTL_Climb: if
+            // the vehicle is below RTL_ALT it climbs UP to RTL_ALT before heading
+            // home — i.e. the configured breach action drives the drone further
+            // through the very ceiling it is meant to protect. syncRtlAltOnConnect
+            // keeps RTL_ALT under the ceiling so the climb stage is a no-op, but a
+            // vehicle we failed to write (or one an operator re-configured
+            // mid-session) must still not sail through.
+            //
+            // So: BRAKE first to kill vertical motion, then hand over to the
+            // operator's FENCE_ACTION. DGCA's "acts on the parameters actually set"
+            // still holds — RTL still happens, it just no longer happens while
+            // pointing the wrong way. Skipped when the action is itself a stop
+            // (BRAKE) or a descent (LAND), neither of which climbs.
+            val fenceAction = _fenceAction.value
+            val targetMode = when (fenceAction) {
+                FenceAction.RTL, FenceAction.SMART_RTL, FenceAction.SMART_RTL_LAND -> MavMode.RTL
+                FenceAction.ALWAYS_LAND -> MavMode.LAND
+                FenceAction.BRAKE -> MavMode.BRAKE
+                // REPORT_ONLY: the operator asked for no automatic intervention.
+                FenceAction.REPORT_ONLY -> null
+                null -> when (optionsAction.uppercase()) {
+                    "RTL" -> MavMode.RTL
+                    "LAND" -> MavMode.LAND
+                    else -> MavMode.BRAKE
+                }
+            }
+            val targetModeName = when (targetMode) {
+                MavMode.RTL -> "RTL"
+                MavMode.LAND -> "LAND"
+                MavMode.BRAKE -> "BRAKE"
+                else -> "REPORT ONLY"
+            }
+
+            // Only RTL climbs. BRAKE is already the arrest, and LAND descends.
+            val actionClimbs = targetMode == MavMode.RTL
+            val alreadyBraking =
+                _telemetryState.value.mode?.contains("Brake", ignoreCase = true) == true
+            // The arrest is for a vehicle that is still going UP. Braking one that
+            // has already stopped (or is coming down) buys nothing and, on a
+            // re-fire, actively cancels the RTL that is recovering it.
+            val stillClimbing = (_telemetryState.value.climbRate ?: 0f)
+                .let { it.isFinite() && it > ALTITUDE_ARRESTED_CLIMB_MPS }
+            // Never re-arrest on a re-fire: by then RTL is already running, and the
+            // whole point of the re-fire is to nudge a vehicle that ISN'T recovering.
+            val needsArrest = actionClimbs && !alreadyBraking && stillClimbing && !isRefire
+
+            if (targetMode == null) {
+                LogUtils.i("AltitudeFailsafe", "FENCE_ACTION=Report Only — alerting the pilot, taking no mode action")
+            } else {
+                if (!needsArrest && actionClimbs) {
+                    LogUtils.i("AltitudeFailsafe", "Climb already arrested (climb=${_telemetryState.value.climbRate}m/s, mode=${_telemetryState.value.mode}, refire=$isRefire) — commanding $targetModeName directly")
+                }
+                if (needsArrest) {
+                    LogUtils.i("AltitudeFailsafe", "🛑 Arresting climb with BRAKE before $targetModeName (RTL climbs to RTL_ALT and would breach the ceiling)")
+                    if (executeFailsafeModeChange("AltitudeFailsafe", MavMode.BRAKE, "BRAKE")) {
+                        // Let the brake actually bite before handing over. RTL's climb
+                        // stage is skipped once the vehicle is at/above RTL_ALT, and a
+                        // still-rising vehicle handed straight to RTL would resume the
+                        // climb this step exists to stop.
+                        awaitClimbArrested()
+                    } else {
+                        // executeFailsafeModeChange has already escalated to LAND and
+                        // told the pilot. Do not then command RTL on top of a LAND that
+                        // is bringing the vehicle down.
+                        LogUtils.e("AltitudeFailsafe", "✗ Could not arrest the climb — skipping $targetModeName, vehicle is on the LAND fallback")
+                        return@launch
+                    }
+                }
+
+                LogUtils.i("AltitudeFailsafe", "Acting on FENCE_ACTION=${fenceAction?.pilotLabel ?: "unset, using Options '$optionsAction'"} → $targetModeName")
+                executeFailsafeModeChange("AltitudeFailsafe", targetMode, targetModeName)
+            }
+
+            try {
+                WebSocketManager.getInstance().sendMissionEvent(
+                    eventType = "ALTITUDE_LIMIT",
+                    eventStatus = "CRITICAL",
+                    description = "Altitude ${String.format(Locale.US, "%.1f", altitude)}m $reachedWord ceiling ${String.format(Locale.US, "%.1f", ceiling)}m - $targetModeName activated"
+                )
+            } catch (e: Exception) {
+                LogUtils.e("AltitudeFailsafe", "Failed to send altitude limit event", e)
+            }
+        }
+    }
+
+    /**
+     * Altitude ceiling, layer 1: the wall.
+     *
+     * A continuous, non-latching climb limit. Every frame it asks one question — "if I
+     * commanded BRAKE right now, would the vehicle still stop below the line?" — and the
+     * moment the answer turns to no, it commands BRAKE. Nothing else. No FENCE_ACTION, no
+     * one-shot, no notification: running into a ceiling is a limit being enforced, not an
+     * emergency, and the pilot gets the vehicle straight back.
+     *
+     * Two arms, because one projection cannot cover both regimes:
+     *
+     *   PREDICTIVE — climbing faster than [ALTITUDE_WALL_MIN_CLIMB_MPS] and the projected
+     *   stop altitude reaches the line. This is what stops a fast climb: at 4 m/s the
+     *   projection runs ~7.6 m ahead of the vehicle, so the brake goes in 7.6 m early and
+     *   the vehicle comes to rest just under the limit.
+     *
+     *   PROXIMITY — already at the line and still drifting up. The projection is useless
+     *   here (a 0.2 m/s climb projects almost nowhere) but a slow creep crosses the ceiling
+     *   just as surely as a fast one, so proximity plus any real upward motion is enough.
+     *
+     * Returns true while the wall is engaged AND succeeding, which is layer 2's signal to
+     * stay silent. It goes false the instant BRAKE stops holding the climb, which is layer
+     * 2's signal to escalate.
+     *
+     * @param climbRaw    unfiltered climb rate; answers "is it moving?"
+     * @param climbSmooth EMA-filtered climb rate; answers "how far before it stops?"
+     */
+    private fun handleAltitudeWall(
+        altitude: Float,
+        ceiling: Float,
+        wallLine: Float,
+        projectedAlt: Float,
+        climbRaw: Float,
+        climbSmooth: Float,
+        now: Long
+    ): Boolean {
+        val mode = _telemetryState.value.mode
+        val inBrake = mode?.contains("Brake", ignoreCase = true) == true
+
+        // A genuine descent clears the anti-sawtooth latch, so a pilot who backed off and
+        // came down gets hand-back again on their next approach. Measured from the ceiling
+        // for the same reason the breach re-arm is: a fixed altitude they can fly to.
+        if (altitudeWallHoldLatched && altitude < ceiling - ALTITUDE_WALL_LATCH_CLEAR_M) {
+            altitudeWallHoldLatched = false
+            altitudeWallFireTimes.clear()
+            LogUtils.i("AltitudeWall", "✓ Descended to ${altitude}m — hand-back re-enabled")
+        }
+
+        // The pilot (or another failsafe) has taken the vehicle out of BRAKE. The wall has no
+        // claim on it any more; drop the engagement so we never try to "restore" a mode on
+        // top of someone else's command. If the limit still needs defending, the trigger
+        // below re-engages on this same frame.
+        if (altitudeWallEngaged && !altitudeWallBusy && !inBrake) {
+            releaseAltitudeWall("vehicle is in $mode, not BRAKE")
+        }
+
+        // ═══ LAYER 2 HAS THE VEHICLE ═══
+        // Unconditional, and checked before anything else the wall might do. Once the breach
+        // action has fired, layer 2 owns the aircraft: it runs its own BRAKE-then-FENCE_ACTION
+        // sequence and re-commands it on a timer. A wall that kept engaging on top of that
+        // would cancel the in-progress RTL every few seconds and the two layers would deadlock
+        // against each other, which is worse than either alone. The wall comes back when the
+        // breach latch re-arms on recovery.
+        if (altitudeLimitActionTriggered) {
+            releaseAltitudeWall("breach action owns the vehicle")
+            return false
+        }
+
+        // ═══ SHOULD THE WALL BE UP? ═══
+        val predictive = climbSmooth > ALTITUDE_WALL_MIN_CLIMB_MPS && projectedAlt >= wallLine
+        val proximity = altitude >= wallLine && climbSmooth > ALTITUDE_WALL_CREEP_CLIMB_MPS
+        val wantWall = predictive || proximity
+
+        if (wantWall && !altitudeWallEngaged && !altitudeWallBusy) {
+            // Do not brake a higher-priority recovery that is already flying the vehicle
+            // somewhere safe and is NOT climbing into the limit. Same reasoning as layer 2's
+            // priority guard, and the same escape hatch: a "recovery" still carrying the
+            // drone up has forfeited its priority and gets braked like anything else.
+            val competing = when {
+                _geofenceEnabled.value && _geofenceViolationDetected.value -> "geofence recovery"
+                voltageCriticalActive -> "critical-battery action"
+                inCommandedRecoveryMode() -> "commanded recovery ($mode)"
+                else -> null
+            }
+            if (competing != null && climbRaw <= ALTITUDE_ARRESTED_CLIMB_MPS) {
+                if (now - lastAltitudeWallSpeakTime >= ALTITUDE_WALL_SPEAK_INTERVAL_MS) {
+                    lastAltitudeWallSpeakTime = now
+                    LogUtils.i("AltitudeWall", "Wall wanted at ${altitude}m (projected ${projectedAlt}m vs line ${wallLine}m) but $competing is holding the vehicle — standing off")
+                }
+                return false
+            }
+
+            // ═══ ENGAGE ═══
+            // Capture the mode to give back BEFORE commanding BRAKE, and only if it is one a
+            // pilot actually flies. AUTO/GUIDED/RTL/LAND come back null: restoring AUTO would
+            // resume the mission leg that flew into the ceiling, and restoring RTL or LAND
+            // would hand the vehicle back to a recovery the wall just interrupted.
+            altitudeWallPreviousMode = pilotModeNumber(mode)
+            altitudeWallPreviousModeName = mode
+            altitudeWallEngaged = true
+            altitudeWallEngagedAtMs = now
+            altitudeWallBusy = true
+
+            // Record the engagement for the sawtooth detector, and drop entries that have
+            // aged out of the window.
+            altitudeWallFireTimes.addLast(now)
+            while (altitudeWallFireTimes.isNotEmpty() &&
+                now - altitudeWallFireTimes.first() > ALTITUDE_WALL_REFIRE_WINDOW_MS
+            ) {
+                altitudeWallFireTimes.removeFirst()
+            }
+            if (altitudeWallFireTimes.size >= ALTITUDE_WALL_MAX_REFIRES && !altitudeWallHoldLatched) {
+                altitudeWallHoldLatched = true
+                LogUtils.w("AltitudeWall", "⚠️ Wall fired ${altitudeWallFireTimes.size} times in ${ALTITUDE_WALL_REFIRE_WINDOW_MS}ms — climb demand looks standing, hand-back suspended until the vehicle descends ${ALTITUDE_WALL_LATCH_CLEAR_M}m")
+                addNotification(
+                    Notification(
+                        message = "⚠️ Holding at the ${String.format(Locale.US, "%.0f", ceiling)}m altitude limit. Descend or change mode to continue.",
+                        type = NotificationType.WARNING
+                    )
+                )
+            }
+
+            val reason = if (predictive)
+                "projected stop ${String.format(Locale.US, "%.1f", projectedAlt)}m ≥ line ${String.format(Locale.US, "%.1f", wallLine)}m at ${String.format(Locale.US, "%.1f", climbSmooth)}m/s"
+            else
+                "at the line (${String.format(Locale.US, "%.1f", altitude)}m ≥ ${String.format(Locale.US, "%.1f", wallLine)}m) and still rising ${String.format(Locale.US, "%.2f", climbSmooth)}m/s"
+            LogUtils.i("AltitudeWall", "🧱 ALTITUDE WALL: braking at ${altitude}m of the ${ceiling}m ceiling — $reason (was in $mode)")
+
+            if (now - lastAltitudeWallSpeakTime >= ALTITUDE_WALL_SPEAK_INTERVAL_MS) {
+                lastAltitudeWallSpeakTime = now
+                ttsManager?.speak("Altitude limit.")
+            }
+
+            viewModelScope.launch {
+                try {
+                    val ok = repo?.changeMode(MavMode.BRAKE) ?: false
+                    if (!ok) {
+                        // Do NOT escalate to LAND here the way the breach path does. The wall
+                        // is a preventive stop, not a failsafe, and landing a working aircraft
+                        // because one mode change was refused is far worse than the thing it
+                        // would be preventing. Let go instead: the vehicle is still below the
+                        // ceiling, and layer 2 is waiting at the breach line with the
+                        // operator's own FENCE_ACTION if it really does cross.
+                        LogUtils.e("AltitudeWall", "✗ BRAKE not confirmed — wall could not hold; the breach layer now owns the limit")
+                        releaseAltitudeWall("BRAKE refused")
+                        addNotification(
+                            Notification(
+                                message = "⚠️ Could not hold the altitude limit (BRAKE refused). Level off manually.",
+                                type = NotificationType.ERROR
+                            )
+                        )
+                        ttsManager?.speak("Altitude hold failed. Level off.")
+                    }
+                } finally {
+                    altitudeWallBusy = false
+                }
+            }
+            return false   // nothing is holding yet; BRAKE has only just been sent
+        }
+
+        // ═══ HAND BACK ═══
+        if (altitudeWallEngaged && !altitudeWallBusy && inBrake) {
+            val arrested = climbRaw <= ALTITUDE_ARRESTED_CLIMB_MPS
+            val heldMs = now - altitudeWallEngagedAtMs
+
+            // `!wantWall` matters: handing control back while the trigger condition is still
+            // true would re-engage the wall on the very next frame, and the vehicle would
+            // sawtooth between BRAKE and the pilot's mode until the re-fire cap noticed. In
+            // BRAKE the climb decays to zero within a second or so, at which point the
+            // condition clears on its own and the hand-back goes through.
+            if (arrested && !wantWall && heldMs >= ALTITUDE_WALL_HANDBACK_HOLD_MS &&
+                !altitudeWallHoldLatched
+            ) {
+                val restore = altitudeWallPreviousMode
+                val restoreName = altitudeWallPreviousModeName
+                if (restore == null) {
+                    // Nothing safe to give back to (the wall interrupted AUTO, GUIDED, or a
+                    // recovery mode). Holding in BRAKE under the ceiling is a correct and
+                    // stable place to leave the aircraft; the pilot picks it up from here.
+                    if (now - lastAltitudeWallSpeakTime >= ALTITUDE_WALL_SPEAK_INTERVAL_MS) {
+                        lastAltitudeWallSpeakTime = now
+                        LogUtils.i("AltitudeWall", "Holding in BRAKE at ${altitude}m — interrupted mode '$restoreName' is not one to hand back to")
+                        ttsManager?.speak("Holding at altitude limit.")
+                    }
+                } else {
+                    altitudeWallBusy = true
+                    viewModelScope.launch {
+                        try {
+                            LogUtils.i("AltitudeWall", "↩️ Climb arrested at ${altitude}m — handing control back to $restoreName")
+                            val ok = repo?.changeMode(restore) ?: false
+                            if (ok) {
+                                LogUtils.i("AltitudeWall", "✓ Returned to $restoreName; the wall stays armed and will re-engage if the climb resumes")
+                                releaseAltitudeWall("handed back to $restoreName")
+                            } else {
+                                // Leaving it in BRAKE is the safe failure. Say so once rather
+                                // than retrying every frame against a link that is refusing.
+                                LogUtils.w("AltitudeWall", "✗ Could not restore $restoreName — leaving the vehicle holding in BRAKE")
+                                altitudeWallHoldLatched = true
+                                addNotification(
+                                    Notification(
+                                        message = "⚠️ Held at the altitude limit; could not return to $restoreName. Select a mode manually.",
+                                        type = NotificationType.WARNING
+                                    )
+                                )
+                                ttsManager?.speak("Holding at altitude limit.")
+                            }
+                        } finally {
+                            altitudeWallBusy = false
+                        }
+                    }
+                }
+            } else if (!arrested && heldMs >= ALTITUDE_WALL_ARREST_TIMEOUT_MS) {
+                // BRAKE is engaged but the vehicle is still going up after six seconds. That
+                // is not a wall doing its job, and returning false here is what lets layer 2
+                // escalate to the operator's FENCE_ACTION.
+                if (now - lastAltitudeWallSpeakTime >= ALTITUDE_WALL_SPEAK_INTERVAL_MS) {
+                    lastAltitudeWallSpeakTime = now
+                    LogUtils.e("AltitudeWall", "✗ Still climbing ${climbRaw}m/s at ${altitude}m after ${heldMs}ms in BRAKE — the wall is not holding")
+                }
+                return false
+            }
+        }
+
+        // "Holding" means the wall has a claim on the vehicle AND the climb has actually
+        // stopped — either confirmed in BRAKE, or inside the grace window while the mode
+        // change is still in flight. Anything less and layer 2 must be free to act; in
+        // particular a vehicle still climbing hard is never "holding", whatever mode it is
+        // reporting.
+        return altitudeWallEngaged &&
+            climbRaw <= ALTITUDE_ARRESTED_CLIMB_MPS &&
+            (inBrake || now - altitudeWallEngagedAtMs <= ALTITUDE_WALL_GRACE_MS)
+    }
+
+    /** Drop the wall's claim on the vehicle without commanding anything. */
+    private fun releaseAltitudeWall(reason: String) {
+        if (!altitudeWallEngaged) return
+        altitudeWallEngaged = false
+        altitudeWallEngagedAtMs = 0L
+        altitudeWallPreviousMode = null
+        altitudeWallPreviousModeName = null
+        LogUtils.i("AltitudeWall", "Wall released — $reason")
+    }
+
+    /**
+     * ArduCopter custom-mode number for a mode a PILOT flies, or null for anything else.
+     *
+     * Deliberately partial. It is used only to decide what the altitude wall may hand
+     * control back to, so every autonomous mode — AUTO, GUIDED, RTL, LAND, SMART_RTL — maps
+     * to null: restoring one of those would either resume the mission leg that flew into the
+     * ceiling or countermand a recovery already in progress. The absence of an entry is the
+     * safety property, not an omission.
+     */
+    private fun pilotModeNumber(modeName: String?): UInt? =
+        when (modeName?.trim()?.lowercase(Locale.US)) {
+            "stabilize" -> MavMode.STABILIZE
+            "acro" -> 1u
+            "althold" -> 2u
+            "loiter" -> MavMode.LOITER
+            "circle" -> 7u
+            "drift" -> 11u
+            "sport" -> 13u
+            "poshold" -> MavMode.POSHOLD
+            else -> null
+        }
+
+    /**
+     * Width of the "approaching the limit" warning band for a given ceiling, in metres.
+     *
+     * A flat [ALTITUDE_WARN_MARGIN_M] is right for a 120 m ceiling and absurd for a 48 m one,
+     * where it would start warning at 38 m — below even the old trigger point, and across
+     * most of the height a sprayer actually works at. Capping it at
+     * [ALTITUDE_WARN_MAX_FRACTION] of the ceiling keeps the band proportionate to the
+     * envelope it is warning about.
+     */
+    private fun altitudeWarnMargin(ceiling: Float): Float =
+        minOf(ALTITUDE_WARN_MARGIN_M, ceiling * ALTITUDE_WARN_MAX_FRACTION)
 
     /**
      * Max range failsafe — GCS-enforced circular limit centred on HOME.
@@ -1126,33 +1812,87 @@ class SharedViewModel : ViewModel() {
     }
 
     /**
-     * How far below the ceiling the altitude action fires, in metres.
+     * True when the vehicle is already in a mode the altitude failsafe itself commands as a
+     * recovery — i.e. the action has been taken and is running.
      *
-     * The old flat 4 m buffer assumed the altitude being judged was current. It usually was —
-     * until a telemetry link carrying live rangefinder traffic saturated and GLOBAL_POSITION_INT
-     * degraded from 10 Hz to 1-2 Hz. The drone then climbed for up to a second past the reading
-     * the failsafe was still looking at, and sailed ~1 m over the ceiling before BRAKE bit.
-     *
-     * Three terms, with the fix age made explicit:
-     *
-     *     margin = v · (age + [ALTITUDE_LATENCY_S]) + v² / (2 · [ALTITUDE_DECEL_MPS2])
-     *
-     * clamped to [[ALTITUDE_MIN_ACTION_MARGIN_M], [ALTITUDE_MAX_ACTION_MARGIN_M]]. At 2 m/s with
-     * a fresh fix that is 2·0.8 + 0.8 = 2.4 m → the 6 m floor. At 5 m/s with a 0.8 s-stale fix
-     * it is 5·1.6 + 5 = 13 m, which is what actually prevents the overshoot. Only a positive
-     * climb rate counts: descending toward the ceiling is not a risk.
-     *
-     * Note this margin is only the FIRST line of defence. It can be defeated by a climb that
-     * accelerates after the reading being judged, which is why the ceiling also carries a
-     * hard backstop at [ALTITUDE_BACKSTOP_MARGIN_M] that re-commands the action regardless
-     * of the one-shot latch.
+     * Used to stop the hard backstop from re-commanding an action that is already working.
+     * BRAKE counts: it is the arrest step, and a vehicle holding in BRAKE under the ceiling
+     * is exactly the outcome the ceiling wants.
      */
-    private fun altitudeActionMargin(climbRate: Float?, positionAgeMs: Long): Float {
+    private fun inCommandedRecoveryMode(): Boolean {
+        val mode = _telemetryState.value.mode ?: return false
+        return mode.contains("RTL", ignoreCase = true) ||
+            mode.contains("Brake", ignoreCase = true) ||
+            mode.equals("Land", ignoreCase = true)
+    }
+
+    /**
+     * Wait for the vertical climb to stop after a BRAKE, so the follow-on action is not
+     * handed a still-rising vehicle.
+     *
+     * Bounded: BRAKE is decisive on a multirotor, but the failsafe must never park here
+     * waiting on telemetry that has gone quiet — timing out and proceeding to RTL is
+     * strictly better than doing nothing at all.
+     */
+    private suspend fun awaitClimbArrested(
+        timeoutMs: Long = ALTITUDE_BRAKE_SETTLE_TIMEOUT_MS
+    ) {
+        val start = System.currentTimeMillis()
+        while (System.currentTimeMillis() - start < timeoutMs) {
+            val climb = _telemetryState.value.climbRate
+            if (climb != null && climb.isFinite() && climb <= ALTITUDE_ARRESTED_CLIMB_MPS) {
+                LogUtils.i("AltitudeFailsafe", "✓ Climb arrested (${climb}m/s) after ${System.currentTimeMillis() - start}ms")
+                return
+            }
+            delay(100L)
+        }
+        LogUtils.w("AltitudeFailsafe", "⚠️ Climb not confirmed arrested within ${timeoutMs}ms (climb=${_telemetryState.value.climbRate}m/s) — proceeding anyway")
+    }
+
+    /**
+     * Distance the vehicle will still travel upward if BRAKE is commanded on this frame, in
+     * metres. Three terms, with the fix age made explicit:
+     *
+     *     stop = v · (age + [ALTITUDE_LATENCY_S] + [ALTITUDE_EVAL_INTERVAL_S])
+     *            + v² / (2 · [ALTITUDE_DECEL_MPS2])
+     *
+     * The age term is not decoration. A telemetry link carrying live rangefinder traffic can
+     * degrade GLOBAL_POSITION_INT from 10 Hz to 1-2 Hz, and the drone keeps climbing through
+     * the gap — acting on a one-second-old fix as though it were current is how the ceiling
+     * used to be overshot even when the maths was otherwise right.
+     *
+     * Only a positive climb counts; a descending vehicle is not heading anywhere dangerous.
+     * The result is clamped at [ALTITUDE_MAX_STOP_DISTANCE_M] so a single absurd climb-rate
+     * sample cannot swallow the whole envelope.
+     *
+     * NOTE there is no lower clamp any more. The old version floored this at 6 m and used it
+     * as an RTL trigger offset, which is precisely what made a 48 m ceiling behave like a
+     * 42 m one. A vehicle in level flight has a stopping distance of zero, and the wall is
+     * built to let it say so.
+     */
+    private fun altitudeStopDistance(climbRate: Float?, positionAgeMs: Long): Float {
         val v = climbRate?.takeIf { it.isFinite() && it > 0f } ?: 0f
         val ageS = positionAgeMs.coerceAtLeast(0L) / 1000f
-        val travel = v * (ageS + ALTITUDE_LATENCY_S) + (v * v) / (2f * ALTITUDE_DECEL_MPS2)
-        return travel.coerceIn(ALTITUDE_MIN_ACTION_MARGIN_M, ALTITUDE_MAX_ACTION_MARGIN_M)
+        val travel = v * (ageS + ALTITUDE_LATENCY_S + ALTITUDE_EVAL_INTERVAL_S) +
+            (v * v) / (2f * ALTITUDE_DECEL_MPS2)
+        return travel.coerceIn(0f, ALTITUDE_MAX_STOP_DISTANCE_M)
     }
+
+    /**
+     * Where the vehicle would come to rest if BRAKE were commanded right now.
+     *
+     * This is the single number the altitude wall is built around. Comparing a PROJECTION
+     * against the limit, rather than the current altitude against a limit-minus-margin, is
+     * what lets the ceiling be strict and generous at the same time: strict because the
+     * projection accounts for momentum, latency and fix age before the vehicle is committed,
+     * generous because a vehicle that is not climbing projects exactly where it already is
+     * and is therefore left alone.
+     */
+    private fun projectedStopAltitude(
+        altitude: Float,
+        climbRate: Float?,
+        positionAgeMs: Long
+    ): Float = altitude + altitudeStopDistance(climbRate, positionAgeMs)
 
     /**
      * Called automatically when isMissionActive transitions from false to true.
@@ -1242,6 +1982,7 @@ class SharedViewModel : ViewModel() {
         _resumePointLocation.value = null
         _resumePointWaypoint.value = null
         _resumeMissionReady.value = false
+        _resumePreparationFailed.value = false
         _showAddResumeHerePopup.value = false
         _pendingResumeLocation = null
         _missionPauseLocation = null
@@ -2150,45 +2891,147 @@ class SharedViewModel : ViewModel() {
     }
 
     /**
-     * The finished mission was wiped off the flight controller after disarm (see the disarm
-     * branch in [TelemetryRepository]).
+     * A flown mission finished and the drone disarmed, and the mission is STILL on the FC.
      *
-     * Clears the GCS's own copy too, so the map does not keep drawing a mission the vehicle
-     * no longer holds — leaving the lines up would imply a switch to AUTO would still fly
-     * them, which is the exact confusion this whole change exists to remove.
+     * The GCS used to wipe it here automatically. It no longer does (see the disarm branch in
+     * [TelemetryRepository]): clearing the flight controller is the operator's call, made
+     * explicitly from the home screen. What is left is the duty to say so, because a mission
+     * resident on the FC means a switch to AUTO will re-fly it, and that must not be a
+     * surprise.
      *
-     * The geofence is deliberately preserved ([clearMapLinesOnly], not
-     * [clearMissionFromMap]): the fence is a safety limit tied to the SITE, not to the
-     * mission, and the pilot is very likely to fly again from the same spot.
+     * The map lines are left up too, on purpose: they are now an accurate picture of what the
+     * vehicle is still holding.
      */
-    fun onMissionClearedFromFcAfterCompletion() {
-        LogUtils.i("SharedVM", "🧹 FC mission cleared after completion — clearing map lines (geofence preserved)")
-        clearMapLinesOnly()
+    fun onMissionLeftOnFcAfterCompletion() {
+        LogUtils.i("SharedVM", "Mission complete — still loaded on the FC, awaiting an explicit Clear Mission")
+        _missionLoadedOnFc.value = true
         addNotification(
             Notification(
-                message = "Mission complete — cleared from the drone",
-                type = NotificationType.SUCCESS
+                message = "Mission complete. It is still loaded on the drone — use Clear Mission on the home screen to remove it.",
+                type = NotificationType.INFO
             )
         )
     }
 
     /**
-     * The post-disarm mission clear did NOT succeed, so the completed mission is still
-     * loaded on the flight controller.
+     * True when we have reason to believe the flight controller is holding a mission.
      *
-     * This is told to the pilot rather than swallowed: they would otherwise reasonably
-     * assume the mission is gone, which is the belief that makes a stray AUTO switch
-     * dangerous. The map lines are left in place on purpose — they are now an accurate
-     * picture of what the FC still holds.
+     * Drives whether the home screen's Clear Mission button has anything to do. Deliberately
+     * optimistic — set on upload and on mission completion, cleared only by a confirmed clear
+     * — because offering the button when there is nothing to clear is harmless, while hiding
+     * it when there IS something to clear is the failure that matters.
      */
-    fun onMissionClearFromFcFailed() {
-        LogUtils.w("SharedVM", "⚠️ Completed mission could NOT be cleared from the FC — still loaded")
-        addNotification(
-            Notification(
-                message = "⚠️ Could not clear the mission from the drone — it is still loaded. Avoid switching to AUTO.",
-                type = NotificationType.WARNING
+    private val _missionLoadedOnFc = MutableStateFlow(false)
+    val missionLoadedOnFc: StateFlow<Boolean> = _missionLoadedOnFc.asStateFlow()
+
+    /** Progress/result of an operator-initiated Clear Mission, for the home screen dialog. */
+    enum class ClearMissionState { IDLE, CLEARING, SUCCESS, FAILED }
+
+    private val _clearMissionState = MutableStateFlow(ClearMissionState.IDLE)
+    val clearMissionState: StateFlow<ClearMissionState> = _clearMissionState.asStateFlow()
+
+    fun acknowledgeClearMissionResult() {
+        _clearMissionState.value = ClearMissionState.IDLE
+    }
+
+    /**
+     * Wipe the mission off the flight controller, at the operator's explicit request.
+     *
+     * The only path that clears the FC's mission now. Two hard preconditions, both checked
+     * here rather than trusted to the UI:
+     *
+     *  - CONNECTED, or there is nothing to talk to and a "cleared" result would be a lie.
+     *  - DISARMED. Pulling the mission out from under a vehicle that is flying it is how you
+     *    strand a drone mid-air, and no confirmation dialog makes that acceptable.
+     *
+     * The geofence is preserved: it is a safety limit tied to the SITE, not to the mission,
+     * and the pilot is very likely to fly again from the same spot.
+     */
+    fun clearMissionFromFcConfirmed() {
+        if (_clearMissionState.value == ClearMissionState.CLEARING) return
+
+        if (_telemetryState.value.armed) {
+            LogUtils.w("MissionClear", "Refusing to clear the mission: the drone is ARMED")
+            _clearMissionState.value = ClearMissionState.FAILED
+            addNotification(
+                Notification(
+                    message = "⛔ Cannot clear the mission while the drone is armed",
+                    type = NotificationType.ERROR
+                )
             )
-        )
+            return
+        }
+
+        if (!_telemetryState.value.connected) {
+            LogUtils.w("MissionClear", "Refusing to clear the mission: not connected")
+            _clearMissionState.value = ClearMissionState.FAILED
+            addNotification(
+                Notification(
+                    message = "⛔ Not connected to the drone — nothing was cleared",
+                    type = NotificationType.ERROR
+                )
+            )
+            return
+        }
+
+        _clearMissionState.value = ClearMissionState.CLEARING
+        viewModelScope.launch {
+            try {
+                val cleared = repo?.clearMissionFromFC() ?: false
+                if (cleared) {
+                    LogUtils.i("MissionClear", "🧹 Mission cleared from the FC at the operator's request")
+                    _missionLoadedOnFc.value = false
+                    _clearMissionState.value = ClearMissionState.SUCCESS
+
+                    // Map lines only — the geofence stays, see above.
+                    clearMapLinesOnly()
+
+                    // A cleared mission has no resume target left, so drop the pause state
+                    // with it rather than leaving a resume point pointing at nothing.
+                    _resumePointLocation.value = null
+                    _resumePointWaypoint.value = null
+                    _resumeMissionReady.value = false
+                    _resumePreparationFailed.value = false
+                    _pendingResumeLocation = null
+                    _missionPauseLocation = null
+                    _sprayWasActiveBeforePause = false
+                    _missionUploaded.value = false
+                    lastUploadedCount = 0
+                    lastUploadedMissionItems = emptyList()
+                    _telemetryState.update {
+                        it.copy(missionPaused = false, pausedAtWaypoint = null)
+                    }
+
+                    addNotification(
+                        Notification(
+                            message = "✅ Mission cleared from the drone",
+                            type = NotificationType.SUCCESS
+                        )
+                    )
+                    ttsManager?.speak("Mission cleared")
+                } else {
+                    // Not fatal, but it must not read as success: the mission is still there
+                    // and a switch to AUTO will still fly it.
+                    LogUtils.e("MissionClear", "✗ Clear Mission was not acknowledged — the mission is STILL on the FC")
+                    _clearMissionState.value = ClearMissionState.FAILED
+                    addNotification(
+                        Notification(
+                            message = "⚠️ The drone did not confirm the clear — the mission is still loaded",
+                            type = NotificationType.WARNING
+                        )
+                    )
+                }
+            } catch (e: Exception) {
+                LogUtils.e("MissionClear", "❌ Error clearing the mission from the FC", e)
+                _clearMissionState.value = ClearMissionState.FAILED
+                addNotification(
+                    Notification(
+                        message = "⚠️ Could not clear the mission: ${e.message}",
+                        type = NotificationType.WARNING
+                    )
+                )
+            }
+        }
     }
 
     // --- Calibration helpers ---
@@ -2603,8 +3446,41 @@ class SharedViewModel : ViewModel() {
             LogUtils.w("SprayControl", "⚠ SPRAY_ENABLE=0 on the vehicle — the Sprayer library is off, so rate changes will have no effect")
         }
 
+        // ── Manual-pump params (new firmware) ────────────────────────────────
+        // This probe doubles as the confirmation that the param NAMES are right: the firmware
+        // source is not in this repo, so a successful read here is the first hard evidence that
+        // PARAM_SPRAY_PUMP_MODE / PARAM_SPRAY_PUMP_PCT match what AC_Sprayer actually defines.
+        // A timeout means either old firmware or a name mismatch — indistinguishable over
+        // MAVLink, which is why the message names both possibilities.
+        val mode = readParameter(PARAM_SPRAY_PUMP_MODE)
+        val pct = readParameter(PARAM_SPRAY_PUMP_PCT)
+
+        if (mode == null && pct == null) {
+            _sprayManualParamsSupported.value = false
+            LogUtils.w("SprayControl",
+                "⚠ Neither $PARAM_SPRAY_PUMP_MODE nor $PARAM_SPRAY_PUMP_PCT could be read — " +
+                "either this firmware predates manual pump mode, or the param names in " +
+                "SharedViewModel do not match the firmware. Manual mode disabled in the UI.")
+        } else {
+            _sprayManualParamsSupported.value = true
+            if (mode != null) {
+                _sprayManualMode.value = mode >= 0.5f
+                LogUtils.i("SprayControl", "🚿 Seeded pump mode from vehicle: $PARAM_SPRAY_PUMP_MODE=$mode → ${if (_sprayManualMode.value) "MANUAL" else "AUTO"}")
+            } else {
+                LogUtils.w("SprayControl", "⚠ Could not read $PARAM_SPRAY_PUMP_MODE (but $PARAM_SPRAY_PUMP_PCT answered) — keeping ${if (_sprayManualMode.value) "MANUAL" else "AUTO"}")
+            }
+            if (pct != null) {
+                _sprayManualPct.value = pct.coerceIn(SPRAY_PUMP_PCT_MIN, SPRAY_PUMP_PCT_MAX)
+                LogUtils.i("SprayControl", "🚿 Seeded manual duty from vehicle: $PARAM_SPRAY_PUMP_PCT=$pct → ${_sprayManualPct.value.toInt()}%")
+            } else {
+                LogUtils.w("SprayControl", "⚠ Could not read $PARAM_SPRAY_PUMP_PCT — manual slider keeps ${_sprayManualPct.value.toInt()}%")
+            }
+        }
+
         LogUtils.d("SprayControl",
-            "Spray config seeded: rate=${_sprayRate.value}, pumpMin=${_sprayPumpMin.value}, enabled=${_sprayEnableParam.value}")
+            "Spray config seeded: rate=${_sprayRate.value}, pumpMin=${_sprayPumpMin.value}, " +
+            "enabled=${_sprayEnableParam.value}, manualMode=${_sprayManualMode.value}, " +
+            "manualPct=${_sprayManualPct.value}, manualSupported=${_sprayManualParamsSupported.value}")
     }
 
     fun connect() {
@@ -3662,6 +4538,32 @@ class SharedViewModel : ViewModel() {
     private val _sprayEnableParam = MutableStateFlow<Boolean?>(null)
     val sprayEnableParam: StateFlow<Boolean?> = _sprayEnableParam.asStateFlow()
 
+    // ── Pump mode: AUTO (speed-scaled) vs MANUAL (direct duty cycle) ───────────
+    //
+    // NOTE: this is NOT the `autoSpray` flag in PlanScreen. That one decides whether a planned
+    // grid mission gets DO_SPRAYER items embedded at survey-line boundaries (see
+    // GridMissionConverter.convertToMissionItems). This one decides how the FC computes pump
+    // output once the pump is on. They are independent and must not be merged.
+    //
+    // AUTO  = the historical behaviour: SPRAY_PUMP_RATE is % pump per 1 m/s, so output scales
+    //         with groundspeed (constant L/ha).
+    // MANUAL = new firmware path: SPRAY_PUMP_PCT is a direct 0-100 duty cycle, independent of
+    //         speed. Fly slower and the same ground gets more chemical — that is the point, for
+    //         spot work and ground testing.
+    private val _sprayManualMode = MutableStateFlow(false)
+    val sprayManualMode: StateFlow<Boolean> = _sprayManualMode.asStateFlow()
+
+    // The Manual-mode duty cycle, kept separate from _sprayRate so switching modes back and forth
+    // does not destroy the other mode's setting. Seeded from the vehicle on connect.
+    private val _sprayManualPct = MutableStateFlow(50f)
+    val sprayManualPct: StateFlow<Float> = _sprayManualPct.asStateFlow()
+
+    // Null until the connect-time probe runs; false means the FC rejected the reads, i.e. it is
+    // running firmware without the manual-pump params. The UI uses this to disable the toggle
+    // rather than let the pilot select a mode the vehicle cannot honour.
+    private val _sprayManualParamsSupported = MutableStateFlow<Boolean?>(null)
+    val sprayManualParamsSupported: StateFlow<Boolean?> = _sprayManualParamsSupported.asStateFlow()
+
     // Track spray state before pause for automatic restore on resume
     private var _sprayWasActiveBeforePause = false
 
@@ -3811,6 +4713,17 @@ class SharedViewModel : ViewModel() {
     val resumeMissionReady: StateFlow<Boolean> = _resumeMissionReady.asStateFlow()
 
     /**
+     * True once an attempt to put the resume mission on the FC has failed.
+     *
+     * Separate from `!resumeMissionReady`, which is also the state before anything has been
+     * attempted. This one means "we tried and the drone still holds the original mission",
+     * which is the case a pilot must not walk into by flicking the mode switch. See
+     * [reportResumePreparationFailed].
+     */
+    private val _resumePreparationFailed = MutableStateFlow(false)
+    val resumePreparationFailed: StateFlow<Boolean> = _resumePreparationFailed.asStateFlow()
+
+    /**
      * Called when mode changes from AUTO to LOITER or BRAKE (detected in TelemetryRepository)
      * This shows a popup asking user if they want to set resume point here
      * NOTE: Only works when user selected Automatic mode, not Manual mode
@@ -3912,9 +4825,21 @@ class SharedViewModel : ViewModel() {
         // Clear pending location
         _pendingResumeLocation = null
         _resumePointWaypoint.value = null
+        _resumePreparationFailed.value = false
+        _resumeMissionReady.value = false
 
         // Hide the popup
         _showAddResumeHerePopup.value = false
+
+        // Declining is a legitimate choice, but the consequence is not obvious: the FC still
+        // holds the untouched mission, so a later switch to AUTO carries on from the FC's own
+        // index rather than from here. Say so once, quietly.
+        addNotification(
+            Notification(
+                message = "No resume point set — AUTO will continue the original mission, not from this position",
+                type = NotificationType.INFO
+            )
+        )
 
         // Reset mission paused state since user declined to set resume point
         // This allows the mission to be cleared when navigating back and clicking Manual
@@ -3931,6 +4856,27 @@ class SharedViewModel : ViewModel() {
     /**
      * Process the resume point - retrieves and uploads modified mission
      * This runs in the background after user confirms
+     *
+     * ═══ WHY EVERY FAILURE HERE IS ANNOUNCED ═══
+     *
+     * This used to log-and-return on each failure path with nothing shown to the pilot, and
+     * that silence is what produced the "drone resumes from the start or the end of the line"
+     * report. The chain is:
+     *
+     *   1. Any step fails - most often [getAllWaypoints], a full mission download that has to
+     *      complete inside 10s with a 2s budget per item, on the same link the video is on.
+     *   2. [_resumeMissionReady] stays false and the FC keeps the ORIGINAL mission.
+     *   3. Nothing tells the pilot. The "R" marker is already on the map, so as far as they
+     *      can see the resume point took.
+     *   4. They flick the transmitter to AUTO. [onModeChangedToAuto] sees no resume mission
+     *      and does nothing, so ArduPilot simply carries on with its own stored mission -
+     *      flying to whatever index it was on (the END of the line it was half way along) or,
+     *      if MIS_RESTART is set, starting the whole grid again from the FIRST waypoint.
+     *
+     * So the drone is not resuming from the wrong place. It is not resuming at all, and the
+     * FC's own behaviour is what the pilot is seeing. The fix is to make that state
+     * impossible to miss: retry the flaky step, and on final failure say plainly that the
+     * resume point did NOT take and the mission on the drone is unchanged.
      */
     private fun processResumePoint(waypointNumber: Int) {
         viewModelScope.launch {
@@ -3943,18 +4889,30 @@ class SharedViewModel : ViewModel() {
             LogUtils.i("SharedVM", "Resume location: ${resumeLocation?.latitude}, ${resumeLocation?.longitude}")
             LogUtils.i("SharedVM", "═══════════════════════════════════════")
 
+            _resumePreparationFailed.value = false
+
             try {
                 // Step 1: Check connection
                 if (!_telemetryState.value.connected) {
-                    LogUtils.e("SharedVM", "Not connected to FC - skipping auto resume processing")
+                    reportResumePreparationFailed("not connected to the flight controller")
                     return@launch
                 }
 
                 // Step 2: Get current mission from FC (silent - no progress updates)
+                //
+                // Retried: this is by far the most fragile step (a full mission download over
+                // a link that is also carrying video and telemetry) and it is the one whose
+                // failure used to be invisible.
                 LogUtils.i("SharedVM", "Retrieving mission from FC (background)...")
-                val allWaypoints = repo?.getAllWaypoints()
-                if (allWaypoints == null || allWaypoints.isEmpty()) {
-                    LogUtils.e("SharedVM", "Failed to retrieve mission from FC")
+                var downloaded = repo?.getAllWaypoints()
+                if (downloaded.isNullOrEmpty()) {
+                    LogUtils.w("SharedVM", "Mission download returned nothing — retrying once")
+                    delay(1000)
+                    downloaded = repo?.getAllWaypoints()
+                }
+                val allWaypoints = downloaded
+                if (allWaypoints.isNullOrEmpty()) {
+                    reportResumePreparationFailed("could not read the mission back from the drone")
                     return@launch
                 }
 
@@ -3970,7 +4928,7 @@ class SharedViewModel : ViewModel() {
                     restoreSpray = _sprayWasActiveBeforePause
                 )
                 if (filtered == null || filtered.isEmpty()) {
-                    LogUtils.e("SharedVM", "Filtering resulted in empty mission")
+                    reportResumePreparationFailed("no waypoints left after the resume point")
                     return@launch
                 }
 
@@ -3980,7 +4938,7 @@ class SharedViewModel : ViewModel() {
                 LogUtils.i("SharedVM", "Resequencing waypoints (background)...")
                 val resequenced = repo?.resequenceWaypoints(filtered)
                 if (resequenced == null || resequenced.isEmpty()) {
-                    LogUtils.e("SharedVM", "Resequencing failed")
+                    reportResumePreparationFailed("could not renumber the resumed mission")
                     return@launch
                 }
 
@@ -3990,7 +4948,8 @@ class SharedViewModel : ViewModel() {
                 val sequences = resequenced.map { it.seq.toInt() }
                 val expectedSequences = (0 until resequenced.size).toList()
                 if (sequences != expectedSequences) {
-                    LogUtils.e("SharedVM", "❌ Invalid sequence numbers!")
+                    LogUtils.e("SharedVM", "❌ Invalid sequence numbers: $sequences")
+                    reportResumePreparationFailed("the resumed mission was numbered wrongly")
                     return@launch
                 }
                 LogUtils.i("SharedVM", "✅ Sequence validation passed")
@@ -3999,7 +4958,7 @@ class SharedViewModel : ViewModel() {
                 LogUtils.i("SharedVM", "Uploading modified mission to FC (background)...")
                 val uploadSuccess = repo?.uploadMissionWithAck(resequenced) ?: false
                 if (!uploadSuccess) {
-                    LogUtils.e("SharedVM", "❌ Mission upload failed")
+                    reportResumePreparationFailed("the drone rejected the resumed mission")
                     return@launch
                 }
 
@@ -4007,17 +4966,25 @@ class SharedViewModel : ViewModel() {
 
                 delay(500)
 
-                // Step 7: Set current waypoint to 1
-                val setWpResult = repo?.setCurrentWaypoint(1) ?: false
+                // Step 7: point the FC at the inserted transit waypoint.
+                //
+                // Not fatal if it fails: onModeChangedToAuto re-asserts the index through
+                // resumeMission() and refuses to engage AUTO unless it is confirmed, so a
+                // drop here is recoverable. Worth a warning, though — it usually means the
+                // link is congested and the resume is about to be slow.
+                val setWpResult = repo?.setCurrentWaypoint(RESUME_TRANSIT_WAYPOINT_SEQ) ?: false
                 if (setWpResult) {
-                    LogUtils.i("SharedVM", "✅ Current waypoint set to 1")
+                    LogUtils.i("SharedVM", "✅ Current waypoint set to $RESUME_TRANSIT_WAYPOINT_SEQ")
                 } else {
-                    LogUtils.w("SharedVM", "⚠️ Failed to set current waypoint, continuing anyway")
+                    LogUtils.w("SharedVM", "⚠️ FC did not confirm the mission index; will be re-asserted when AUTO is engaged")
                 }
 
                 // Mark that resume mission is ready
                 _resumeMissionReady.value = true
+                _resumePreparationFailed.value = false
                 _missionUploaded.value = true
+                // Anything on the FC is something Clear Mission may need to remove.
+                _missionLoadedOnFc.value = true
                 lastUploadedCount = resequenced.size
                 lastUploadedMissionItems = resequenced.toList()
 
@@ -4025,10 +4992,47 @@ class SharedViewModel : ViewModel() {
                 LogUtils.i("SharedVM", "✅ Resume mission ready (background processing complete)")
                 LogUtils.i("SharedVM", "═══════════════════════════════════════")
 
+                // Confirm it, for the same reason the failures are announced: the pilot has
+                // to be able to tell the two states apart before they touch the mode switch.
+                addNotification(
+                    Notification(
+                        message = "✅ Resume point set — switch to AUTO to fly back to it and carry on",
+                        type = NotificationType.SUCCESS
+                    )
+                )
+                ttsManager?.speak("Resume point ready")
+
             } catch (e: Exception) {
                 LogUtils.e("SharedVM", "Failed to auto-process resume point", e)
+                reportResumePreparationFailed(e.message ?: "unexpected error")
             }
         }
+    }
+
+    /**
+     * The resume mission could NOT be put on the flight controller.
+     *
+     * Loud on purpose. The dangerous state is not the failure itself - it is a pilot who
+     * believes the resume point took, flicks to AUTO, and gets the flight controller's own
+     * idea of where the mission is. Popup, notification and voice all fire, the "R" marker is
+     * pulled back off the map, and the mission stays marked paused so it can be retried.
+     */
+    private fun reportResumePreparationFailed(reason: String) {
+        LogUtils.e("SharedVM", "❌ Resume point NOT set: $reason")
+
+        _resumeMissionReady.value = false
+        _resumePreparationFailed.value = true
+        // The marker is a promise the FC cannot keep, so take it back down.
+        _resumePointLocation.value = null
+
+        addNotification(
+            Notification(
+                message = "⛔ Resume point NOT set — $reason. The drone still holds the ORIGINAL mission: " +
+                    "do not switch to AUTO, it will not carry on from here.",
+                type = NotificationType.ERROR
+            )
+        )
+        ttsManager?.speak("Resume point failed. Do not switch to auto.")
     }
 
     /**
@@ -4155,8 +5159,8 @@ class SharedViewModel : ViewModel() {
 
                 // Step 7: Set Current Waypoint to start execution
                 onProgress("Setting current waypoint...")
-                LogUtils.i("SharedVM", "Setting current waypoint to 1 (start from first mission item after HOME)")
-                val setWaypointSuccess = repo?.setCurrentWaypoint(1) ?: false
+                LogUtils.i("SharedVM", "Setting current waypoint to the inserted transit waypoint (first mission item after HOME)")
+                val setWaypointSuccess = repo?.setCurrentWaypoint(RESUME_TRANSIT_WAYPOINT_SEQ) ?: false
 
                 if (!setWaypointSuccess) {
                     LogUtils.w("SharedVM", "Failed to set current waypoint, continuing anyway")
@@ -4229,6 +5233,8 @@ class SharedViewModel : ViewModel() {
 
                 // Mark mission as uploaded
                 _missionUploaded.value = true
+                // Anything on the FC is something Clear Mission may need to remove.
+                _missionLoadedOnFc.value = true
                 lastUploadedCount = resequenced.size
                 lastUploadedMissionItems = resequenced.toList()
                 LogUtils.i("SharedVM", "✅ Mission upload status updated: uploaded=$_missionUploaded, count=$lastUploadedCount")
@@ -4363,10 +5369,15 @@ class SharedViewModel : ViewModel() {
                 LogUtils.i("ManualResume", "✅ Manual resume mission uploaded to FC")
 
                 delay(500)
-                repo?.setCurrentWaypoint(1)
+                // Best-effort here; onModeChangedToAuto re-asserts and confirms the index
+                // before it will engage AUTO.
+                repo?.setCurrentWaypoint(RESUME_TRANSIT_WAYPOINT_SEQ)
 
                 _resumeMissionReady.value = true
+                _resumePreparationFailed.value = false
                 _missionUploaded.value = true
+                // Anything on the FC is something Clear Mission may need to remove.
+                _missionLoadedOnFc.value = true
                 lastUploadedCount = resequenced.size
                 lastUploadedMissionItems = resequenced.toList()
 
@@ -4407,12 +5418,18 @@ class SharedViewModel : ViewModel() {
                 // resume mission's DO_SPRAYER(1) turns it on again once it gets there.
                 ensureSprayerOffForTransit()
 
-                // Send mission start command
-                val startSuccess = repo?.startMission() ?: false
+                // resumeMission(), NOT startMission(): the latter sends MAV_CMD_MISSION_START
+                // with param1 = 0, which resets the FC's mission index to the first item and
+                // threw away the DO_SET_MISSION_CURRENT(1) that processResumePoint had just
+                // set — the drone then re-flew the first two or three waypoints of the
+                // resumed mission. The resumed mission always begins at the inserted transit
+                // waypoint, which resequenceWaypoints puts at index 1.
+                val startSuccess = repo?.resumeMission(RESUME_TRANSIT_WAYPOINT_SEQ) ?: false
 
                 if (startSuccess) {
                     LogUtils.i("SharedVM", "✅ Resume mission started successfully")
                     _resumeMissionReady.value = false
+                    _resumePreparationFailed.value = false
                     // Clear the resume point location (remove "R" marker from map)
                     _resumePointLocation.value = null
                     _resumePointWaypoint.value = null
@@ -4442,15 +5459,53 @@ class SharedViewModel : ViewModel() {
                     )
                     ttsManager?.announceMissionResumed()
                 } else {
-                    LogUtils.e("SharedVM", "Failed to start resume mission")
+                    // The pilot is ALREADY in AUTO at this point — that mode change is what
+                    // called us. So a failure here is not "nothing happened": the FC is flying
+                    // its stored mission from whatever index it holds, which is exactly the
+                    // wrong-waypoint case this fix exists to prevent. Say so plainly.
+                    //
+                    // _resumeMissionReady is deliberately left TRUE: the resumed mission is
+                    // still the one on the FC, so dropping back out of AUTO and back in will
+                    // retry the index. Clearing it would silently downgrade the next attempt
+                    // to the "no resume point loaded" branch below.
+                    LogUtils.e("SharedVM", "❌ Resume failed — FC did not confirm the resume index while already in AUTO")
                     addNotification(
                         Notification(
-                            message = "Failed to start resume mission",
+                            message = "⛔ Resume did not take — the drone is flying from the wrong point. " +
+                                "Switch out of AUTO now, then back to AUTO to retry.",
                             type = NotificationType.ERROR
                         )
                     )
+                    ttsManager?.speak("Resume failed. Switch out of auto.")
                 }
             }
+        } else if (_telemetryState.value.missionPaused) {
+            // ═══ AUTO WITH A PAUSED MISSION AND NOTHING PREPARED ═══
+            //
+            // This is the branch that produced "the drone resumes from the start or the end
+            // of the line". Nothing here commands anything, which reads as safe — but the
+            // vehicle is now in AUTO, and ArduPilot does not need us: it picks its own
+            // stored mission back up at whatever index it holds. That is the far end of the
+            // line it was half way along, or, with MIS_RESTART set, waypoint 1 of the whole
+            // grid. Either way it is not where the pilot paused, and until now they got no
+            // warning that the GCS had bowed out.
+            //
+            // We deliberately do NOT try to take the mode back. Wrestling a pilot for the
+            // flight mode is worse than letting them fly; what they need is to KNOW, now,
+            // that this is the FC's mission and not their resume.
+            LogUtils.e(
+                "SharedVM",
+                "⚠️ AUTO entered with a PAUSED mission but no resume mission prepared " +
+                    "(preparationFailed=${_resumePreparationFailed.value}) — the FC is flying its OWN stored mission"
+            )
+            addNotification(
+                Notification(
+                    message = "⚠️ No resume point is loaded. AUTO is flying the drone's original mission, " +
+                        "not continuing from where you paused.",
+                    type = NotificationType.ERROR
+                )
+            )
+            ttsManager?.speak("Warning. No resume point loaded. Flying the original mission.")
         }
     }
 
@@ -5168,8 +6223,8 @@ class SharedViewModel : ViewModel() {
 
                 // Step 7: Set Current Waypoint to start execution
                 onProgress("Step 7/8: Setting current waypoint...")
-                LogUtils.i("ResumeMission", "Setting current waypoint to 1 (start from first mission item after HOME)")
-                val setWaypointSuccess = repo?.setCurrentWaypoint(1) ?: false
+                LogUtils.i("ResumeMission", "Setting current waypoint to the inserted transit waypoint (first mission item after HOME)")
+                val setWaypointSuccess = repo?.setCurrentWaypoint(RESUME_TRANSIT_WAYPOINT_SEQ) ?: false
 
                 if (!setWaypointSuccess) {
                     LogUtils.w("ResumeMission", "Failed to set current waypoint, continuing anyway")
@@ -5242,6 +6297,8 @@ class SharedViewModel : ViewModel() {
 
                 // Mark mission as uploaded
                 _missionUploaded.value = true
+                // Anything on the FC is something Clear Mission may need to remove.
+                _missionLoadedOnFc.value = true
                 lastUploadedCount = resequenced.size
                 lastUploadedMissionItems = resequenced.toList()
                 LogUtils.i("ResumeMission", "✅ Mission upload status updated: uploaded=$_missionUploaded, count=$lastUploadedCount")
@@ -5445,6 +6502,29 @@ class SharedViewModel : ViewModel() {
     private val SPRAY_PUMP_RATE_MIN = 0f
     private val SPRAY_PUMP_RATE_MAX = 100f
 
+    // ── Firmware param IDs for the manual-pump feature ────────────────────────
+    //
+    // These live in exactly one place because they are UNVERIFIED against the firmware from this
+    // repo: the ArduPilot/AC_Sprayer source is not checked in here and there is no firmware
+    // submodule, so the names below could not be confirmed against the var_info[] table that
+    // actually defines them. If the firmware spells either differently, change it HERE and
+    // nowhere else.
+    //
+    // Both fit MAVLink's 16-character param-ID limit (15 and 14 chars), so they are transmissible
+    // as written. Note ArduPilot declares group members with a short suffix under a group prefix
+    // (e.g. "PUMP_PCT" inside the SPRAY_ group) — the full name is what goes on the wire, and the
+    // full name is what these constants must hold.
+    //
+    // A wrong name here fails SILENTLY in the worst way: setParameter() returns null, the resend
+    // also returns null, and the pilot sees a slider that does nothing. seedSprayConfigFromVehicle
+    // probes both on connect and sets _sprayManualParamsSupported so that failure is visible.
+    private val PARAM_SPRAY_PUMP_MODE = "SPRAY_PUMP_MODE"
+    private val PARAM_SPRAY_PUMP_PCT = "SPRAY_PUMP_PCT"
+
+    // Manual duty cycle range. Unlike the rate slider's 10-100, manual allows a true 0 = pump off.
+    private val SPRAY_PUMP_PCT_MIN = 0f
+    private val SPRAY_PUMP_PCT_MAX = 100f
+
     // Serializes rate writes so two overlapping applies can't reach the FC out of order.
     private val sprayRateWriteMutex = kotlinx.coroutines.sync.Mutex()
 
@@ -5463,10 +6543,21 @@ class SharedViewModel : ViewModel() {
      * show a confident 0.
      */
     val sprayEffectiveOutputPct: StateFlow<Float?> =
-        combine(_telemetryState, _sprayRate, _sprayPumpMin) { telemetry, rate, pumpMin ->
-            val speedMs = telemetry.groundspeed ?: return@combine null
-            val raw = speedMs * rate
-            raw.coerceAtLeast(pumpMin ?: 0f).coerceIn(0f, 100f)
+        combine(
+            _telemetryState, _sprayRate, _sprayPumpMin, _sprayManualMode, _sprayManualPct
+        ) { telemetry, rate, pumpMin, manual, manualPct ->
+            if (manual) {
+                // MANUAL: SPRAY_PUMP_PCT is the duty cycle directly — no groundspeed term, so
+                // this is known even sitting on the ground with no VFR_HUD. The pump floor still
+                // applies (AC_Sprayer clamps the same way in both modes), except at a commanded
+                // 0, which means "off" rather than "as slow as the floor allows".
+                if (manualPct <= 0f) 0f
+                else manualPct.coerceAtLeast(pumpMin ?: 0f).coerceIn(0f, 100f)
+            } else {
+                // AUTO: output scales with groundspeed, so it is unknowable until VFR_HUD arrives.
+                val speedMs = telemetry.groundspeed ?: return@combine null
+                (speedMs * rate).coerceAtLeast(pumpMin ?: 0f).coerceIn(0f, 100f)
+            }
         }.stateIn(viewModelScope, SharingStarted.Eagerly, null)
 
     /**
@@ -5483,20 +6574,39 @@ class SharedViewModel : ViewModel() {
 
         sprayRateWriteMutex.lock()
         try {
-            // Read the slider HERE, not at call time: a write that queued behind the mutex must
-            // push the rate the pilot ended up on, not the one current when it was queued.
-            val pumpRate = _sprayRate.value.coerceIn(SPRAY_PUMP_RATE_MIN, SPRAY_PUMP_RATE_MAX)
+            // Read the slider AND the mode HERE, not at call time: a write that queued behind the
+            // mutex must push the value the pilot ended up on, in the mode they ended up in — not
+            // whatever was current when it was queued.
+            val manual = _sprayManualMode.value
+            val paramName = if (manual) PARAM_SPRAY_PUMP_PCT else "SPRAY_PUMP_RATE"
+            val value = if (manual) {
+                _sprayManualPct.value.coerceIn(SPRAY_PUMP_PCT_MIN, SPRAY_PUMP_PCT_MAX)
+            } else {
+                _sprayRate.value.coerceIn(SPRAY_PUMP_RATE_MIN, SPRAY_PUMP_RATE_MAX)
+            }
 
             // PARAM_SET is fire-and-forget and the link can drop it, so an unconfirmed write
-            // gets one resend rather than silently leaving the FC on the old rate.
-            var rateAck = setParameter("SPRAY_PUMP_RATE", pumpRate)
-            if (rateAck == null) {
-                LogUtils.w("SprayControl", "⚠ SPRAY_PUMP_RATE=$pumpRate unconfirmed — resending")
-                rateAck = setParameter("SPRAY_PUMP_RATE", pumpRate)
+            // gets one resend rather than silently leaving the FC on the old value.
+            var ack = setParameter(paramName, value)
+            if (ack == null) {
+                LogUtils.w("SprayControl", "⚠ $paramName=$value unconfirmed — resending")
+                ack = setParameter(paramName, value)
             }
+
+            val units = if (manual) "% duty" else "% pump per 1 m/s"
             LogUtils.i("SprayControl",
-                "🚿 Spray rate ${pumpRate.toInt()}% → SPRAY_PUMP_RATE=$pumpRate " +
-                (if (rateAck != null) "(confirmed)" else "(no confirmation)"))
+                "🚿 ${if (manual) "MANUAL" else "AUTO"} ${value.toInt()} ($units) → $paramName=$value " +
+                (if (ack != null) "(confirmed)" else "(no confirmation)"))
+
+            // In manual mode an unconfirmed write is worth surfacing: the most likely cause is
+            // firmware that does not define SPRAY_PUMP_PCT at all, which otherwise looks exactly
+            // like a slider that quietly does nothing.
+            if (manual && ack == null) {
+                _sprayManualParamsSupported.value = false
+                LogUtils.e("SprayControl",
+                    "✗ $paramName not acknowledged twice — does this firmware define it? " +
+                    "Manual pump mode will not work until the param name matches the firmware.")
+            }
         } catch (e: Exception) {
             LogUtils.e("SprayControl", "✗ Failed to set spray rate: ${e.message}", e)
         } finally {
@@ -5671,11 +6781,78 @@ class SharedViewModel : ViewModel() {
     fun setSprayRate(rate: Float) {
         val newRate = rate.coerceIn(10f, 100f)
         _sprayRate.value = newRate
+        scheduleSprayValueWrite("Rate set to ${newRate.toInt()}%")
+    }
 
+    /**
+     * Switch the FC between AUTO (speed-scaled SPRAY_PUMP_RATE) and MANUAL (direct
+     * SPRAY_PUMP_PCT duty cycle).
+     *
+     * Writes [PARAM_SPRAY_PUMP_MODE] first, then immediately pushes the newly-active mode's
+     * value. Without that second push the FC would sit in the new mode holding whatever the
+     * other mode last wrote — e.g. switching to Manual would leave SPRAY_PUMP_PCT at a stale
+     * value while the UI showed the pilot's current one.
+     *
+     * The mode write is NOT debounced: it is a deliberate discrete action, not a drag.
+     */
+    fun setSprayManualMode(manual: Boolean) {
+        if (_sprayManualMode.value == manual) return
+        _sprayManualMode.value = manual
+
+        if (repo == null) {
+            LogUtils.d("SprayControl", "Pump mode set to ${if (manual) "MANUAL" else "AUTO"} (not connected; will apply when connected)")
+            return
+        }
+
+        viewModelScope.launch {
+            val modeValue = if (manual) 1f else 0f
+            var ack = setParameter(PARAM_SPRAY_PUMP_MODE, modeValue)
+            if (ack == null) {
+                LogUtils.w("SprayControl", "⚠ $PARAM_SPRAY_PUMP_MODE=$modeValue unconfirmed — resending")
+                ack = setParameter(PARAM_SPRAY_PUMP_MODE, modeValue)
+            }
+
+            if (ack == null) {
+                // Most likely this firmware has no manual-pump support at all. Say so loudly and
+                // mark it unsupported so the UI can stop offering a mode the vehicle ignores.
+                _sprayManualParamsSupported.value = false
+                LogUtils.e("SprayControl",
+                    "✗ $PARAM_SPRAY_PUMP_MODE not acknowledged — firmware may not define it. " +
+                    "Pump mode on the FC is unchanged.")
+            } else {
+                _sprayManualParamsSupported.value = true
+                LogUtils.i("SprayControl",
+                    "🚿 Pump mode → ${if (manual) "MANUAL (SPRAY_PUMP_PCT duty)" else "AUTO (SPRAY_PUMP_RATE × speed)"} (confirmed)")
+            }
+
+            // Push the active mode's value regardless of the mode ack: if the mode write did land
+            // but its ack was dropped, the FC is in the new mode and still needs the right value.
+            applySprayRateToFc()
+        }
+    }
+
+    /**
+     * Manual-mode duty cycle, 0-100. Shares [sprayRateDebounceJob] with [setSprayRate] on purpose:
+     * only one of the two sliders is on screen at a time, so one debounce channel is correct and
+     * a mode switch mid-drag cannot leave two competing writes in flight.
+     */
+    fun setSprayManualPct(pct: Float) {
+        val newPct = pct.coerceIn(SPRAY_PUMP_PCT_MIN, SPRAY_PUMP_PCT_MAX)
+        _sprayManualPct.value = newPct
+        scheduleSprayValueWrite("Manual pump set to ${newPct.toInt()}%")
+    }
+
+    /**
+     * Debounced push of whichever value the current mode owns.
+     *
+     * [applySprayRateToFc] re-reads both the mode and the value under its mutex, so this only has
+     * to decide WHEN to write, never WHAT.
+     */
+    private fun scheduleSprayValueWrite(disconnectedLog: String) {
         // Debounce the actual command send to avoid flooding FC when slider moves rapidly.
-        // Always push SPRAY_PUMP_RATE to the FC (regardless of RC7 / flight mode): the parameter
-        // takes effect immediately for the ongoing mission's DO_SPRAYER, so this is what makes
-        // changing the slider mid-mission actually change the spray. We do NOT toggle DO_SPRAYER
+        // Always push to the FC (regardless of RC7 / flight mode): the parameter takes effect
+        // immediately for the ongoing mission's DO_SPRAYER, so this is what makes changing the
+        // slider mid-mission actually change the spray. We do NOT toggle DO_SPRAYER
         // here — enabling/disabling the pump stays with controlSpray()/RC7/the mission.
         // Only the debounce DELAY is cancellable. Once a write has started it finishes in its
         // own job: cancelling a param write that is already in flight is what let a rate change
@@ -5688,7 +6865,7 @@ class SharedViewModel : ViewModel() {
             if (repo != null) {
                 viewModelScope.launch { applySprayRateToFc() }
             } else {
-                LogUtils.d("SprayControl", "Rate set to ${newRate.toInt()}% (not connected; will apply when connected)")
+                LogUtils.d("SprayControl", "$disconnectedLog (not connected; will apply when connected)")
             }
         }
     }
@@ -6200,6 +7377,12 @@ class SharedViewModel : ViewModel() {
         // Default fence radius - Distance between waypoints and geofence boundary
         private const val DEFAULT_FENCE_RADIUS_METERS = 17.0f
 
+        // Mission index the inserted "fly back to where you paused" waypoint always lands on.
+        // filterWaypointsForResume emits HOME first and the transit waypoint second, and
+        // resequenceWaypoints renumbers from 0 — so the transit waypoint is index 1. Every
+        // resume path must point the FC here, or it rejoins the mission at the wrong place.
+        private const val RESUME_TRANSIT_WAYPOINT_SEQ = 1
+
         // ARMING_CHECK safety check (MVP — hardcoded target account list).
         // ARMING_CHECK=0 lets the FC arm despite failing PreArm checks; a
         // fielded drone crashed because of this. Correct value is 4390.
@@ -6396,18 +7579,29 @@ class SharedViewModel : ViewModel() {
                     LogUtils.d("OptionsSync", "Parameter link clear of fence upload — proceeding")
                 }
 
-                // ═══ Altitude ceiling (FENCE_ALT_MAX) ═══
-                // Hybrid, like the radar thresholds: if the pilot has explicitly set a
-                // ceiling we push it to the FC so both layers agree; if they haven't, we
-                // seed the local setting from whatever the FC already has instead of
-                // overwriting a value someone configured in Mission Planner.
-                syncAltitudeCeilingOnConnect(prefs)
+                // ═══ Altitude ceiling (FENCE_ALT_MAX): THE FC IS THE SOURCE OF TRUTH ═══
+                // Read, never written here — whatever FENCE_ALT_MAX says is the ceiling the
+                // GCS enforces. Same principle as the voltage thresholds below: connecting
+                // to a vehicle must not change what that vehicle is configured to do. The
+                // pilot's Options value reaches the FC only when they press Update.
+                adoptAltitudeCeilingFromFc(prefs)
+
+                // ═══ RTL_ALT, kept under the ceiling ═══
+                // Must run AFTER the ceiling sync: on a first connect that seeds the ceiling
+                // from the FC, the prefs value this reads is only correct once that has run.
+                syncRtlAltOnConnect(prefs)
 
                 // ═══ Fence parameters (FENCE_ACTION / MARGIN / RADIUS / TYPE) ═══
                 // Reads what the operator has actually configured, and arms the
                 // home-centred range cylinder. Runs here so it shares the same
                 // post-mutex, link-settled window as the ceiling sync.
                 syncFenceParametersOnConnect()
+
+                // ═══ Hand the altitude ceiling to the FC ═══
+                // Must run AFTER syncFenceParametersOnConnect (which caches FENCE_TYPE) and
+                // AFTER adoptAltitudeCeilingFromFc (which reads FENCE_ALT_MAX), so the fence
+                // goes live already pointing at the limit the vehicle is configured with.
+                armFcAltitudeFence()
 
                 // ═══ Voltage thresholds: THE FC IS THE SOURCE OF TRUTH ═══
                 // On connect the GCS only READS BATT_LOW_VOLT / BATT_CRT_VOLT and caches
@@ -6524,53 +7718,175 @@ class SharedViewModel : ViewModel() {
     }
 
     /**
-     * Keep the GCS altitude ceiling and the FC's FENCE_ALT_MAX in agreement on connect.
+     * Adopt the altitude ceiling FROM the flight controller's FENCE_ALT_MAX on connect.
      *
-     * The GCS is the primary enforcer (see [handleAltitudeFailsafe]) because the FC's
-     * altitude fence is inert unless FENCE_ENABLE is on, but FENCE_ALT_MAX is still worth
-     * keeping correct: the moment a geofence *is* enabled the FC becomes a second layer,
-     * and it must not be guarding some stale ceiling from a previous configuration.
+     * THE FC IS THE SOURCE OF TRUTH for the ceiling, exactly as it already is for
+     * BATT_LOW_VOLT / BATT_CRT_VOLT (see [readFailsafeVoltagesFromFc]). Whatever
+     * FENCE_ALT_MAX reads back is the ceiling the GCS enforces, displays, and derives
+     * RTL_ALT from.
      *
-     * NOTE: this deliberately does NOT touch FENCE_ENABLE. Forcing the fence on here would
-     * change fence/pre-arm behaviour for drones flying without a geofence. FENCE_TYPE is
-     * handled separately by [syncFenceParametersOnConnect], which only ORs bits in.
+     * This used to PUSH instead: if a "max_altitude" pref existed it was written down to the
+     * FC on every connect, and the FC was only read on a first-ever connect. That meant a
+     * ceiling set once on one drone followed the tablet onto the next drone and silently
+     * overwrote its configured limit. Reading instead means connecting to a vehicle never
+     * changes what that vehicle is configured to do.
+     *
+     * The pilot's Options value is still authoritative when they press Update — that path
+     * goes through [pushAltitudeCeilingToFc], which is the ONLY writer of FENCE_ALT_MAX.
+     *
+     * NOTE: deliberately does NOT touch FENCE_ENABLE or FENCE_TYPE; [armFcAltitudeFence]
+     * owns those.
      */
-    private suspend fun syncAltitudeCeilingOnConnect(prefs: android.content.SharedPreferences) {
+    private suspend fun adoptAltitudeCeilingFromFc(prefs: android.content.SharedPreferences) {
         try {
             if (!prefs.getBoolean("max_altitude_enabled", true)) {
-                LogUtils.i("OptionsSync", "Altitude ceiling failsafe disabled — skipping FENCE_ALT_MAX sync")
+                LogUtils.i("OptionsSync", "Altitude ceiling failsafe disabled — skipping FENCE_ALT_MAX read")
                 return
             }
 
-            if (prefs.contains("max_altitude")) {
-                val ceiling = prefs.getFloat("max_altitude", DEFAULT_MAX_ALTITUDE_M)
-                if (ceiling <= 0f) return
-                // Biased below the pilot's ceiling so ArduPilot's climb-arrest overshoot
-                // lands under it rather than over. See getFcAltitudeFenceMax().
-                val fcLimit = (ceiling - FC_ALT_FENCE_SAFETY_OFFSET_M).coerceAtLeast(1f)
-                if (setParameter("FENCE_ALT_MAX", fcLimit) != null) {
-                    LogUtils.i("OptionsSync", "✓ FENCE_ALT_MAX = $fcLimit m (ceiling ${ceiling}m less ${FC_ALT_FENCE_SAFETY_OFFSET_M}m overshoot allowance)")
-                } else {
-                    LogUtils.e("OptionsSync", "✗ Failed to set FENCE_ALT_MAX")
-                }
+            val fcValue = readParameter("FENCE_ALT_MAX", timeoutMs = 4000L)
+            if (fcValue != null && fcValue > 0f) {
+                // FENCE_ALT_MAX carries the safety offset (see getFcAltitudeFenceMax), so add
+                // it back to recover the ceiling the pilot actually means. Without this the
+                // displayed/enforced ceiling would sit a metre low, and would creep down again
+                // on every reconnect.
+                val ceiling = fcValue + FC_ALT_FENCE_SAFETY_OFFSET_M
+                prefs.edit().putFloat("max_altitude", ceiling).apply()
+                LogUtils.i("OptionsSync", "✓ Altitude ceiling adopted from FC: FENCE_ALT_MAX = ${fcValue}m → ceiling ${ceiling}m")
             } else {
-                // No explicit pilot setting yet — adopt the FC's value so the GCS ceiling
-                // matches what the vehicle was already configured with.
-                val fcValue = readParameter("FENCE_ALT_MAX", timeoutMs = 4000L)
-                if (fcValue != null && fcValue > 0f) {
-                    // FENCE_ALT_MAX carries the safety offset (see getFcAltitudeFenceMax), so
-                    // add it back to recover the ceiling the pilot actually means. Without
-                    // this the displayed/enforced ceiling would sit a metre low, and would
-                    // creep down again on every reconnect that re-seeds from the FC.
-                    val ceiling = fcValue + FC_ALT_FENCE_SAFETY_OFFSET_M
-                    prefs.edit().putFloat("max_altitude", ceiling).apply()
-                    LogUtils.i("OptionsSync", "✓ Seeded altitude ceiling from FC: FENCE_ALT_MAX = ${fcValue}m → ceiling ${ceiling}m")
-                } else {
-                    LogUtils.w("OptionsSync", "Could not read FENCE_ALT_MAX — using default ${DEFAULT_MAX_ALTITUDE_M}m")
-                }
+                // Leave whatever is cached rather than inventing a ceiling: a stale pref from
+                // this same airframe is a better guess than a default, and the GCS layers need
+                // *some* limit to enforce. Said out loud — the pilot cannot see this otherwise.
+                val fallback = prefs.getFloat("max_altitude", DEFAULT_MAX_ALTITUDE_M)
+                LogUtils.e("OptionsSync", "✗ Could not read FENCE_ALT_MAX — enforcing the cached ceiling ${fallback}m instead")
+                addNotification(
+                    Notification(
+                        message = "⚠️ Could not read the altitude ceiling (FENCE_ALT_MAX) from the drone — using ${String.format(Locale.US, "%.0f", fallback)} m",
+                        type = NotificationType.WARNING
+                    )
+                )
             }
         } catch (e: Exception) {
-            LogUtils.e("OptionsSync", "Error syncing altitude ceiling", e)
+            LogUtils.e("OptionsSync", "Error adopting the altitude ceiling from the FC", e)
+        }
+    }
+
+    /**
+     * Write the pilot's altitude ceiling DOWN to the FC's FENCE_ALT_MAX.
+     *
+     * The only writer of FENCE_ALT_MAX, reached from Options → Update via
+     * [applyAltitudeCeilingToFc]. Connect-time sync reads instead — see
+     * [adoptAltitudeCeilingFromFc] for why.
+     */
+    private suspend fun pushAltitudeCeilingToFc(prefs: android.content.SharedPreferences) {
+        try {
+            if (!prefs.getBoolean("max_altitude_enabled", true)) {
+                LogUtils.i("OptionsSync", "Altitude ceiling failsafe disabled — not writing FENCE_ALT_MAX")
+                return
+            }
+
+            val ceiling = prefs.getFloat("max_altitude", DEFAULT_MAX_ALTITUDE_M)
+            if (ceiling <= 0f) return
+            // Biased below the pilot's ceiling so ArduPilot's climb-arrest overshoot lands
+            // under it rather than over. See getFcAltitudeFenceMax().
+            val fcLimit = (ceiling - FC_ALT_FENCE_SAFETY_OFFSET_M).coerceAtLeast(1f)
+            if (setParameter("FENCE_ALT_MAX", fcLimit) != null) {
+                LogUtils.i("OptionsSync", "✓ FENCE_ALT_MAX = $fcLimit m (ceiling ${ceiling}m less ${FC_ALT_FENCE_SAFETY_OFFSET_M}m overshoot allowance)")
+            } else {
+                LogUtils.e("OptionsSync", "✗ Failed to set FENCE_ALT_MAX")
+                addNotification(
+                    Notification(
+                        message = "⚠️ Could not write the altitude ceiling to the drone",
+                        type = NotificationType.WARNING
+                    )
+                )
+            }
+        } catch (e: Exception) {
+            LogUtils.e("OptionsSync", "Error pushing the altitude ceiling to the FC", e)
+        }
+    }
+
+    /**
+     * Keep the FC's RTL_ALT below the altitude ceiling.
+     *
+     * ArduCopter's RTL begins with a climb stage: below RTL_ALT it climbs UP to RTL_ALT
+     * before returning home. With the stock RTL_ALT (1500 cm) on a vehicle whose ceiling is
+     * lower, an RTL triggered AT the ceiling — including the one our own altitude failsafe
+     * commands — drives the drone straight through it. That is the overshoot this sync
+     * exists to remove; [handleAltitudeFailsafe] brakes first as the in-flight backstop for
+     * vehicles this write could not reach.
+     *
+     * Units: RTL_ALT is CENTIMETRES. RTL_ALT=0 means "return at the current altitude", which
+     * is why the written value is floored rather than allowed to reach zero.
+     *
+     * Only ever lowered, never raised: an operator who deliberately set a conservative
+     * RTL_ALT keeps it, on the same read-modify-write principle as FENCE_RADIUS.
+     */
+    private suspend fun syncRtlAltOnConnect(prefs: android.content.SharedPreferences) {
+        try {
+            if (!prefs.getBoolean("max_altitude_enabled", true)) {
+                LogUtils.i("OptionsSync", "Altitude ceiling failsafe disabled — skipping RTL_ALT sync")
+                return
+            }
+
+            val ceiling = prefs.getFloat("max_altitude", DEFAULT_MAX_ALTITUDE_M)
+            if (ceiling <= 0f) return
+
+            // The ceiling is AGL, and so is RTL_ALT — both measured from home.
+            val desiredM = (ceiling - RTL_ALT_BELOW_CEILING_M).coerceAtLeast(RTL_ALT_MIN_M)
+
+            if (desiredM >= ceiling) {
+                // Only reachable with a ceiling at or under the floor, where no RTL altitude
+                // can be both legal and sane. Say so — RTL is not a safe breach action here.
+                LogUtils.e("OptionsSync", "✗ Ceiling ${ceiling}m is too low for a safe RTL_ALT (floor ${RTL_ALT_MIN_M}m) — RTL will breach it")
+                addNotification(
+                    Notification(
+                        message = "⚠️ Altitude ceiling ${String.format(Locale.US, "%.0f", ceiling)}m is too low for RTL. Set the breach action to Loiter or Land.",
+                        type = NotificationType.WARNING
+                    )
+                )
+                return
+            }
+
+            val currentCm = readParameter("RTL_ALT", timeoutMs = 4000L)
+            if (currentCm == null) {
+                LogUtils.w("OptionsSync", "Could not read RTL_ALT — cannot confirm RTL stays under the ${ceiling}m ceiling")
+                return
+            }
+
+            val currentM = currentCm / 100f
+            if (currentM <= desiredM) {
+                LogUtils.i("OptionsSync", "RTL_ALT = ${currentM}m already clears the ${ceiling}m ceiling — left as configured")
+                return
+            }
+
+            val desiredCm = desiredM * 100f
+            if (setParameter("RTL_ALT", desiredCm) != null) {
+                LogUtils.i("OptionsSync", "✓ RTL_ALT lowered ${currentM}m → ${desiredM}m (${RTL_ALT_BELOW_CEILING_M}m under the ${ceiling}m ceiling)")
+                // Said out loud, not just logged. An operator who set RTL_ALT deliberately in
+                // the parameter list and then finds the drone returning lower has every
+                // reason to conclude "the RTL altitude isn't being taken" — which is exactly
+                // the report this came from. It IS being overridden, on purpose, and the
+                // override is only visible if we say so.
+                addNotification(
+                    Notification(
+                        message = "RTL altitude lowered to ${String.format(Locale.US, "%.0f", desiredM)}m " +
+                            "so an RTL stays under the ${String.format(Locale.US, "%.0f", ceiling)}m ceiling " +
+                            "(was ${String.format(Locale.US, "%.0f", currentM)}m)",
+                        type = NotificationType.INFO
+                    )
+                )
+            } else {
+                LogUtils.e("OptionsSync", "✗ Failed to set RTL_ALT — RTL may climb through the ${ceiling}m ceiling")
+                addNotification(
+                    Notification(
+                        message = "⚠️ Could not lower RTL_ALT below the altitude ceiling — an RTL may exceed it",
+                        type = NotificationType.WARNING
+                    )
+                )
+            }
+        } catch (e: Exception) {
+            LogUtils.e("OptionsSync", "Error syncing RTL_ALT", e)
         }
     }
 
@@ -6601,6 +7917,11 @@ class SharedViewModel : ViewModel() {
                 LogUtils.w("FenceSync", "FENCE_ACTION=$action is not a recognised ArduPilot action")
             }
             LogUtils.i("FenceSync", "FENCE_ACTION = $action (${_fenceAction.value?.pilotLabel ?: "unknown"}) — operator-owned, not modified")
+
+            // The altitude limit's escalation reads FENCE_ACTION, so check here — while the
+            // value is fresh and the vehicle is still on the ground — that it matches what
+            // the pilot selected in Options.
+            warnIfLimitActionMismatch()
 
             _fenceMargin.value = repository.readFenceParameter("FENCE_MARGIN")
             LogUtils.i("FenceSync", "FENCE_MARGIN = ${_fenceMargin.value} m — operator-owned, not modified")
@@ -6667,6 +7988,243 @@ class SharedViewModel : ViewModel() {
             }
         } catch (e: Exception) {
             LogUtils.e("FenceSync", "Error syncing fence parameters", e)
+        }
+    }
+
+    /**
+     * Warn, on the ground, when "Action at Limit" and the vehicle's FENCE_ACTION disagree.
+     *
+     * FENCE_ACTION is what actually runs at the limit ([runAltitudeLimitAction]); the Options
+     * dropdown only decides WHETHER to escalate. So a pilot who selects RTL on a vehicle
+     * whose FENCE_ACTION is Brake gets a braked hold, not a return home — and connect time is
+     * the only cheap place to discover that. Finding out mid-flight, or in front of someone
+     * being shown the behaviour, is the failure this exists to prevent.
+     *
+     * Reports only; it never writes FENCE_ACTION. That parameter stays the operator's.
+     */
+    private fun warnIfLimitActionMismatch() {
+        val context = GCSApplication.getInstance() ?: return
+        if (!isAltitudeFailsafeEnabled(context)) return
+
+        val selected = getMaxAltitudeAction(context)
+        // Hover asks for no escalation at all, so nothing can disagree with it.
+        if (selected.equals("HOVER", ignoreCase = true)) return
+
+        val fenceAction = _fenceAction.value
+        if (fenceAction == null) {
+            // Nothing to compare against. The dropdown becomes the fallback, which IS the
+            // documented behaviour — say so rather than implying the two agree.
+            LogUtils.w("FenceSync", "'Action at Limit' is $selected but FENCE_ACTION could not be read — the dropdown will be used as the fallback")
+            return
+        }
+
+        val agrees = when (selected.uppercase(Locale.US)) {
+            "RTL" -> fenceAction == FenceAction.RTL ||
+                fenceAction == FenceAction.SMART_RTL ||
+                fenceAction == FenceAction.SMART_RTL_LAND
+            "LAND" -> fenceAction == FenceAction.ALWAYS_LAND
+            else -> true
+        }
+
+        if (agrees) {
+            LogUtils.i("FenceSync", "'Action at Limit' $selected agrees with FENCE_ACTION=${fenceAction.pilotLabel}")
+            return
+        }
+
+        LogUtils.w("FenceSync", "⚠️ 'Action at Limit' is $selected but the drone's FENCE_ACTION is ${fenceAction.pilotLabel} — the drone will ${fenceAction.pilotLabel} at the limit")
+        addNotification(
+            Notification(
+                message = "⚠️ Action at Limit is set to $selected, but this drone's FENCE_ACTION is " +
+                    "${fenceAction.pilotLabel}. At the altitude limit it will ${fenceAction.pilotLabel}, " +
+                    "not $selected. Change FENCE_ACTION on the drone to match.",
+                type = NotificationType.WARNING
+            )
+        )
+    }
+
+    /**
+     * Hand enforcement of the altitude ceiling to the flight controller.
+     *
+     * Until now the ceiling was enforced GCS-side only ([handleAltitudeWall] /
+     * [handleAltitudeFailsafe]) and FENCE_ALT_MAX was written as a "second layer" that was
+     * never actually armed: the GCS only ever set FENCE_ENABLE=1 inside the geofence-polygon
+     * upload, so on any flight without a polygon the FC ignored FENCE_ALT_MAX completely.
+     * That left a ~5Hz link as the sole thing holding the limit, which is how a 48 m ceiling
+     * produced a 52 m peak - the GCS could not see and react fast enough.
+     *
+     * The FC evaluates its fences at 400Hz with no link in the path, so it is the only layer
+     * that can actually hold the line. The GCS wall stays in front of it as the predictive
+     * layer (it stops the climb BEFORE the limit rather than recovering after), and the FC
+     * fence sits underneath, biased [FC_ALT_FENCE_SAFETY_OFFSET_M] lower still.
+     *
+     * Three things this is careful about:
+     *
+     *  1. THE POLYGON BIT. Enabling a fence whose FENCE_TYPE claims an inclusion polygon
+     *     while the FC holds no polygon can be refused by ArduPilot's fence pre-arm check.
+     *     So when FENCE_TOTAL says there is no polygon loaded, bit 2 is cleared. The geofence
+     *     upload ORs it straight back in (configureFenceParameters) when a real fence is sent.
+     *  2. THE ENABLE BOUNCE. AC_Fence rebuilds its live _enabled_fences mask only when
+     *     FENCE_ENABLE *changes value*. A FENCE_TYPE written to an already-enabled fence
+     *     updates the parameter - and everything the pilot can see - while the new bit is
+     *     never evaluated. So a type change on an enabled fence is followed by a 1-0-1 bounce.
+     *  3. ARMED VEHICLES. Never reconfigure a fence on an aircraft that is flying. If this
+     *     runs on a reconnect mid-flight it reports and leaves the fence exactly as it is.
+     *
+     * FENCE_ACTION and FENCE_MARGIN remain untouched, as everywhere else: what the FC does on
+     * the breach is still the operator's parameter, which is what DGCA requires.
+     */
+    private suspend fun armFcAltitudeFence() {
+        val repository = repo ?: return
+        try {
+            val context = GCSApplication.getInstance() ?: return
+
+            if (!isAltitudeFailsafeEnabled(context)) {
+                // Deliberately does NOT set FENCE_ENABLE=0. Switching a safety fence off is
+                // not something a GCS settings toggle should do behind the pilot's back; the
+                // toggle governs the GCS layers, and the FC keeps whatever it was configured
+                // with. Said out loud in the log so the behaviour is not a surprise.
+                LogUtils.i("FenceSync", "Altitude ceiling failsafe disabled - leaving FENCE_ENABLE/FENCE_TYPE as configured on the FC")
+                return
+            }
+
+            val fcLimit = getFcAltitudeFenceMax()
+            if (fcLimit == null) {
+                LogUtils.w("FenceSync", "No altitude ceiling configured - not arming the FC altitude fence")
+                return
+            }
+
+            if (_telemetryState.value.armed) {
+                LogUtils.w("FenceSync", "Vehicle is ARMED - not reconfiguring the fence in flight (FENCE_TYPE=${_fenceTypeBits.value})")
+                return
+            }
+
+            // FENCE_TYPE was just read by syncFenceParametersOnConnect; re-read only if that
+            // failed. Acting on a guess here would either disable a fence the operator wanted
+            // or enable one against a bitmask we invented.
+            val currentType = _fenceTypeBits.value
+                ?: repository.readFenceParameter("FENCE_TYPE")?.toInt()
+            if (currentType == null) {
+                LogUtils.e("FenceSync", "✗ Could not read FENCE_TYPE - altitude ceiling stays GCS-only")
+                addNotification(
+                    Notification(
+                        message = "⚠️ Could not read FENCE_TYPE - the drone is not enforcing the altitude ceiling itself",
+                        type = NotificationType.WARNING
+                    )
+                )
+                return
+            }
+
+            val currentEnable = repository.readFenceParameter("FENCE_ENABLE")?.toInt()
+            if (currentEnable == null) {
+                LogUtils.e("FenceSync", "✗ Could not read FENCE_ENABLE - altitude ceiling stays GCS-only")
+                addNotification(
+                    Notification(
+                        message = "⚠️ Could not read FENCE_ENABLE - the drone is not enforcing the altitude ceiling itself",
+                        type = NotificationType.WARNING
+                    )
+                )
+                return
+            }
+
+            // FENCE_TOTAL is the stored polygon vertex count - the same signal
+            // syncFenceParametersOnConnect uses to spot a stale polygon.
+            val fenceTotal = repository.readFenceParameter("FENCE_TOTAL")?.toInt() ?: 0
+            val polygonLoaded = fenceTotal > 0 || _geofenceEnabled.value
+
+            var desiredType = currentType or FENCE_TYPE_ALT_MAX
+            if (!polygonLoaded) {
+                desiredType = desiredType and FENCE_TYPE_POLYGON.inv()
+            }
+            // Same reasoning one bit over: an armed home cylinder with no radius behind it is
+            // a fence ArduPilot cannot evaluate, and a pre-arm refusal the pilot would have to
+            // debug in the field. The circle bit is only ever left set, never added here — if
+            // the operator has a radius configured, arming the cylinder is their call and the
+            // GCS just stops undoing it.
+            val radius = _fenceRadiusMeters.value
+            if (radius == null || radius <= 0f) {
+                if (desiredType and FENCE_TYPE_CIRCLE != 0) {
+                    LogUtils.w("FenceSync", "FENCE_RADIUS is ${radius ?: "unreadable"} — clearing the circle bit so the fence can still arm")
+                }
+                desiredType = desiredType and FENCE_TYPE_CIRCLE.inv()
+            }
+
+            val typeChanged = desiredType != currentType
+            if (typeChanged) {
+                if (!repository.setFenceParameter("FENCE_TYPE", desiredType.toFloat())) {
+                    LogUtils.e("FenceSync", "✗ Failed to write FENCE_TYPE=$desiredType - altitude ceiling stays GCS-only")
+                    addNotification(
+                        Notification(
+                            message = "⚠️ Could not set FENCE_TYPE - the drone is not enforcing the altitude ceiling itself",
+                            type = NotificationType.WARNING
+                        )
+                    )
+                    return
+                }
+                _fenceTypeBits.value = desiredType
+                val polyNote = if (!polygonLoaded) ", polygon bit off: no polygon loaded" else ""
+                LogUtils.i("FenceSync", "✓ FENCE_TYPE $currentType -> $desiredType (alt bit on$polyNote)")
+                delay(200)
+            }
+
+            // See (2) above: a type change only becomes live across an enable transition.
+            if (currentEnable != 0 && typeChanged) {
+                LogUtils.i("FenceSync", "Bouncing FENCE_ENABLE so the new FENCE_TYPE is actually evaluated")
+                repository.setFenceParameter("FENCE_ENABLE", 0f)
+                delay(300)
+            }
+
+            if (currentEnable != 1 || typeChanged) {
+                if (!repository.setFenceParameter("FENCE_ENABLE", 1f)) {
+                    LogUtils.e("FenceSync", "✗ Failed to write FENCE_ENABLE=1 - altitude ceiling stays GCS-only")
+                    addNotification(
+                        Notification(
+                            message = "⚠️ Could not enable the drone's fence - the altitude ceiling is enforced by the tablet only",
+                            type = NotificationType.WARNING
+                        )
+                    )
+                    return
+                }
+                delay(200)
+            }
+
+            // Read back rather than trust the ack: this is the parameter the whole ceiling
+            // now rests on, and "we sent it" is not the same as "it took".
+            val readBack = repository.readFenceParameter("FENCE_ENABLE")?.toInt()
+            if (readBack == 1) {
+                LogUtils.i("FenceSync", "✓ FC altitude fence ARMED: FENCE_ENABLE=1, FENCE_TYPE=$desiredType, FENCE_ALT_MAX=${fcLimit}m")
+            } else {
+                LogUtils.e("FenceSync", "✗ FENCE_ENABLE reads back as $readBack - the FC is NOT enforcing the altitude ceiling")
+                addNotification(
+                    Notification(
+                        message = "⚠️ The drone did not accept the fence - the altitude ceiling is enforced by the tablet only",
+                        type = NotificationType.WARNING
+                    )
+                )
+            }
+        } catch (e: Exception) {
+            LogUtils.e("FenceSync", "Error arming the FC altitude fence", e)
+        }
+    }
+
+    /**
+     * Push the pilot's altitude ceiling to the FC right now, outside the connect sequence.
+     *
+     * Called when the ceiling is changed in Options. That path used to write FENCE_ALT_MAX and
+     * nothing else, which left RTL_ALT stranded at whatever the connect-time sync had agreed
+     * with the OLD ceiling: drop the ceiling from 120 m to 48 m mid-session and RTL_ALT stayed
+     * at 110 m, so the breach action - an RTL - began by climbing 60 m through the very limit
+     * it was recovering from. That is the "RTL alt isn't being taken as per set params"
+     * report. All three writes now move together.
+     */
+    suspend fun applyAltitudeCeilingToFc() {
+        val context = GCSApplication.getInstance() ?: return
+        val prefs = context.getSharedPreferences("failsafe_options", Context.MODE_PRIVATE)
+        try {
+            pushAltitudeCeilingToFc(prefs)
+            syncRtlAltOnConnect(prefs)
+            armFcAltitudeFence()
+        } catch (e: Exception) {
+            LogUtils.e("OptionsSync", "Failed to apply the altitude ceiling to the FC", e)
         }
     }
 
@@ -6851,8 +8409,8 @@ class SharedViewModel : ViewModel() {
     }
 
     // Fence-breach alert de-dup. The breach reaches us on two independent paths and either one
-    // can be the only one that fires: SYS_STATUS bit 8 (fence sensor enabled + unhealthy) and
-    // the FC's own "Fence breach" STATUSTEXT. Whichever arrives first raises the alert; the
+    // can be the only one that fires: the SYS_STATUS geofence bit (bit 20, fence sensor
+    // enabled + unhealthy) and the FC's own "Fence breach" STATUSTEXT. Whichever arrives first raises the alert; the
     // other is swallowed for FENCE_BREACH_DEDUPE_MS so the pilot gets one popup, not two.
     private var lastFenceBreachAlertTime = 0L
     private val FENCE_BREACH_DEDUPE_MS = 5000L
@@ -6867,7 +8425,7 @@ class SharedViewModel : ViewModel() {
      */
     /**
      * @param fenceName which boundary was crossed ("Range", "Polygon", "Max Altitude"...),
-     *   when the FC told us. SYS_STATUS bit 8 is a single flag for every fence type, so that
+     *   when the FC told us. The SYS_STATUS geofence bit is a single flag for every fence type, so that
      *   path cannot know; only the STATUSTEXT path can name it. Null means "a fence".
      */
     @JvmOverloads
