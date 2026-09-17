@@ -167,6 +167,38 @@ private const val MAV_FRAME_BUFFER_CAPACITY = 2048
 private const val MISSION_ITEM_RETRANSMIT_WINDOW_MS = 1200L
 
 /**
+ * How many MISSION_REQUEST_INTs a mission DOWNLOAD keeps in flight at once.
+ *
+ * The download used to request one item and await it before requesting the next, which cost a
+ * full link round trip per item — the dominant cost in a resume (a 150-item spray grid took
+ * 15-20 s to read back before anything was uploaded). Requesting a window at a time lets the
+ * FC stream its answers and collapses those round trips.
+ *
+ * Kept modest deliberately. This link also carries video and the full telemetry stream, and
+ * an over-large burst just moves the loss from "slow" to "dropped", costing another round.
+ */
+private const val MISSION_DOWNLOAD_WINDOW = 12
+
+/**
+ * Gap between the individual writes of a download burst. NOT a wait for the reply.
+ *
+ * Paces the burst so a serial/BT link's TX buffer does not overrun and silently drop
+ * requests, while still keeping the whole window in flight together. Well under the ~150-200
+ * ms natural request spacing noted above.
+ */
+private const val MISSION_DOWNLOAD_REQUEST_SPACING_MS = 15L
+
+/**
+ * How long to wait for one download window's items before working out what is still missing.
+ *
+ * Replaces the old flat 2 s PER ITEM. It covers a whole window rather than a single item, and
+ * is a floor on progress rather than a per-item stall: anything absent when it expires is
+ * simply re-requested in the next round, and the completeness check still refuses to return a
+ * partial mission.
+ */
+private const val MISSION_DOWNLOAD_WINDOW_TIMEOUT_MS = 2500L
+
+/**
  * PARAM_VALUE messages buffered for [MavlinkTelemetryRepository.paramValue] subscribers.
  *
  * Must exceed the FC's total parameter count — a full list arrives as one uninterrupted burst and
@@ -177,6 +209,15 @@ private const val PARAM_VALUE_BUFFER_CAPACITY = 4096
 
 /** Matches RC1_OPTION .. RC16_OPTION, capturing the channel number. */
 private val RC_OPTION_PARAM_REGEX = Regex("""^RC(\d{1,2})_OPTION$""")
+
+/**
+ * Returned by [MavlinkTelemetryRepository.currentMissionTargetSeq] when the FC has not reported
+ * any mission progress yet, so there is no honest answer to "which item is the drone flying to".
+ *
+ * Callers must treat this as "cannot prepare a resume", never as a sequence number. Guessing here
+ * is what sent the drone to the start of the line.
+ */
+const val MISSION_PROGRESS_UNKNOWN = -1
 
 class MavlinkTelemetryRepository(
     private val provider: MavConnectionProvider,
@@ -4418,21 +4459,49 @@ class MavlinkTelemetryRepository(
             return null
         }
 
+        // Serialize against uploadMissionWithAck. A download and an upload interleaving on the
+        // same link is exactly what corrupted the resume handshake: the FC runs ONE mission
+        // transfer state machine, so two overlapping transfers steal each other's acks.
+        return missionProtocolMutex.withLock { getAllWaypointsLocked(timeoutMs) }
+    }
+
+    /** Body of [getAllWaypoints]. Callers must already hold [missionProtocolMutex]. */
+    private suspend fun getAllWaypointsLocked(timeoutMs: Long): List<MissionItemInt>? {
         try {
-            val receivedItems = mutableListOf<MissionItemInt>()
+            // Concurrent, and keyed by seq. The collector coroutine writes these while the
+            // request loop below reads them to work out what is still missing — the old
+            // sequential loop only ever awaited one deferred at a time and never inspected the
+            // list, so plain collections were safe then and are not now. Keying by seq also
+            // subsumes the old distinctBy: the FC re-sends an item whenever a request looks
+            // unanswered, and duplicates used to reach consumers that reason positionally.
+            val receivedItems = java.util.concurrent.ConcurrentHashMap<Int, MissionItemInt>()
             val expectedCountDeferred = CompletableDeferred<Int?>()
-            val perSeqMap = mutableMapOf<Int, CompletableDeferred<Unit>>()
+            val perSeqMap = java.util.concurrent.ConcurrentHashMap<Int, CompletableDeferred<Unit>>()
 
             // Buffered flow — see uploadMissionWithAck.
             val job = AppScope.launch {
                 mavFrame.collect { frame ->
+                    if (frame.systemId != fcuSystemId || frame.componentId != fcuComponentId) {
+                        return@collect
+                    }
                     when (val msg = frame.message) {
                         is MissionCount -> {
-                            expectedCountDeferred.complete(msg.count.toInt())
+                            if (msg.missionType.value == MavMissionType.MISSION.value &&
+                                !expectedCountDeferred.isCompleted
+                            ) {
+                                expectedCountDeferred.complete(msg.count.toInt())
+                            }
                         }
                         is MissionItemInt -> {
-                            receivedItems.add(msg)
-                            perSeqMap[msg.seq.toInt()]?.let { d -> if (!d.isCompleted) d.complete(Unit) }
+                            // Keep FENCE/RALLY items out of the mission list. missionType is a
+                            // v2 extension that decodes to 0 (= MISSION) on v1 frames, so this
+                            // stays correct on older links.
+                            if (msg.missionType.value != MavMissionType.MISSION.value) {
+                                return@collect
+                            }
+                            val seq = msg.seq.toInt()
+                            receivedItems.putIfAbsent(seq, msg)
+                            perSeqMap[seq]?.let { d -> if (!d.isCompleted) d.complete(Unit) }
                         }
                         is MissionAck -> {
                         }
@@ -4455,49 +4524,135 @@ class MavlinkTelemetryRepository(
             }
 
 
-            for (seq in 0 until expectedCount) {
-                val seqDeferred = CompletableDeferred<Unit>()
-                perSeqMap[seq] = seqDeferred
+            // ═══ Pipelined item fetch ═══
+            //
+            // This used to be strictly sequential: request seq, await it (up to 2s), then
+            // request seq+1. That serialises one full link round trip per item, so a 150-item
+            // spray grid cost 150 RTTs — 15-20s on a link that is also carrying video — and a
+            // single dropped item cost a flat 2s before the retry. That is the bulk of the
+            // 30-40s a resume took.
+            //
+            // Instead, keep a window of requests in flight and let the FC stream answers back.
+            // The collector already records every MISSION_ITEM_INT it sees regardless of what
+            // we asked for, so responses may arrive in any order. Then re-request only the
+            // gaps, which on a healthy link is none.
+            //
+            // The correctness guarantee is UNCHANGED and does not depend on this loop: the
+            // completeness check below still requires every seq in 0 until expectedCount and
+            // discards a partial download outright. A partial mission must never reach
+            // filterWaypointsForResume, which reasons by sequence number — that is what put
+            // the drone on the wrong line.
+            suspend fun requestMissing(rounds: Int) {
+                for (round in 1..rounds) {
+                    val missing = (0 until expectedCount).filter { it !in receivedItems.keys }
+                    if (missing.isEmpty()) return
 
-                try {
-                    val reqItem = MissionRequestInt(targetSystem = fcuSystemId, targetComponent = fcuComponentId, seq = seq.toUShort())
-                    connection.trySendUnsignedV2(gcsSystemId, gcsComponentId, reqItem)
-                } catch (e: Exception) {
+                    if (round > 1) {
+                        LogUtils.w("MissionDownload", "⚠️ Re-requesting ${missing.size} missing item(s) (round $round/$rounds): ${missing.take(20)}")
+                    }
+
+                    // Send in a windowed burst rather than one-at-a-time. The window bounds
+                    // how much the FC has to buffer and how much we lose if the link hiccups,
+                    // while still collapsing N round trips into roughly one per window.
+                    for (chunk in missing.chunked(MISSION_DOWNLOAD_WINDOW)) {
+                        for (seq in chunk) {
+                            if (!perSeqMap.containsKey(seq)) {
+                                perSeqMap[seq] = CompletableDeferred()
+                            }
+                            try {
+                                val reqItem = MissionRequestInt(
+                                    targetSystem = fcuSystemId,
+                                    targetComponent = fcuComponentId,
+                                    seq = seq.toUShort(),
+                                    missionType = MavEnumValue.of(MavMissionType.MISSION)
+                                )
+                                connection.trySendUnsignedV2(gcsSystemId, gcsComponentId, reqItem)
+                            } catch (e: Exception) {
+                                LogUtils.w("MissionDownload", "⚠️ Could not send MISSION_REQUEST_INT for seq=$seq: ${e.message}")
+                            }
+                            // A small gap between writes, NOT a wait for the reply. This paces
+                            // the burst so a serial/BT link's TX buffer does not overrun (which
+                            // would drop requests and force another round), while still keeping
+                            // every request of the window in flight together.
+                            delay(MISSION_DOWNLOAD_REQUEST_SPACING_MS)
+                        }
+
+                        // Let the window's answers land before judging what is still missing.
+                        //
+                        // Skip any seq already in receivedItems rather than awaiting its
+                        // deferred. An item can arrive between the putIfAbsent above and this
+                        // wait — the FC streams answers while we are still sending the rest of
+                        // the burst — and awaiting a deferred whose completing frame has
+                        // already gone past would block for the whole window timeout on an
+                        // item we actually have.
+                        withTimeoutOrNull(MISSION_DOWNLOAD_WINDOW_TIMEOUT_MS) {
+                            chunk.forEach { seq ->
+                                if (seq !in receivedItems.keys) perSeqMap[seq]?.await()
+                            }
+                        }
+                        chunk.forEach { perSeqMap.remove(it) }
+                    }
                 }
-
-                val got = withTimeoutOrNull(2000L) { // 2s timeout per item (allows for FC processing + network latency)
-                    seqDeferred.await()
-                    true
-                } ?: false
-
-                if (!got) {
-                }
-
-                perSeqMap.remove(seq)
             }
+
+            requestMissing(rounds = 3)
 
             // Small delay to ensure all MAVLink messages are processed before canceling collector
             delay(200)
-            job.cancel()
 
-            // Sort by sequence, and keep ONE item per sequence.
+            // Close the download.
             //
-            // The collector above appends every MISSION_ITEM_INT it sees, and the FC
-            // re-sends an item whenever a MISSION_REQUEST_INT looks unanswered — which on a
-            // loaded link is often. Without the dedupe the list comes back with duplicate
-            // seqs, and every consumer that reasons positionally (filterWaypointsForResume,
-            // resequenceWaypoints) then builds a mission with repeated legs in it.
-            val sortedItems = receivedItems
-                .distinctBy { it.seq.toInt() }
-                .sortedBy { it.seq.toInt() }
-
-
-            if (sortedItems.size != expectedCount) {
+            // The MAVLink mission protocol ends a download with an ACK from the GCS. Without it
+            // ArduPilot keeps its mission-transfer state machine OPEN and goes on retransmitting
+            // items. The next thing a resume does is uploadMissionWithAck, whose first move is a
+            // MISSION_CLEAR_ALL that waits 3s for a MISSION-type ack and then reads the count
+            // back expecting 0 — and that window was being poisoned by this download's leftover
+            // traffic. The clear failed, the upload aborted, and the pilot got "Resume point
+            // failed. Do not switch to auto." while the FC still held the ORIGINAL mission, so
+            // AUTO carried on from the FC's own index at the far end of the half-flown line.
+            try {
+                val downloadAck = MissionAck(
+                    targetSystem = fcuSystemId,
+                    targetComponent = fcuComponentId,
+                    type = MavEnumValue.of(MavMissionResult.MAV_MISSION_ACCEPTED),
+                    missionType = MavEnumValue.of(MavMissionType.MISSION)
+                )
+                val ackSent = connection.trySendUnsignedV2(gcsSystemId, gcsComponentId, downloadAck)
+                LogUtils.i("MissionDownload", "📤 MISSION_ACK sent to close the download (sendOk=$ackSent)")
+            } catch (e: Exception) {
+                LogUtils.w("MissionDownload", "⚠️ Could not send the closing MISSION_ACK: ${e.message}")
             }
 
+            job.cancel()
+
+            // Sort by sequence. Deduplication is inherent now that the collector stores items
+            // in a map keyed by seq (putIfAbsent), which matters because the FC re-sends an
+            // item whenever a MISSION_REQUEST_INT looks unanswered — often, on a loaded link,
+            // and more so now that requests go out in bursts. Duplicate seqs reaching a
+            // consumer that reasons positionally (filterWaypointsForResume,
+            // resequenceWaypoints) build a mission with repeated legs in it.
+            val sortedItems = receivedItems.values.sortedBy { it.seq.toInt() }
+
+            // A partial mission must never reach filterWaypointsForResume. It looks like a valid
+            // mission — distinctBy has already closed the gaps — but every consumer reasons by
+            // sequence number, so a missing item around the resume point silently produces a
+            // resumed mission for the wrong segment. Callers retry, and on a second failure
+            // report "could not read the mission back from the drone", which is the truth.
+            if (sortedItems.size != expectedCount) {
+                val missing = (0 until expectedCount).toSet() - sortedItems.map { it.seq.toInt() }.toSet()
+                LogUtils.e(
+                    "MissionDownload",
+                    "✗ Incomplete mission download: got ${sortedItems.size}/$expectedCount items " +
+                        "(missing seqs=${missing.sorted()}) — discarding rather than returning a partial mission"
+                )
+                return null
+            }
+
+            LogUtils.i("MissionDownload", "✓ Mission download complete: $expectedCount items")
             return sortedItems
 
         } catch (e: Exception) {
+            LogUtils.e("MissionDownload", "✗ Mission download threw: ${e.message}", e)
             return null
         }
     }
@@ -4506,6 +4661,86 @@ class MavlinkTelemetryRepository(
      * Get the mission count from the flight controller.
      * Returns the number of mission items stored in the FC.
      */
+    /**
+     * How many items the FC currently holds, WITHOUT downloading them.
+     *
+     * One round trip, used by the resume path to decide whether the mission on the FC is
+     * still the one the GCS uploaded and cached. A full [getAllWaypoints] costs one request
+     * and one 2s-timeout window PER ITEM, so on a large spray grid this probe is the
+     * difference between ~0.2s and 15-20s.
+     *
+     * Takes [missionProtocolMutex] and closes the transfer it opens — see
+     * [getMissionCountLocked]. Callers already holding the mutex must use that instead.
+     */
+    suspend fun getMissionCountForCacheCheck(timeoutMs: Long = 3000): Int? {
+        if (!state.value.fcuDetected) {
+            return null
+        }
+        return missionProtocolMutex.withLock { getMissionCountLocked(timeoutMs) }
+    }
+
+    /**
+     * Body of [getMissionCountForCacheCheck]. Callers must hold [missionProtocolMutex].
+     *
+     * MISSION_REQUEST_LIST OPENS ArduPilot's mission-transfer state machine — the FC will sit
+     * there expecting to be pulled through the whole mission. [getAllWaypointsLocked] closes
+     * it with a MISSION_ACK for exactly that reason, and so must this: an unclosed transfer
+     * leaves the FC retransmitting items, which then poisons the MISSION_CLEAR_ALL window of
+     * the very next upload. That is the failure that reported "resume point failed" while the
+     * FC still held the ORIGINAL mission.
+     */
+    private suspend fun getMissionCountLocked(timeoutMs: Long): Int? {
+        try {
+            val countDeferred = CompletableDeferred<Int?>()
+
+            // Buffered flow — see uploadMissionWithAck.
+            val job = AppScope.launch {
+                mavFrame.collect { frame ->
+                    if (frame.systemId != fcuSystemId || frame.componentId != fcuComponentId) {
+                        return@collect
+                    }
+                    val msg = frame.message
+                    if (msg is MissionCount && msg.missionType.value == MavMissionType.MISSION.value) {
+                        if (!countDeferred.isCompleted) countDeferred.complete(msg.count.toInt())
+                    }
+                }
+            }
+
+            val count = try {
+                val req = MissionRequestList(
+                    targetSystem = fcuSystemId,
+                    targetComponent = fcuComponentId,
+                    missionType = MavEnumValue.of(MavMissionType.MISSION)
+                )
+                connection.trySendUnsignedV2(gcsSystemId, gcsComponentId, req)
+                withTimeoutOrNull(timeoutMs) { countDeferred.await() }
+            } catch (e: Exception) {
+                LogUtils.w("MissionCount", "⚠️ Could not send MISSION_REQUEST_LIST: ${e.message}")
+                null
+            }
+
+            // Close the transfer this probe opened, whether or not the count arrived.
+            try {
+                val closingAck = MissionAck(
+                    targetSystem = fcuSystemId,
+                    targetComponent = fcuComponentId,
+                    type = MavEnumValue.of(MavMissionResult.MAV_MISSION_ACCEPTED),
+                    missionType = MavEnumValue.of(MavMissionType.MISSION)
+                )
+                connection.trySendUnsignedV2(gcsSystemId, gcsComponentId, closingAck)
+            } catch (e: Exception) {
+                LogUtils.w("MissionCount", "⚠️ Could not send the closing MISSION_ACK: ${e.message}")
+            }
+
+            job.cancel()
+            return count
+
+        } catch (e: Exception) {
+            LogUtils.e("MissionCount", "✗ Mission count probe threw: ${e.message}", e)
+            return null
+        }
+    }
+
     suspend fun getMissionCount(timeoutMs: Long = 5000): Int? {
         if (!state.value.fcuDetected) {
             return null
@@ -4891,6 +5126,11 @@ class MavlinkTelemetryRepository(
 
                 // Fallback confirmation for firmware that does not ACK this command. Only a
                 // MISSION_CURRENT newer than our first send counts — see missionCurrentAtStart.
+                //
+                // Compare against the freshly-read seq rather than a captured one: uploadMissionWithAck
+                // nulls currentWaypoint on success, and this function is called immediately after an
+                // upload, so the value here starts out null and is only repopulated by the very
+                // MISSION_CURRENT we are waiting for.
                 if (lastMissionCurrentAtMs > missionCurrentAtStart && state.value.currentWaypoint == seq) {
                     LogUtils.i("ResumeMission", "✓ MISSION_CURRENT confirms mission index = $seq (attempt $attempts)")
                     return true
@@ -5031,19 +5271,21 @@ class MavlinkTelemetryRepository(
         // No MISSION_CURRENT seen yet. uploadMissionWithAck clears these counters on every
         // successful upload, so this is the normal state immediately after a resume has been
         // uploaded — and the old silent `?: 1` made a SECOND pause in that window resume from
-        // index 1, the previous resume's transit waypoint, which sits several waypoints back
-        // up the grid. It is still the only safe default (resuming too early re-flies ground
-        // rather than skipping it), but it must not pass unnoticed.
+        // index 1, the previous resume's transit waypoint, which sits several waypoints back up
+        // the grid. That guess IS the reported bug, so we no longer make it: return the
+        // MISSION_PROGRESS_UNKNOWN sentinel and let the caller refuse to prepare a resume. The
+        // drone is holding in LOITER either way, and a pilot told "not ready" can wait a second
+        // for MISSION_CURRENT; a pilot given a wrong seq flies the wrong line.
         if (known == null) {
             LogUtils.w(
                 "ResumeMission",
                 "⚠️ No mission progress known from the FC (lastAutoWaypoint=${snapshot.lastAutoWaypoint}, " +
-                    "currentWaypoint=${snapshot.currentWaypoint}) — defaulting the resume target to 1. " +
-                    "Check the resume point on the map before engaging AUTO."
+                    "currentWaypoint=${snapshot.currentWaypoint}) — refusing to guess a resume target."
             )
+            return MISSION_PROGRESS_UNKNOWN
         }
 
-        return maxOf(known ?: 1, snapshot.lastReachedWaypoint + 1).coerceAtLeast(1)
+        return maxOf(known, snapshot.lastReachedWaypoint + 1).coerceAtLeast(1)
     }
 
     /**
@@ -5203,8 +5445,26 @@ class MavlinkTelemetryRepository(
             filtered.add(waypoint)
         }
 
-        if (resumeLatitude != null && resumeLongitude != null) {
-        } else {
+        // Nothing of the ORIGINAL mission survived the resume point.
+        //
+        // The list is not empty in this case — it still holds HOME, the inserted resume waypoint
+        // and possibly a DO_SPRAYER — so every caller's `isEmpty()` guard waves it through. The FC
+        // then accepts a two-item mission, the drone flies to the resume point and the mission is
+        // "complete": no error anywhere, and the rest of the grid silently never gets flown.
+        //
+        // This is reachable whenever resumeWaypointSeq overshoots the mission, which is exactly
+        // what a stale lastReachedWaypoint does (currentMissionTargetSeq takes lastReachedWaypoint + 1).
+        // Counted on the SOURCE list, not on `filtered`: the inserted resume waypoint is built
+        // with seq = 1u, so counting the output would mistake it for a surviving mission item
+        // whenever resumeWaypointSeq <= 1 and mask the very case this guard exists to catch.
+        val keptFromOriginal = allWaypoints.count { it.seq.toInt() != 0 && it.seq.toInt() >= resumeWaypointSeq }
+        if (keptFromOriginal == 0) {
+            LogUtils.e(
+                "ResumeMission",
+                "✗ No mission items at or after seq=$resumeWaypointSeq (mission has ${allWaypoints.size} items, " +
+                    "last seq=${allWaypoints.maxOfOrNull { it.seq.toInt() } ?: -1}) — refusing to build a resume that flies nowhere"
+            )
+            return emptyList()
         }
 
         return filtered

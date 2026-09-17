@@ -1983,6 +1983,7 @@ class SharedViewModel : ViewModel() {
         _resumePointWaypoint.value = null
         _resumeMissionReady.value = false
         _resumePreparationFailed.value = false
+        _resumePreparationInProgress.value = false
         _showAddResumeHerePopup.value = false
         _pendingResumeLocation = null
         _missionPauseLocation = null
@@ -2992,6 +2993,7 @@ class SharedViewModel : ViewModel() {
                     _resumePointWaypoint.value = null
                     _resumeMissionReady.value = false
                     _resumePreparationFailed.value = false
+                    _resumePreparationInProgress.value = false
                     _pendingResumeLocation = null
                     _missionPauseLocation = null
                     _sprayWasActiveBeforePause = false
@@ -4724,6 +4726,17 @@ class SharedViewModel : ViewModel() {
     val resumePreparationFailed: StateFlow<Boolean> = _resumePreparationFailed.asStateFlow()
 
     /**
+     * True while [processResumePoint] is still downloading, clearing and uploading the resumed
+     * mission — seconds of work on a shared link.
+     *
+     * Without this, a pilot who flicks to AUTO mid-preparation fell into the "no resume point
+     * loaded" branch of [onModeChangedToAuto], which reads as an outright failure when the resume
+     * was in fact about to be ready.
+     */
+    private val _resumePreparationInProgress = MutableStateFlow(false)
+    val resumePreparationInProgress: StateFlow<Boolean> = _resumePreparationInProgress.asStateFlow()
+
+    /**
      * Called when mode changes from AUTO to LOITER or BRAKE (detected in TelemetryRepository)
      * This shows a popup asking user if they want to set resume point here
      * NOTE: Only works when user selected Automatic mode, not Manual mode
@@ -4738,6 +4751,16 @@ class SharedViewModel : ViewModel() {
         val currentMode = _telemetryState.value.mode ?: "Loiter"
         LogUtils.i("SharedVM", "=== MODE CHANGED: AUTO → $currentMode ===")
         LogUtils.i("SharedVM", "Waypoint at mode change: $waypointNumber")
+
+        // The FC has not told us where the mission is, so there is no resume point to offer.
+        // Say so instead of showing a popup that would prepare a resume from a guessed sequence —
+        // the guess lands on the previous resume's transit waypoint and flies the wrong line.
+        if (waypointNumber == MISSION_PROGRESS_UNKNOWN) {
+            LogUtils.e("SharedVM", "⚠️ AUTO → $currentMode but the FC has reported no mission progress — cannot offer a resume point")
+            _telemetryState.update { it.copy(missionPaused = true, pausedAtWaypoint = null) }
+            reportResumePreparationFailed("the drone has not reported mission progress yet")
+            return
+        }
 
         _resumePointWaypoint.value = waypointNumber
 
@@ -4890,6 +4913,7 @@ class SharedViewModel : ViewModel() {
             LogUtils.i("SharedVM", "═══════════════════════════════════════")
 
             _resumePreparationFailed.value = false
+            _resumePreparationInProgress.value = true
 
             try {
                 // Step 1: Check connection
@@ -4900,17 +4924,49 @@ class SharedViewModel : ViewModel() {
 
                 // Step 2: Get current mission from FC (silent - no progress updates)
                 //
-                // Retried: this is by far the most fragile step (a full mission download over
-                // a link that is also carrying video and telemetry) and it is the one whose
-                // failure used to be invisible.
-                LogUtils.i("SharedVM", "Retrieving mission from FC (background)...")
-                var downloaded = repo?.getAllWaypoints()
-                if (downloaded.isNullOrEmpty()) {
-                    LogUtils.w("SharedVM", "Mission download returned nothing — retrying once")
-                    delay(1000)
-                    downloaded = repo?.getAllWaypoints()
+                // Fast path: reuse the mission the GCS itself put on the FC.
+                //
+                // A full download is one request and one timeout window per item, so on a big
+                // spray grid it dominates the 30-40 s a resume took — and in the common case
+                // it re-reads, item by item, a mission this app uploaded and still holds in
+                // lastUploadedMissionItems.
+                //
+                // Trusted ONLY when the FC's own item count agrees with the cache, which is a
+                // single round trip to check. That guard matters: every consumer downstream
+                // reasons by sequence number, so resuming against a mission the FC is not
+                // actually holding is precisely how the drone ends up flying the wrong line.
+                // The cache is cleared on disarm-clear, on Clear Mission and on every failed
+                // upload, and is only ever written together with lastUploadedCount, so a
+                // non-empty cache whose size matches the FC is the same mission.
+                //
+                // Any disagreement, any unanswered probe, any empty cache — fall through to
+                // the real download. This is an optimisation, never a source of truth.
+                val cached = lastUploadedMissionItems
+                var allWaypoints: List<MissionItemInt>? = null
+
+                if (cached.isNotEmpty() && cached.size == lastUploadedCount) {
+                    val fcCount = repo?.getMissionCountForCacheCheck()
+                    if (fcCount == cached.size) {
+                        LogUtils.i("SharedVM", "✓ FC reports $fcCount items, matching the cached mission — skipping the download")
+                        allWaypoints = cached
+                    } else {
+                        LogUtils.i("SharedVM", "Cached mission (${cached.size}) does not match the FC (${fcCount ?: "no answer"}) — downloading")
+                    }
                 }
-                val allWaypoints = downloaded
+
+                if (allWaypoints == null) {
+                    // Retried: this is by far the most fragile step (a full mission download
+                    // over a link that is also carrying video and telemetry) and it is the one
+                    // whose failure used to be invisible.
+                    LogUtils.i("SharedVM", "Retrieving mission from FC (background)...")
+                    var downloaded = repo?.getAllWaypoints()
+                    if (downloaded.isNullOrEmpty()) {
+                        LogUtils.w("SharedVM", "Mission download returned nothing — retrying once")
+                        delay(1000)
+                        downloaded = repo?.getAllWaypoints()
+                    }
+                    allWaypoints = downloaded
+                }
                 if (allWaypoints.isNullOrEmpty()) {
                     reportResumePreparationFailed("could not read the mission back from the drone")
                     return@launch
@@ -4955,6 +5011,11 @@ class SharedViewModel : ViewModel() {
                 LogUtils.i("SharedVM", "✅ Sequence validation passed")
 
                 // Step 6: Upload modified mission to FC (silent)
+                //
+                // Short settle first: getAllWaypoints now closes the download with a MISSION_ACK,
+                // but give any item the FC had already put on the wire time to drain before the
+                // upload's MISSION_CLEAR_ALL starts waiting on its own ack.
+                delay(300)
                 LogUtils.i("SharedVM", "Uploading modified mission to FC (background)...")
                 val uploadSuccess = repo?.uploadMissionWithAck(resequenced) ?: false
                 if (!uploadSuccess) {
@@ -5005,6 +5066,10 @@ class SharedViewModel : ViewModel() {
             } catch (e: Exception) {
                 LogUtils.e("SharedVM", "Failed to auto-process resume point", e)
                 reportResumePreparationFailed(e.message ?: "unexpected error")
+            } finally {
+                // Every exit above is a return@launch, so this is the only place the flag can be
+                // reliably cleared.
+                _resumePreparationInProgress.value = false
             }
         }
     }
@@ -5290,6 +5355,9 @@ class SharedViewModel : ViewModel() {
         onResult: (Boolean, String?) -> Unit = { _, _ -> }
     ) {
         viewModelScope.launch {
+            // Same reason as processResumePoint: this takes seconds, and a pilot who engages AUTO
+            // meanwhile must be told "still uploading", not "no resume point loaded".
+            _resumePreparationInProgress.value = true
             try {
                 onProgress("Step 1/6: Pre-flight checks...")
                 if (!_telemetryState.value.connected) {
@@ -5389,6 +5457,9 @@ class SharedViewModel : ViewModel() {
             } catch (e: Exception) {
                 LogUtils.e("ManualResume", "Failed to process manual resume point", e)
                 onResult(false, e.message)
+            } finally {
+                // Every exit above is a return@launch, so this is the only reliable clear.
+                _resumePreparationInProgress.value = false
             }
         }
     }
@@ -5479,6 +5550,24 @@ class SharedViewModel : ViewModel() {
                     ttsManager?.speak("Resume failed. Switch out of auto.")
                 }
             }
+        } else if (_resumePreparationInProgress.value) {
+            // ═══ AUTO WHILE THE RESUME IS STILL BEING UPLOADED ═══
+            //
+            // Distinct from the branch below: nothing has failed, the resumed mission just is not
+            // on the FC yet. The vehicle is nevertheless in AUTO now and ArduPilot is flying its
+            // OWN stored mission, so the pilot still needs telling — but told the truth, which is
+            // "wait", not "it failed".
+            //
+            // As above, we do not fight the pilot for the mode switch.
+            LogUtils.w("SharedVM", "⚠️ AUTO entered while the resume mission is still uploading")
+            addNotification(
+                Notification(
+                    message = "⚠️ Resume point is still uploading. The drone is flying its original mission — " +
+                        "switch out of AUTO, wait for \"Resume point ready\", then go back to AUTO.",
+                    type = NotificationType.ERROR
+                )
+            )
+            ttsManager?.speak("Resume point still uploading. Switch out of auto and wait.")
         } else if (_telemetryState.value.missionPaused) {
             // ═══ AUTO WITH A PAUSED MISSION AND NOTHING PREPARED ═══
             //
@@ -6036,7 +6125,12 @@ class SharedViewModel : ViewModel() {
                 val lastAutoWp = _telemetryState.value.lastAutoWaypoint
                 // The item the drone is flying TOWARDS. Resuming from an already-reached item
                 // sends the drone back to the start of the line it was half way along.
-                val waypointToStore = repo?.currentMissionTargetSeq()
+                // MISSION_PROGRESS_UNKNOWN means the FC has not reported progress; fall back to
+                // the raw telemetry for display rather than storing the sentinel as a waypoint.
+                // The real resume sequence is decided in onModeChangedToLoiterFromAuto, which
+                // refuses outright in that case.
+                val targetSeq = repo?.currentMissionTargetSeq()
+                val waypointToStore = targetSeq?.takeIf { it != MISSION_PROGRESS_UNKNOWN }
                     ?: (if (lastAutoWp > 0) lastAutoWp else currentWp)
 
                 // Record where the mission is being interrupted, so the resume flies back to

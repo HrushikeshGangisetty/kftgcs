@@ -45,7 +45,10 @@
       "Bash(sed -n '/public data class DistanceSensor/,/^\\) :/p' /tmp/tmp.1roVkuIwiw/commonMain/com/divpundir/mavlink/definitions/common/DistanceSensor.kt)",
       "Bash(sed -n '/public data class ObstacleDistance/,/^\\) :/p' /tmp/tmp.1roVkuIwiw/commonMain/com/divpundir/mavlink/definitions/common/ObstacleDistance.kt)",
       "Read(//tmp/tmp.1roVkuIwiw/commonMain/com/divpundir/mavlink/definitions/common/**)",
-      "Bash(unzip -l /c/Users/Hrushikesh/.gradle/caches/8.11.1/transforms/099057fc9128ae82b498d771c5ebd8cf/transformed/material-icons-extended-release-api.jar)"
+      "Bash(unzip -l /c/Users/Hrushikesh/.gradle/caches/8.11.1/transforms/099057fc9128ae82b498d771c5ebd8cf/transformed/material-icons-extended-release-api.jar)",
+      "Bash(graphify update *)",
+      "Bash(find ~/.gradle /c/Users/Hrushikesh/.gradle -name \"*mavlink*kotlin*.jar\" 2>/dev/null | head -5; echo \"---SRC---\"; find / -path /proc -prune -o -name \"MissionAck.kt\" -print 2>/dev/null | head -5)",
+      "Read(//c/Users/Hrushikesh/.gradle/**)"
     ]
   }
 }

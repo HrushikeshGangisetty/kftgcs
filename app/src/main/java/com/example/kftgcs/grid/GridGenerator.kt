@@ -9,6 +9,18 @@ import kotlin.math.*
  */
 class GridGenerator {
 
+    companion object {
+        /**
+         * Hard safety floor for the obstacle buffer, in metres.
+         *
+         * The PlanScreen slider starts here, so in normal use this clamp is a no-op and the
+         * value the pilot sees is the clearance actually flown. It stays as a backstop for
+         * mission templates saved before the slider's range was corrected, which can still
+         * hold a value below the floor.
+         */
+        const val MIN_OBSTACLE_BUFFER_M = 3.0
+    }
+
     /**
      * Generate grid survey waypoints for a given polygon
      * @param polygon Survey area boundary
@@ -67,8 +79,17 @@ class GridGenerator {
         val gridLines = mutableListOf<Pair<LatLng, LatLng>>()
         val waypoints = mutableListOf<GridWaypoint>()
 
-        // Pre-process obstacles: expand by LARGER buffer (minimum 3 meters for safety)
-        val effectiveBuffer = maxOf(params.obstacleBoundary.toDouble(), 3.0)
+        // Pre-process obstacles: expand by the buffer the pilot asked for.
+        //
+        // This used to be maxOf(obstacleBoundary, 3.0). The slider offered 1..5m, so every
+        // setting from 1.0 to 3.0 — five of its nine positions — produced an identical 3m
+        // grid. Dragging the margin up changed nothing and the number on screen was not the
+        // clearance actually flown, which is what "the obstacle margin is not increasing"
+        // was. The 3m floor is still enforced, but by the slider's own range
+        // (OBSTACLE_BOUNDARY_MIN_M in PlanScreen) so that the displayed value is the truth
+        // and every position moves the grid. Clamped here too: a mission template saved
+        // under the old 1..5m slider can still carry a sub-3m value.
+        val effectiveBuffer = maxOf(params.obstacleBoundary.toDouble(), MIN_OBSTACLE_BUFFER_M)
         val expandedObstacles = params.obstacles.mapNotNull { obstacle ->
             if (obstacle.size >= 3) {
                 expandPolygonEdgeBased(obstacle, effectiveBuffer)
@@ -379,8 +400,11 @@ class GridGenerator {
         val numSamples = 1000
         val segments = mutableListOf<Pair<LatLng, LatLng>>()
 
-        // Combine original and expanded obstacles - check both
-        val allObstaclesToCheck = originalObstacles + expandedObstacles
+        // Only the expanded polygons need checking. Each one strictly contains its original
+        // (expandPolygonEdgeBased pushes every edge outward by a positive buffer), so testing
+        // the originals as well can never exclude a point the expanded test kept — it just
+        // doubled the point-in-polygon work on every one of the 1000 samples below.
+        val allObstaclesToCheck = expandedObstacles.ifEmpty { originalObstacles }
 
         if (allObstaclesToCheck.isEmpty()) {
             return listOf(Pair(start, end))
