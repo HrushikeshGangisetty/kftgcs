@@ -19,6 +19,21 @@ class GridGenerator {
          * hold a value below the floor.
          */
         const val MIN_OBSTACLE_BUFFER_M = 3.0
+
+        /**
+         * The no-fly ring actually held around an obstacle, for map display.
+         *
+         * This is the same geometry the planner flies: it applies the identical
+         * MIN_OBSTACLE_BUFFER_M clamp and the identical edge-based expansion used to split
+         * the spray lines, so the shaded area on the map is the real cleared zone rather
+         * than a second, drifting approximation of it. Returns null when the polygon is not
+         * a usable shape.
+         */
+        fun obstacleBufferZone(obstacle: List<LatLng>, bufferMeters: Double): List<LatLng>? {
+            if (obstacle.size < 3) return null
+            val effective = maxOf(bufferMeters, MIN_OBSTACLE_BUFFER_M)
+            return GridGenerator().expandPolygonEdgeBased(obstacle, effective)
+        }
     }
 
     /**
@@ -243,7 +258,8 @@ class GridGenerator {
                                 lastZoneEndPoint,
                                 segStart,
                                 expandedObstacles,
-                                originalObstacles
+                                gridAngleRad,
+                                effectiveBuffer
                             )
 
                             // Add transition waypoints (these follow the obstacle boundary)
@@ -876,17 +892,34 @@ class GridGenerator {
      * 3. Create waypoints that move VERTICALLY along that edge
      * 4. This ensures the drone doesn't fly diagonally across sprayed lines
      *
+     * The legs are built in the grid's own rotated frame, not in raw lat/lon.
+     *
+     * The previous version took the obstacle's min/max *longitude* and emitted
+     * LatLng(start.latitude, edgeLon) then LatLng(end.latitude, edgeLon) — a due east/west
+     * leg followed by a due north/south one. That is only correct for a grid running exactly
+     * north-south. At any other gridAngle the transition left the spray line at an arbitrary
+     * angle and flew out to a point derived from a lat/lon bounding box, which is what
+     * "the drone deviates the path by a lot near the obstacle" was. Two smaller faults rode
+     * along: the side offset was a hardcoded 0.00001 degrees (~1.1m, and shrinking with
+     * latitude) rather than the buffer the pilot set, and the bounding box of a rotated
+     * obstacle sits well outside its real edge, widening the detour further.
+     *
+     * Now: project into along-line/across-line axes, pick the side by the real polygon
+     * vertices, and offset by a true metric distance.
+     *
      * @param start The ending point of previous zone (last waypoint before transition)
      * @param end The starting point of next zone (first waypoint after transition)
      * @param expandedObstacles The obstacle polygons expanded by buffer
-     * @param originalObstacles The original obstacle polygons (without buffer)
+     * @param gridAngleRad Grid heading in radians; the transition runs parallel to this
+     * @param bufferMeters Clearance held from the expanded polygon, in metres
      * @return List of intermediate waypoints that follow the obstacle boundary
      */
     private fun calculateBoundaryTransitionPath(
         start: LatLng,
         end: LatLng,
         expandedObstacles: List<List<LatLng>>,
-        @Suppress("UNUSED_PARAMETER") originalObstacles: List<List<LatLng>>
+        gridAngleRad: Double,
+        bufferMeters: Double
     ): List<LatLng> {
         if (expandedObstacles.isEmpty()) return emptyList()
 
@@ -907,50 +940,61 @@ class GridGenerator {
             return emptyList()
         }
 
-        // Calculate obstacle bounding box
-        val minLon = relevantObstacle.minOf { it.longitude }
-        val maxLon = relevantObstacle.maxOf { it.longitude }
-        val centerLon = (minLon + maxLon) / 2
+        // Work in the grid's own frame. `along` runs parallel to the spray lines, `across`
+        // runs perpendicular to them — the direction the grid steps between lines. Using the
+        // origin below keeps the numbers small; only differences matter.
+        val origin = start
+        val cosA = cos(gridAngleRad)
+        val sinA = sin(gridAngleRad)
 
-        // Determine which SIDE of the obstacle to follow (left or right edge)
-        // Choose the side closest to both start and end points
-        val startLon = start.longitude
-        val endLon = end.longitude
-        val avgLon = (startLon + endLon) / 2
-
-        // If average longitude is to the left of obstacle center, use left edge
-        // Otherwise use right edge
-        val useLeftEdge = avgLon < centerLon
-
-        // Get the edge longitude (with some buffer to stay clear)
-        val edgeLon = if (useLeftEdge) {
-            minLon - 0.00001  // Small offset to stay outside
-        } else {
-            maxLon + 0.00001
+        // Metres east/north of origin, then rotated into (along, across).
+        fun project(p: LatLng): Pair<Double, Double> {
+            val east = (p.longitude - origin.longitude) *
+                    (111111.0 * cos(Math.toRadians(origin.latitude)))
+            val north = (p.latitude - origin.latitude) * 111111.0
+            return Pair(east * cosA + north * sinA, -east * sinA + north * cosA)
         }
 
-        // Create waypoints that move vertically along the obstacle edge
-        // This prevents diagonal flight across sprayed lines
-
-        // Point 1: Move horizontally from start to the edge (same latitude as start)
-        val edgePoint1 = LatLng(start.latitude, edgeLon)
-
-        // Point 2: Move vertically along the edge to end's latitude
-        val edgePoint2 = LatLng(end.latitude, edgeLon)
-
-        // Only add intermediate points if they actually create a path around the obstacle
-        // and aren't essentially the same as start/end
-        val distStartToEdge1 = GridUtils.haversineDistance(start, edgePoint1)
-
-        // Check if the direct path would intersect the obstacle
-        // If so, add the edge-following waypoints
-        if (distStartToEdge1 > 1.0) {  // More than 1 meter
-            transitionPoints.add(edgePoint1)
+        // Inverse: (along, across) in metres back to a LatLng.
+        fun unproject(along: Double, across: Double): LatLng {
+            val east = along * cosA - across * sinA
+            val north = along * sinA + across * cosA
+            return GridUtils.moveLatLng(origin, east, north)
         }
 
-        // Add the vertical movement point along the edge
-        if (GridUtils.haversineDistance(edgePoint1, edgePoint2) > 1.0) {
-            transitionPoints.add(edgePoint2)
+        // start projects to (0,0) by construction, since it is the origin.
+        val startAlong = 0.0
+        val startAcross = 0.0
+        val (endAlong, endAcross) = project(end)
+
+        // Extent of the real polygon vertices along the spray-line axis — not a lat/lon
+        // bounding box, so a rotated obstacle does not inflate the detour.
+        val projected = relevantObstacle.map { project(it) }
+        val obsMinAlong = projected.minOf { it.first }
+        val obsMaxAlong = projected.maxOf { it.first }
+
+        // Pass the obstacle on whichever end is nearer, measured along the spray line.
+        // Going "off the near end" is always the shorter way round.
+        val distPastMin = max(startAlong, endAlong) - obsMinAlong
+        val distPastMax = obsMaxAlong - min(startAlong, endAlong)
+        val useMinSide = distPastMin <= distPastMax
+
+        // Clear the polygon by the pilot's buffer, held perpendicular to the obstacle edge
+        // in real metres rather than a fixed number of degrees.
+        val edgeAlong = if (useMinSide) obsMinAlong - bufferMeters else obsMaxAlong + bufferMeters
+
+        // Leg 1: run along the current spray line to clear the obstacle end.
+        val corner1 = unproject(edgeAlong, startAcross)
+        // Leg 2: step across to the next line's offset, parallel to the obstacle edge.
+        val corner2 = unproject(edgeAlong, endAcross)
+
+        // Skip degenerate legs: if the drone is already past the obstacle end, or already on
+        // the target line, the corner adds nothing but a stutter in the path.
+        if (GridUtils.haversineDistance(start, corner1) > 1.0) {
+            transitionPoints.add(corner1)
+        }
+        if (GridUtils.haversineDistance(corner1, corner2) > 1.0) {
+            transitionPoints.add(corner2)
         }
 
         return transitionPoints

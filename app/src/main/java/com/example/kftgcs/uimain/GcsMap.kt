@@ -18,6 +18,9 @@ import com.google.android.gms.maps.CameraUpdateFactory
 import com.google.android.gms.maps.model.LatLng
 import com.google.android.gms.maps.model.BitmapDescriptor
 import com.google.android.gms.maps.model.BitmapDescriptorFactory
+import com.google.android.gms.maps.model.Dash
+import com.google.android.gms.maps.model.Gap
+import com.example.kftgcs.grid.GridGenerator
 import com.google.maps.android.compose.*
 import com.google.maps.android.SphericalUtil
 import kotlinx.coroutines.delay
@@ -517,6 +520,10 @@ fun GcsMap(
     showGridInfo: Boolean = false,
     // Obstacle zones - list of polygons representing no-fly zones
     obstacles: List<List<LatLng>> = emptyList(),
+    // Clearance held around each obstacle (metres). Drives the shaded buffer ring drawn
+    // around every obstacle, so the map shows the whole area the drone actually avoids.
+    // Clamped to GridGenerator.MIN_OBSTACLE_BUFFER_M, matching the planner.
+    obstacleBoundary: Float = GridGenerator.MIN_OBSTACLE_BUFFER_M.toFloat(),
     // Obstacle editing mode
     isAddingObstacle: Boolean = false,
     currentObstaclePoints: List<LatLng> = emptyList(),
@@ -873,6 +880,24 @@ fun GcsMap(
         // Render saved obstacle zones as red semi-transparent polygons
         obstacles.forEachIndexed { obstacleIndex, obstaclePoints ->
             if (obstaclePoints.size >= 3) {
+                // The cleared zone the drone actually holds around the obstacle, drawn
+                // beneath the obstacle itself. This is the same geometry the grid planner
+                // splits spray lines against, so what is shaded here is what is flown --
+                // the obstacle the pilot drew is only the inner core of the real no-fly area.
+                val bufferZone = remember(obstaclePoints, obstacleBoundary) {
+                    GridGenerator.obstacleBufferZone(obstaclePoints, obstacleBoundary.toDouble())
+                }
+                if (bufferZone != null && bufferZone.size >= 3) {
+                    Polygon(
+                        points = bufferZone,
+                        fillColor = Color(0xFFFF9800).copy(alpha = 0.18f),
+                        strokeColor = Color(0xFFFF9800).copy(alpha = 0.7f),
+                        strokeWidth = 2f,
+                        strokePattern = listOf(Dash(16f), Gap(10f)),
+                        zIndex = -1f
+                    )
+                }
+
                 // Fill the obstacle area with semi-transparent red
                 Polygon(
                     points = obstaclePoints,

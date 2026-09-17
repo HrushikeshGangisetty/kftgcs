@@ -49,6 +49,7 @@ import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.isActive
+import com.example.kftgcs.grid.GridGenerator
 import com.example.kftgcs.grid.GridUtils
 import com.example.kftgcs.videotracking.CameraTrackingState
 import com.example.kftgcs.videotracking.TrackingManager
@@ -4005,6 +4006,11 @@ class SharedViewModel : ViewModel() {
     private val _obstacles = MutableStateFlow<List<List<LatLng>>>(emptyList())
     val obstacles: StateFlow<List<List<LatLng>>> = _obstacles.asStateFlow()
 
+    // Clearance the uploaded mission was planned with, carried over from PlanScreen so the
+    // home screen can shade the same buffer ring the drone is actually flying around.
+    private val _obstacleBoundary = MutableStateFlow(GridGenerator.MIN_OBSTACLE_BUFFER_M.toFloat())
+    val obstacleBoundary: StateFlow<Float> = _obstacleBoundary.asStateFlow()
+
     // Trigger to clear the drone's drawn flight path in GcsMap (incremented each time clear is requested)
     private val _clearDronePathTrigger = MutableStateFlow(0)
     val clearDronePathTrigger: StateFlow<Int> = _clearDronePathTrigger.asStateFlow()
@@ -4087,6 +4093,14 @@ class SharedViewModel : ViewModel() {
      */
     fun setObstacles(obstacleList: List<List<LatLng>>) {
         _obstacles.value = obstacleList
+    }
+
+    /**
+     * Set the obstacle clearance the mission was planned with, so the home screen shades the
+     * same buffer ring PlanScreen showed.
+     */
+    fun setObstacleBoundary(boundaryMeters: Float) {
+        _obstacleBoundary.value = boundaryMeters
     }
 
     fun setPlanningWaypoints(waypoints: List<LatLng>) {

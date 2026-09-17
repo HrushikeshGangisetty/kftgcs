@@ -294,10 +294,10 @@
     "semantic_hash": "9293bb7046f3bd2b9c76af08aedcb721"
   },
   "app/src/main/java/com/example/kftgcs/grid/GridGenerator.kt": {
-    "mtime": 1773753795.6689415,
-    "seen": 1789573354.355936,
-    "ast_hash": "c63217b7140dddc6808c255df4727752",
-    "semantic_hash": "c63217b7140dddc6808c255df4727752"
+    "mtime": 1789624693.893494,
+    "seen": 1789624964.345078,
+    "ast_hash": "f9fd61d1ffed3112a19f636f3b8b1b53",
+    "semantic_hash": ""
   },
   "app/src/main/java/com/example/kftgcs/grid/GridMissionConverter.kt": {
     "mtime": 1775219532.1479313,
@@ -684,9 +684,9 @@
     "semantic_hash": "2e810a2736a2deb0aff6e72561ef7805"
   },
   "app/src/main/java/com/example/kftgcs/telemetry/SharedViewModel.kt": {
-    "mtime": 1789575030.982843,
-    "seen": 1789575069.0230296,
-    "ast_hash": "09a87398f19c6bd38e693321974eed54",
+    "mtime": 1789624899.394916,
+    "seen": 1789624964.382911,
+    "ast_hash": "77ec312108f2e967c309145cff5e6b50",
     "semantic_hash": ""
   },
   "app/src/main/java/com/example/kftgcs/telemetry/SprayTelemetryUtils.kt": {
@@ -696,9 +696,9 @@
     "semantic_hash": "75b44909c88905dab2737b3532c01a5e"
   },
   "app/src/main/java/com/example/kftgcs/telemetry/TelemetryRepository.kt": {
-    "mtime": 1789575050.845356,
-    "seen": 1789575069.0230296,
-    "ast_hash": "0b34b218e1f7b31ef6f2cbc7cb43d99f",
+    "mtime": 1789624939.9540904,
+    "seen": 1789624964.384936,
+    "ast_hash": "3ef2382f02091404b76f6f98b4bff628",
     "semantic_hash": ""
   },
   "app/src/main/java/com/example/kftgcs/telemetry/WebSocketManager.kt": {
@@ -1002,10 +1002,10 @@
     "semantic_hash": "72e9ef8b8d90ac7c74ae3b184a1683c5"
   },
   "app/src/main/java/com/example/kftgcs/uimain/PlanScreen.kt": {
-    "mtime": 1789553715.2520869,
-    "seen": 1789573354.355936,
-    "ast_hash": "ff88a650c3a91120e277800e77233deb",
-    "semantic_hash": "ff88a650c3a91120e277800e77233deb"
+    "mtime": 1789624759.5041225,
+    "seen": 1789624964.4026814,
+    "ast_hash": "2e0cb2c294fd2e98ff0c34ba5443f336",
+    "semantic_hash": ""
   },
   "app/src/main/java/com/example/kftgcs/uimain/ProximityOverlay.kt": {
     "mtime": 1789554810.525208,

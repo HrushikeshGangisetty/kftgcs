@@ -810,6 +810,7 @@ fun PlanScreen(
                 showGridInfo = isGridSurveyMode && surveyPolygon.size >= 3,
                 // Obstacle avoidance parameters
                 obstacles = obstacles,
+                obstacleBoundary = obstacleBoundary,
                 isAddingObstacle = isAddingObstacle,
                 currentObstaclePoints = currentObstaclePoints,
                 selectedObstacleIndex = selectedObstacleIndex,
@@ -1402,6 +1403,9 @@ fun PlanScreen(
                                             telemetryViewModel.setGridLines(processedGridResult.gridLines)
                                             // Save obstacles to SharedViewModel for display on main map
                                             telemetryViewModel.setObstacles(obstacles)
+                                            // Carry the planned clearance across so the home
+                                            // screen shades the same ring the grid was split against
+                                            telemetryViewModel.setObstacleBoundary(obstacleBoundary)
 
                                             // Reset split plan mode after successful upload
                                             if (isSplitPlanMode) {

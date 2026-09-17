@@ -91,6 +91,7 @@ fun MainPage(
     val rangeFenceRadius by telemetryViewModel.fenceRadiusMeters.collectAsState()
     val rangeFenceArmed by telemetryViewModel.rangeFenceArmed.collectAsState()
     val obstacles by telemetryViewModel.obstacles.collectAsState()
+    val obstacleBoundary by telemetryViewModel.obstacleBoundary.collectAsState()
     val clearDronePathTrigger by telemetryViewModel.clearDronePathTrigger.collectAsState()
     // Trail is ViewModel-owned so it survives navigation away from this screen (a
     // pause/resume) without losing the green sprayed-line history.
@@ -294,6 +295,7 @@ fun MainPage(
                 geofenceAdjustmentEnabled = geofenceEnabled,
                 // Obstacle zones for display (no editing on main page)
                 obstacles = obstacles,
+                obstacleBoundary = obstacleBoundary,
                 // Resume point marker - shows "R" where drone paused
                 resumePointLocation = resumePointLocation,
                 // Manual resume point markers
