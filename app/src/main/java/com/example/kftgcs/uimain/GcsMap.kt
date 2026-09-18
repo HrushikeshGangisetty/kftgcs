@@ -21,6 +21,7 @@ import com.google.android.gms.maps.model.BitmapDescriptorFactory
 import com.google.android.gms.maps.model.Dash
 import com.google.android.gms.maps.model.Gap
 import com.example.kftgcs.grid.GridGenerator
+import com.example.kftgcs.grid.GridUtils
 import com.google.maps.android.compose.*
 import com.google.maps.android.SphericalUtil
 import kotlinx.coroutines.delay
@@ -914,6 +915,35 @@ fun GcsMap(
                     color = Color.Red
                 )
 
+                // Area of the obstacle, in the middle of it.
+                //
+                // Sits alongside the per-edge lengths already drawn below: the edges say how
+                // big each side is, this says how much ground the thing actually covers, which
+                // is the number that matters when deciding whether it is worth marking at all.
+                //
+                // Uses formatAreaCompact rather than the field's acres formatter — an obstacle
+                // this size is a rounding error in acres (a 6 x 7 m shed is "0.01 acres"), so
+                // small shapes report square metres instead.
+                val obstacleAreaText = remember(obstaclePoints) {
+                    GridUtils.formatAreaCompact(obstaclePoints)
+                }
+                val obstacleAreaCenter = remember(obstaclePoints) {
+                    GridUtils.calculatePolygonCenter(obstaclePoints)
+                }
+                val obstacleAreaIcon = remember(obstacleAreaText, obstacleIndex) {
+                    createObstacleDistanceLabel(obstacleAreaText, emphasis = true)
+                }
+                Marker(
+                    state = MarkerState(position = obstacleAreaCenter),
+                    title = "Obstacle ${obstacleIndex + 1}: $obstacleAreaText",
+                    icon = obstacleAreaIcon,
+                    anchor = Offset(0.5f, 0.5f),
+                    flat = true,
+                    // Above the edge labels (5f): if a short edge's label overlaps the middle
+                    // of a small obstacle, the area is the one worth reading.
+                    zIndex = 6f
+                )
+
                 // Always show distance labels on each edge (like boundary area)
                 obstaclePoints.forEachIndexed { pointIndex, point ->
                     val nextIndex = (pointIndex + 1) % obstaclePoints.size
@@ -1654,10 +1684,16 @@ private fun createDistanceLabel(text: String): BitmapDescriptor {
  * Create a bitmap descriptor with distance label for obstacle edges (red themed)
  * Similar to createSmallLabelMarker but with red background for obstacles
  */
-private fun createObstacleDistanceLabel(text: String): BitmapDescriptor {
+/**
+ * Red pill label used on obstacles: edge lengths, and the area in the middle.
+ *
+ * [emphasis] makes the pill larger and darker. The area label uses it so that it does not read
+ * as just another edge length sitting near the centre of the shape.
+ */
+private fun createObstacleDistanceLabel(text: String, emphasis: Boolean = false): BitmapDescriptor {
     val paint = android.graphics.Paint().apply {
         isAntiAlias = true
-        textSize = 24f
+        textSize = if (emphasis) 30f else 24f
         typeface = android.graphics.Typeface.create(android.graphics.Typeface.DEFAULT, android.graphics.Typeface.BOLD)
     }
 
@@ -1676,7 +1712,11 @@ private fun createObstacleDistanceLabel(text: String): BitmapDescriptor {
     // Draw rounded rectangle background (dark red/maroon)
     val bgPaint = android.graphics.Paint().apply {
         isAntiAlias = true
-        color = android.graphics.Color.argb(230, 180, 40, 40) // Semi-transparent red
+        color = if (emphasis) {
+            android.graphics.Color.argb(240, 120, 20, 20)
+        } else {
+            android.graphics.Color.argb(230, 180, 40, 40) // Semi-transparent red
+        }
         style = android.graphics.Paint.Style.FILL
     }
     val rect = android.graphics.RectF(0f, 0f, bitmap.width.toFloat(), bitmap.height.toFloat())

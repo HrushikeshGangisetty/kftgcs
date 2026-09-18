@@ -11,14 +11,30 @@ class GridGenerator {
 
     companion object {
         /**
-         * Hard safety floor for the obstacle buffer, in metres.
+         * Floor for the obstacle buffer, in metres. Zero: the pilot decides, and zero is a
+         * legitimate choice meaning "plan right up to the drawn edge".
          *
-         * The PlanScreen slider starts here, so in normal use this clamp is a no-op and the
-         * value the pilot sees is the clearance actually flown. It stays as a backstop for
-         * mission templates saved before the slider's range was corrected, which can still
-         * hold a value below the floor.
+         * Kept as a named constant rather than dropping the clamp entirely, because the clamp
+         * still has one job: a stored plan carrying a NEGATIVE buffer would otherwise shrink the
+         * obstacle and route spray lines through it. maxOf(buffer, 0.0) turns that into "no
+         * expansion", which is merely useless rather than dangerous.
+         *
+         * This was briefly 3.0, which silently overrode the lower half of the slider's travel.
+         * Keep it equal to the slider's minimum; if one moves, move the other.
          */
-        const val MIN_OBSTACLE_BUFFER_M = 3.0
+        const val MIN_OBSTACLE_BUFFER_M = 0.0
+
+        /**
+         * How far a mitered corner may be pushed out, as a multiple of the buffer.
+         *
+         * A sharp corner's miter distance is buffer / cos(half-angle), which runs to infinity as
+         * the corner closes. Left unbounded, a single near-spike vertex on a hand-drawn obstacle
+         * would fling one point of the ring hundreds of metres across the field and swallow most
+         * of the spray grid. 2.5 caps the corner at a ~47 degree included angle; anything sharper
+         * is simply cut off at that radius, which loses a sliver of clearance at the very tip of
+         * a spike and holds the full buffer everywhere else.
+         */
+        private const val MITER_LIMIT = 2.5
 
         /**
          * The no-fly ring actually held around an obstacle, for map display.
@@ -85,6 +101,57 @@ class GridGenerator {
             Math.toRadians(params.gridAngle.toDouble())
         }
 
+        // ===== THE GRID FRAME =====
+        //
+        // Two axes, both in metres, both measured from `center`:
+        //
+        //   along  — parallel to the spray lines, the direction the drone flies down a line
+        //   across — perpendicular to them, the direction the grid steps from one line to the
+        //            next. It INCREASES with the line index, which is what lets a detour know
+        //            which way is "ahead of the sweep" and therefore not yet sprayed.
+        //
+        // The grid lines below are built as center + t * (cos(gridAngle), sin(gridAngle)) in
+        // (east, north) metres, and stepped by (cos(gridAngle + 90°), sin(gridAngle + 90°)),
+        // so these two projections are exactly the inverse of that construction.
+        //
+        // Segment ordering used to key on `latitude + longitude` instead of `along`. That is
+        // monotonic along a line only when the grid runs somewhere between north-east and
+        // south-west; rotate it into the north-west quadrant and the key runs backwards, so the
+        // pieces of a line split by an obstacle came out in the wrong order — and since the
+        // boustrophedon reverses alternate lines on top of that, the path doubled back on
+        // itself rather than sweeping the field.
+        val cosGrid = cos(gridAngleRad)
+        val sinGrid = sin(gridAngleRad)
+        val metresPerDegLonAtCenter = 111111.0 * cos(Math.toRadians(center.latitude))
+
+        fun alongAxis(p: LatLng): Double {
+            val east = (p.longitude - center.longitude) * metresPerDegLonAtCenter
+            val north = (p.latitude - center.latitude) * 111111.0
+            return east * cosGrid + north * sinGrid
+        }
+
+        fun acrossAxis(p: LatLng): Double {
+            val east = (p.longitude - center.longitude) * metresPerDegLonAtCenter
+            val north = (p.latitude - center.latitude) * 111111.0
+            return -east * sinGrid + north * cosGrid
+        }
+
+        /** Inverse of [alongAxis] / [acrossAxis]: grid-frame metres back to a position. */
+        fun fromGridFrame(along: Double, across: Double): LatLng {
+            val east = along * cosGrid - across * sinGrid
+            val north = along * sinGrid + across * cosGrid
+            return LatLng(
+                center.latitude + north / 111111.0,
+                center.longitude + east / metresPerDegLonAtCenter
+            )
+        }
+
+        // How far the survey area extends across the sweep. A hop around an obstacle goes past
+        // whichever end of it is nearer; these two are what stop it choosing an end that would
+        // take the aircraft outside the field.
+        val fieldAcrossMin = effectivePolygon.minOf { acrossAxis(it) }
+        val fieldAcrossMax = effectivePolygon.maxOf { acrossAxis(it) }
+
         // Calculate the maximum dimension to ensure full coverage
         val maxDimension = max(width, height) * 1.5
 
@@ -96,14 +163,9 @@ class GridGenerator {
 
         // Pre-process obstacles: expand by the buffer the pilot asked for.
         //
-        // This used to be maxOf(obstacleBoundary, 3.0). The slider offered 1..5m, so every
-        // setting from 1.0 to 3.0 — five of its nine positions — produced an identical 3m
-        // grid. Dragging the margin up changed nothing and the number on screen was not the
-        // clearance actually flown, which is what "the obstacle margin is not increasing"
-        // was. The 3m floor is still enforced, but by the slider's own range
-        // (OBSTACLE_BOUNDARY_MIN_M in PlanScreen) so that the displayed value is the truth
-        // and every position moves the grid. Clamped here too: a mission template saved
-        // under the old 1..5m slider can still carry a sub-3m value.
+        // The clamp is to MIN_OBSTACLE_BUFFER_M, which equals the slider's own minimum, so it
+        // is a no-op for anything the slider can produce and every position of the travel
+        // moves the grid. It only catches a stored plan carrying a zero/negative buffer.
         val effectiveBuffer = maxOf(params.obstacleBoundary.toDouble(), MIN_OBSTACLE_BUFFER_M)
         val expandedObstacles = params.obstacles.mapNotNull { obstacle ->
             if (obstacle.size >= 3) {
@@ -117,9 +179,12 @@ class GridGenerator {
             val start: LatLng,
             val end: LatLng,
             val lineIndex: Int,
-            val segmentIndex: Int,
-            // Position of segment relative to obstacles on the line (0 = first/before, 1 = after, etc.)
-            val relativePosition: Int = 0
+            // Position of this piece along its own line: 0 is the piece nearest the line's
+            // start, and an obstacle that cuts the line adds 1, 2, ... after it. This used to
+            // double as a "zone" that the flight order grouped by across the WHOLE field, which
+            // put an untouched full-width line in the same group as the near halves of the
+            // lines beside it. It is now only ever compared within a single line.
+            val segmentIndex: Int
         )
 
         val allSegments = mutableListOf<GridSegment>()
@@ -159,177 +224,223 @@ class GridGenerator {
                     listOf(Pair(start, end))
                 }
 
-                // Add all segments for this line with relative position
                 lineSegments.forEachIndexed { segIdx, segment ->
                     allSegments.add(GridSegment(
                         start = segment.first,
                         end = segment.second,
                         lineIndex = i,
-                        segmentIndex = segIdx,
-                        relativePosition = segIdx  // 0 = before obstacle, 1+ = after obstacle
+                        segmentIndex = segIdx
                     ))
                 }
             }
         }
 
-        // ===== IMPROVED OBSTACLE-AWARE ORDERING =====
+        // ===== FLIGHT ORDER =====
         //
-        // PROBLEM: When transitioning between zones (above/below obstacle), diagonal flight
-        // overlaps already-sprayed lines, causing crop damage.
+        // The field is swept line by line, alternating direction as usual. Where an obstacle
+        // splits a run of lines, that run is flown as TWO PASSES: the half of each line on the
+        // side the aircraft arrives from, a short step around the edge of the obstacle, then the
+        // other half on the way back. The sweep then carries on past the obstacle.
         //
-        // SOLUTION (based on reference image):
-        // 1. Spray Zone 0 (above obstacle) with normal boustrophedon
-        // 2. End Zone 0 at a point NEAR the obstacle edge
-        // 3. Transition along the obstacle boundary (vertical path along edge, no diagonal)
-        // 4. Spray Zone 1 (below obstacle) starting from the same side where Zone 0 ended
-        // 5. Zone 1 uses REVERSED line order so the transition is a short vertical move
+        // What a pilot sees, and it is the same on every field, obstacle and heading:
         //
-        // Key insight: The transition should be a vertical move along the obstacle edge,
-        // not a diagonal flight across already-sprayed lines.
+        //     ... normal sweep, arriving at (say) the top of the field ...
+        //     far halves, working across the obstacle     (pass 1)
+        //     step around the edge of the obstacle
+        //     near halves, working back                   (pass 2)
+        //     ... normal sweep continues past the obstacle ...
+        //
+        // WHICH half comes first is decided by where the aircraft actually is when it reaches
+        // the obstacle, not by a fixed rule. Arrive at the top and the top halves go first;
+        // arrive at the bottom and the bottom halves do. This is the whole point, and getting it
+        // wrong is what the doubled line on the map was: a fixed "near side first" rule meant an
+        // aircraft arriving at the top of the field had to fly the entire length of the field to
+        // reach the start of the near half — a full-length dry leg running a few metres beside
+        // the line it had just sprayed. On a simulated 8-line field with a 3-line obstacle that
+        // one decision is the difference between 213 m and 122 m of dry transit, and between a
+        // longest leg of 79 m and one of 30 m.
+        //
+        // Two rejected alternatives, so they are not re-tried:
+        //
+        //   * Stepping around the obstacle on EVERY line and rejoining the same line. Puts a
+        //     detour in the middle of every affected line; reads as the aircraft repeatedly
+        //     wandering off the pattern.
+        //   * Keying the pass on a segment's index along its own line, across the WHOLE field.
+        //     A line the obstacle did not touch produces one segment and so lands in "pass 1"
+        //     beside the HALVES of the lines it did touch — so pass 1 mixes full-width lines
+        //     from both sides of the obstacle with half lines, and the aircraft crosses the
+        //     entire field to collect what it skipped. The passes here are scoped to a BLOCK, a
+        //     run of consecutive lines the obstacle splits the same way, so lines outside the
+        //     block are never drawn into it.
+        //
+        // Cost of the two-pass shape, stated plainly: after pass 2 the aircraft is back at the
+        // end of the block it entered from, and has to transit across the block to reach the
+        // first line beyond it. That leg runs PERPENDICULAR to the lines, across their ends, so
+        // it does not retrace anything; it is bounded by the width of the obstacle, not the
+        // width of the field (30 m in the simulation above). The sprayer is off for it, since it
+        // sits between an isLineEnd and the next isLineStart and the converter's DO_SPRAYER
+        // stop/start bracket already covers that. It costs flight time, not a double dose.
 
-        // Check if we have actual split segments (obstacles caused line splits)
-        val hasMultipleSegmentsPerLine = allSegments.groupBy { it.lineIndex }.any { it.value.size > 1 }
-        val hasObstacles = params.obstacles.isNotEmpty() && hasMultipleSegmentsPerLine
+        /**
+         * Waypoints that step around whatever blocks the straight run from [a] to [b].
+         *
+         * Used for the hop between the two passes, and for any block-to-block transit that
+         * happens to clip an obstacle. The detour is a rectangular bump: out to a clear
+         * across-offset, along past the obstacle, and the caller's next waypoint steps back in.
+         *
+         * Returns empty when nothing actually blocks the run, which is the common case.
+         */
+        fun detourAround(a: LatLng, b: LatLng): List<LatLng> {
+            val blocking = expandedObstacles.filter { lineIntersectsObstacle(a, b, it) }
+            if (blocking.isEmpty()) return emptyList()
 
-        if (hasObstacles) {
-            // Find max relative position (number of obstacle crossings)
-            val maxRelativePosition = allSegments.maxOfOrNull { it.relativePosition } ?: 0
-
-            // Track the last waypoint added for zone transitions
-            var lastZoneEndPoint: LatLng? = null
-
-            // Process each "zone" separately
-            for (zone in 0..maxRelativePosition) {
-                val zoneSegments = allSegments.filter { it.relativePosition == zone }
-                if (zoneSegments.isEmpty()) continue
-
-                // Get unique line indices in this zone
-                val lineIndicesInZone = zoneSegments.map { it.lineIndex }.distinct()
-
-                // ===== KEY FIX: Zone ordering for smooth transitions =====
-                // Zone 0: Process lines in ascending order (1, 2, 3, ... N)
-                //         Ends at line N (highest index), which is closest to one edge of obstacle
-                // Zone 1: Process lines in DESCENDING order starting from N (N, N-1, N-2, ... 1)
-                //         This ensures the transition from Zone 0 to Zone 1 is a short move
-                //         along the obstacle boundary, not a diagonal across sprayed lines
-                val orderedLineIndices = if (zone == 0) {
-                    lineIndicesInZone.sorted()  // Ascending: 1, 2, 3, ... N
-                } else {
-                    // For subsequent zones, start from where Zone 0 ended
-                    // and process in descending order
-                    lineIndicesInZone.sortedDescending()  // Descending: N, N-1, ... 1
-                }
-
-                // Track starting direction to ensure proper boustrophedon within zone
-                // For Zone 0: even lines go left-to-right, odd lines go right-to-left
-                // For Zone 1: We continue the boustrophedon pattern from where we left off
-                val zoneStartingLineNum = if (zone == 0) 0 else {
-                    // For zone 1+, we want to continue seamlessly
-                    // If zone 0 ended going in one direction, zone 1 should start going the other way
-                    1  // Start with reversed direction for smooth transition
-                }
-
-                // Process lines in this zone with boustrophedon pattern
-                for ((zoneLineNum, lineIdx) in orderedLineIndices.withIndex()) {
-                    val lineSegments = zoneSegments.filter { it.lineIndex == lineIdx }
-
-                    // Alternate direction based on zone-local line number for boustrophedon
-                    val reverseDirection = (zoneStartingLineNum + zoneLineNum) % 2 == 1
-
-                    // Sort segments by position along the line
-                    val sortedSegments = lineSegments.sortedBy { seg ->
-                        seg.start.latitude + seg.start.longitude
-                    }
-                    val orderedSegments = if (reverseDirection) sortedSegments.reversed() else sortedSegments
-
-                    for (segment in orderedSegments) {
-                        // Determine segment direction based on boustrophedon
-                        val (segStart, segEnd) = if (reverseDirection) {
-                            Pair(segment.end, segment.start)
-                        } else {
-                            Pair(segment.start, segment.end)
-                        }
-
-                        // ===== ADD TRANSITION WAYPOINTS AROUND OBSTACLES =====
-                        // When transitioning between zones, add waypoints along obstacle boundary
-                        // to ensure the drone moves vertically along the obstacle edge, not diagonally
-                        if (zone > 0 && zoneLineNum == 0 && waypoints.isNotEmpty() && lastZoneEndPoint != null) {
-                            val transitionWaypoints = calculateBoundaryTransitionPath(
-                                lastZoneEndPoint,
-                                segStart,
-                                expandedObstacles,
-                                gridAngleRad,
-                                effectiveBuffer
-                            )
-
-                            // Add transition waypoints (these follow the obstacle boundary)
-                            for (transitionPoint in transitionWaypoints) {
-                                waypoints.add(GridWaypoint(
-                                    position = transitionPoint,
-                                    altitude = params.altitude,
-                                    speed = if (params.includeSpeedCommands) params.speed else null,
-                                    isLineStart = false,
-                                    isLineEnd = false,
-                                    isTransition = true,  // Mark as transition waypoint
-                                    lineIndex = gridLines.size  // Use next line index
-                                ))
-                            }
-                        }
-
-                        // Add the grid line for visualization
-                        gridLines.add(Pair(segStart, segEnd))
-
-                        // Add waypoints
-                        waypoints.add(GridWaypoint(
-                            position = segStart,
-                            altitude = params.altitude,
-                            speed = if (params.includeSpeedCommands) params.speed else null,
-                            isLineStart = true,
-                            lineIndex = gridLines.size - 1
-                        ))
-
-                        waypoints.add(GridWaypoint(
-                            position = segEnd,
-                            altitude = params.altitude,
-                            speed = if (params.includeSpeedCommands) params.speed else null,
-                            isLineEnd = true,
-                            lineIndex = gridLines.size - 1
-                        ))
-
-                        // Track the last endpoint for zone transition
-                        lastZoneEndPoint = segEnd
-                    }
+            // Across-extent of everything in the way, so one detour clears all of it.
+            var obsAcrossMin = Double.MAX_VALUE
+            var obsAcrossMax = -Double.MAX_VALUE
+            for (obstacle in blocking) {
+                for (vertex in obstacle) {
+                    val c = acrossAxis(vertex)
+                    if (c < obsAcrossMin) obsAcrossMin = c
+                    if (c > obsAcrossMax) obsAcrossMax = c
                 }
             }
-        } else {
-            // No obstacles - use original boustrophedon order
-            val segmentsByLine = allSegments.groupBy { it.lineIndex }
-            val sortedLineIndices = segmentsByLine.keys.sorted()
 
-            var actualLineIndex = 0
-            val processedSegments = mutableSetOf<GridSegment>()
+            // Hop past the end the aircraft is already nearest to, so the hop is short. Ties and
+            // the off-field case both fall to the side that stays inside the survey area.
+            val hereAcross = acrossAxis(a)
+            val forward = obsAcrossMax + effectiveBuffer
+            val backward = obsAcrossMin - effectiveBuffer
+            val preferForward = (obsAcrossMax - hereAcross) <= (hereAcross - obsAcrossMin)
+            val detourAcross = when {
+                preferForward && forward <= fieldAcrossMax -> forward
+                !preferForward && backward >= fieldAcrossMin -> backward
+                forward <= fieldAcrossMax -> forward
+                else -> backward
+            }
 
-            for ((lineNum, lineIdx) in sortedLineIndices.withIndex()) {
-                val lineSegments = segmentsByLine[lineIdx] ?: continue
+            return listOf(
+                fromGridFrame(alongAxis(a), detourAcross),
+                fromGridFrame(alongAxis(b), detourAcross)
+            )
+        }
 
-                // Sort segments by position along the line
-                val sortedSegments = lineSegments.sortedBy { seg ->
-                    seg.start.latitude + seg.start.longitude
-                }
+        // ═══ Blocks ═══
+        //
+        // A block is a maximal run of CONSECUTIVE line indices that the obstacles cut into the
+        // same number of pieces. A line the obstacles miss has one piece and forms (with its
+        // neighbours) a one-pass block; a run of lines cut in two forms a two-pass block. The
+        // consecutiveness test matters as much as the piece count: two runs of unsplit lines on
+        // opposite sides of an obstacle must not merge into one block just because they happen
+        // to agree about how many pieces they have.
+        val segmentsByLine = allSegments.groupBy { it.lineIndex }
+        val piecesPerLine = segmentsByLine.mapValues { (_, segs) ->
+            segs.sortedBy { seg -> alongAxis(seg.start) }
+        }
 
-                // Reverse direction for odd lines (boustrophedon pattern)
-                val reverseDirection = lineNum % 2 == 1
-                val orderedSegments = if (reverseDirection) sortedSegments.reversed() else sortedSegments
+        val blocks = mutableListOf<MutableList<Int>>()
+        for (lineIdx in piecesPerLine.keys.sorted()) {
+            val previous = blocks.lastOrNull()?.lastOrNull()
+            val continuesBlock = previous != null &&
+                    lineIdx == previous + 1 &&
+                    piecesPerLine.getValue(previous).size == piecesPerLine.getValue(lineIdx).size
+            if (continuesBlock) {
+                blocks.last().add(lineIdx)
+            } else {
+                blocks.add(mutableListOf(lineIdx))
+            }
+        }
 
-                for (segment in orderedSegments) {
-                    if (segment in processedSegments) continue
-                    processedSegments.add(segment)
+        var actualLineIndex = 0
 
-                    // Determine segment direction
-                    val (segStart, segEnd) = if (reverseDirection) {
-                        Pair(segment.end, segment.start)
-                    } else {
+        // Where the aircraft is, at the end of the last piece flown. Null before the first one.
+        //
+        // Everything below is driven off this rather than off a parity counter. The previous
+        // version tracked a reverseDirection flag and flipped it once per line, which is a fine
+        // model of a plain boustrophedon and a bad one the moment an obstacle appears: the flag
+        // said "fly this piece backwards" without reference to where the aircraft actually was.
+        // That is what put a full-length dry leg right beside a line that had just been sprayed.
+        var currentPosition: LatLng? = null
+
+        /** Distance to whichever end of [segment] is nearer to [from]. */
+        fun nearestEndDistance(from: LatLng, segment: GridSegment): Double =
+            minOf(
+                GridUtils.haversineDistance(from, segment.start),
+                GridUtils.haversineDistance(from, segment.end)
+            )
+
+        for (block in blocks) {
+            val passCount = piecesPerLine.getValue(block.first()).size
+
+            // ═══ Enter the block at the corner the aircraft has actually reached ═══
+            //
+            // Two choices, both settled by "which is nearer": which END of the block to start
+            // from, and which STRIP of the obstacle to spray first. Getting the second one wrong
+            // is what the doubled line was. Arriving at the top of the field and then being told
+            // to start on the near side of the obstacle meant flying the whole length of the
+            // field to get there — alongside the line just sprayed, which is exactly what it
+            // looked like on the map.
+            //
+            // So: arrive at the top, spray the far halves first and the near halves on the way
+            // back. Arrive at the bottom, spray the near halves first. Either way the aircraft
+            // carries straight on from where it already is, and the crossover between the two
+            // strips happens at the obstacle, where it is a short step around the edge.
+            val here = currentPosition
+            val enterAscending = if (here == null) true else {
+                val toFirst = piecesPerLine.getValue(block.first()).minOf { nearestEndDistance(here, it) }
+                val toLast = piecesPerLine.getValue(block.last()).minOf { nearestEndDistance(here, it) }
+                toFirst <= toLast
+            }
+            val entryLine = if (enterAscending) block.first() else block.last()
+
+            // Start on an OUTER strip, never a middle one, so the passes then run through the
+            // strips in order and each crossover is to a neighbour across a single obstacle.
+            // (More than two strips only happens when two obstacles cut the same line.)
+            val entryPieces = piecesPerLine.getValue(entryLine)
+            val startAtLastPass = here != null && passCount > 1 &&
+                    nearestEndDistance(here, entryPieces.last()) <
+                    nearestEndDistance(here, entryPieces.first())
+            val passOrder = if (startAtLastPass) {
+                (passCount - 1 downTo 0).toList()
+            } else {
+                (0 until passCount).toList()
+            }
+
+            var ascending = enterAscending
+
+            for (pass in passOrder) {
+                val lineOrder = if (ascending) block else block.asReversed()
+
+                for (lineIdx in lineOrder) {
+                    // Safe: every line in a block has the same piece count, by construction.
+                    val segment = piecesPerLine.getValue(lineIdx)[pass]
+
+                    // Fly the piece from whichever end the aircraft is nearer to. On a field
+                    // with no obstacles this reproduces the ordinary boustrophedon exactly —
+                    // the far end of the line you just flew is always nearer to the far end of
+                    // the next one — so the plain case is unchanged, and the obstacle case
+                    // stops needing a special rule.
+                    val from = currentPosition
+                    val (segStart, segEnd) = if (from == null ||
+                        GridUtils.haversineDistance(from, segment.start) <=
+                        GridUtils.haversineDistance(from, segment.end)
+                    ) {
                         Pair(segment.start, segment.end)
+                    } else {
+                        Pair(segment.end, segment.start)
+                    }
+
+                    currentPosition?.let { previousEnd ->
+                        for (detourPoint in detourAround(previousEnd, segStart)) {
+                            waypoints.add(GridWaypoint(
+                                position = detourPoint,
+                                altitude = params.altitude,
+                                speed = if (params.includeSpeedCommands) params.speed else null,
+                                isLineStart = false,
+                                isLineEnd = false,
+                                isTransition = true,
+                                lineIndex = actualLineIndex
+                            ))
+                        }
                     }
 
                     // Add the grid line for visualization
@@ -352,8 +463,11 @@ class GridGenerator {
                         lineIndex = actualLineIndex
                     ))
 
+                    currentPosition = segEnd
                     actualLineIndex++
                 }
+
+                ascending = !ascending
             }
         }
 
@@ -416,11 +530,21 @@ class GridGenerator {
         val numSamples = 1000
         val segments = mutableListOf<Pair<LatLng, LatLng>>()
 
-        // Only the expanded polygons need checking. Each one strictly contains its original
-        // (expandPolygonEdgeBased pushes every edge outward by a positive buffer), so testing
-        // the originals as well can never exclude a point the expanded test kept — it just
-        // doubled the point-in-polygon work on every one of the 1000 samples below.
-        val allObstaclesToCheck = expandedObstacles.ifEmpty { originalObstacles }
+        // Check the originals AS WELL as the expanded rings, not just the expanded ones.
+        //
+        // The tempting argument is that an expanded polygon strictly contains its original, so
+        // the originals are redundant. That only holds if expandPolygonEdgeBased is guaranteed
+        // to produce a containing, non-self-intersecting ring — and offsetting a polygon is
+        // exactly the operation that stops being well behaved on concave corners and short
+        // edges, where an offset ring can fold through itself. When that happens the fold
+        // reverses the inside/outside test over part of the shape and a spray line is planned
+        // straight through the real obstacle. Testing the union is unconditionally safe: it can
+        // only ever mark MORE of the line unsafe, never less.
+        //
+        // The cost is one extra point-in-polygon per obstacle per sample. That is planner-side
+        // work on a few polygons, paid once when the grid is generated, and is not worth
+        // trading a "the drone flew into the tree" failure mode for.
+        val allObstaclesToCheck = expandedObstacles + originalObstacles
 
         if (allObstaclesToCheck.isEmpty()) {
             return listOf(Pair(start, end))
@@ -572,92 +696,117 @@ class GridGenerator {
     }
 
     /**
-     * Expand a polygon outward by buffer distance
+     * Expand a polygon outward by [bufferMeters], returning the offset ring.
+     *
+     * Worked in a local metric frame, NOT in raw degrees. The previous version built its edge
+     * normals as `(-dLon, dLat)` straight from lat/lon differences, which is only perpendicular
+     * on the ground where one degree of longitude equals one degree of latitude — i.e. at the
+     * equator. It also decided outward-vs-inward once, from the midpoint of a single edge's
+     * distance to the centroid, and then applied that one decision to BOTH of the vertex's
+     * normals. On any polygon that is not a small convex blob near the equator, some vertices
+     * were pushed inward instead of outward; the ring folded through itself, the inside/outside
+     * test flipped over part of the shape, and spray lines were planned through the obstacle.
+     *
+     * Here: project to metres, normalise the winding so "outward" is a property of the ring
+     * rather than a per-vertex guess, offset each edge along its true outward normal, and miter
+     * the corners.
+     *
+     * Note this is a miter offset, not a full polygon-offset with self-intersection removal, so
+     * a deeply concave shape can still fold on itself at a narrow neck. Callers must not treat
+     * the result as a guaranteed superset of the input — splitLineAroundObstacles deliberately
+     * tests the original polygons alongside these rings for exactly that reason.
      */
     private fun expandPolygonEdgeBased(polygon: List<LatLng>, bufferMeters: Double): List<LatLng> {
         if (polygon.size < 3 || bufferMeters <= 0) return polygon
 
-        val n = polygon.size
-        val expanded = mutableListOf<LatLng>()
+        // Local east/north frame about the polygon's mean position. Over an obstacle-sized
+        // shape the flat-earth approximation is far below the metre we care about here.
+        val refLat = polygon.map { it.latitude }.average()
+        val refLon = polygon.map { it.longitude }.average()
+        val metresPerDegLat = 111111.0
+        val metresPerDegLon = 111111.0 * cos(Math.toRadians(refLat))
+        if (abs(metresPerDegLon) < 1e-6) return polygon  // at the poles; nothing sensible to do
 
-        val centroidLat = polygon.map { it.latitude }.average()
-        val centroidLon = polygon.map { it.longitude }.average()
+        // Project, dropping consecutive duplicate vertices. A zero-length edge has no direction,
+        // so it has no normal, and leaving one in poisons the miter at both its ends.
+        val ring = mutableListOf<Pair<Double, Double>>()
+        for (p in polygon) {
+            val e = (p.longitude - refLon) * metresPerDegLon
+            val n = (p.latitude - refLat) * metresPerDegLat
+            val last = ring.lastOrNull()
+            if (last == null || hypot(e - last.first, n - last.second) > 1e-6) {
+                ring.add(Pair(e, n))
+            }
+        }
+        // The ring is implicitly closed, so a repeated first/last vertex is also a duplicate.
+        if (ring.size >= 2) {
+            val f = ring.first()
+            val l = ring.last()
+            if (hypot(f.first - l.first, f.second - l.second) <= 1e-6) ring.removeAt(ring.size - 1)
+        }
+        if (ring.size < 3) return polygon
 
+        // Normalise the winding to counter-clockwise. With a known winding, the outward normal
+        // of the edge from A to B is simply its right-hand normal — no centroid heuristic, and
+        // no chance of one vertex disagreeing with the next about which way is out.
+        var twiceArea = 0.0
+        for (i in ring.indices) {
+            val (x1, y1) = ring[i]
+            val (x2, y2) = ring[(i + 1) % ring.size]
+            twiceArea += x1 * y2 - x2 * y1
+        }
+        if (abs(twiceArea) < 1e-9) return polygon  // degenerate: collinear vertices, no interior
+        val ccw = if (twiceArea > 0) ring.toList() else ring.reversed()
+
+        val n = ccw.size
+
+        // Outward unit normal of edge i (from vertex i to vertex i+1).
+        val normals = ArrayList<Pair<Double, Double>>(n)
         for (i in 0 until n) {
-            val prev = polygon[(i - 1 + n) % n]
-            val curr = polygon[i]
-            val next = polygon[(i + 1) % n]
+            val (x1, y1) = ccw[i]
+            val (x2, y2) = ccw[(i + 1) % n]
+            val dx = x2 - x1
+            val dy = y2 - y1
+            val len = hypot(dx, dy)
+            // Right-hand normal of a CCW ring points away from the interior.
+            normals.add(Pair(dy / len, -dx / len))
+        }
 
-            val bufferLatDeg = bufferMeters / 111111.0
-            val bufferLonDeg = bufferMeters / (111111.0 * cos(Math.toRadians(curr.latitude)))
+        // Miter each vertex: vertex i is shared by edge i-1 and edge i, so it moves along the
+        // bisector of their two outward normals, far enough that BOTH offset edges pass through
+        // it. That distance is buffer / cos(half-angle), which grows without bound as the corner
+        // gets sharper — hence the limit below.
+        val expanded = ArrayList<LatLng>(n)
+        for (i in 0 until n) {
+            val (px, py) = normals[(i - 1 + n) % n]
+            val (cx, cy) = normals[i]
 
-            val edge1Lat = curr.latitude - prev.latitude
-            val edge1Lon = curr.longitude - prev.longitude
-            val edge2Lat = next.latitude - curr.latitude
-            val edge2Lon = next.longitude - curr.longitude
+            val bx = px + cx
+            val by = py + cy
+            val blen = hypot(bx, by)
 
-            val len1 = sqrt(edge1Lat * edge1Lat + edge1Lon * edge1Lon)
-            val len2 = sqrt(edge2Lat * edge2Lat + edge2Lon * edge2Lon)
-
-            if (len1 < 1e-10 || len2 < 1e-10) {
-                val dirLat = curr.latitude - centroidLat
-                val dirLon = curr.longitude - centroidLon
-                val dirLen = sqrt(dirLat * dirLat + dirLon * dirLon)
-                if (dirLen > 1e-10) {
-                    expanded.add(LatLng(
-                        curr.latitude + (dirLat / dirLen) * bufferLatDeg,
-                        curr.longitude + (dirLon / dirLen) * bufferLonDeg
-                    ))
-                } else {
-                    expanded.add(curr)
-                }
-                continue
-            }
-
-            val n1Lat = edge1Lat / len1
-            val n1Lon = edge1Lon / len1
-            val n2Lat = edge2Lat / len2
-            val n2Lon = edge2Lon / len2
-
-            var perp1Lat = -n1Lon
-            var perp1Lon = n1Lat
-            var perp2Lat = -n2Lon
-            var perp2Lon = n2Lat
-
-            val midEdge1Lat = (prev.latitude + curr.latitude) / 2
-            val midEdge1Lon = (prev.longitude + curr.longitude) / 2
-            val testPointLat = midEdge1Lat + perp1Lat * 0.0001
-            val testPointLon = midEdge1Lon + perp1Lon * 0.0001
-
-            val distOriginal = sqrt((midEdge1Lat - centroidLat).pow(2) + (midEdge1Lon - centroidLon).pow(2))
-            val distTest = sqrt((testPointLat - centroidLat).pow(2) + (testPointLon - centroidLon).pow(2))
-
-            if (distTest < distOriginal) {
-                perp1Lat = -perp1Lat
-                perp1Lon = -perp1Lon
-                perp2Lat = -perp2Lat
-                perp2Lon = -perp2Lon
-            }
-
-            var avgLat = perp1Lat + perp2Lat
-            var avgLon = perp1Lon + perp2Lon
-            val avgLen = sqrt(avgLat * avgLat + avgLon * avgLon)
-
-            if (avgLen < 1e-10) {
-                avgLat = perp1Lat
-                avgLon = perp1Lon
+            val (ux, uy) = if (blen < 1e-9) {
+                // The two edges double back on each other (a spike). There is no bisector;
+                // push straight out along the outgoing edge's normal.
+                Pair(cx, cy)
             } else {
-                avgLat /= avgLen
-                avgLon /= avgLen
+                Pair(bx / blen, by / blen)
             }
 
-            val dot = perp1Lat * avgLat + perp1Lon * avgLon
-            val offsetMult = if (dot > 0.3) minOf(1.0 / dot, 2.5) else 2.5
+            // cos(half-angle) between the bisector and either normal.
+            val cosHalf = ux * px + uy * py
+            val miterMult = if (cosHalf > 1.0 / MITER_LIMIT) 1.0 / cosHalf else MITER_LIMIT
+            val dist = bufferMeters * miterMult
 
-            val newLat = curr.latitude + avgLat * bufferLatDeg * offsetMult
-            val newLon = curr.longitude + avgLon * bufferLonDeg * offsetMult
-
-            expanded.add(LatLng(newLat, newLon))
+            val (vx, vy) = ccw[i]
+            val outE = vx + ux * dist
+            val outN = vy + uy * dist
+            expanded.add(
+                LatLng(
+                    refLat + outN / metresPerDegLat,
+                    refLon + outE / metresPerDegLon
+                )
+            )
         }
 
         return expanded
@@ -880,123 +1029,9 @@ class GridGenerator {
                (pj.longitude - pi.longitude) * (pk.latitude - pi.latitude)
     }
 
-    /**
-     * Calculate boundary transition path for moving from one zone to another.
-     *
-     * This creates waypoints that follow the obstacle EDGE vertically,
-     * preventing diagonal flight paths that would cross already-sprayed lines.
-     *
-     * Strategy (based on reference image):
-     * 1. Find which obstacle lies between start and end points
-     * 2. Determine the closest edge of the obstacle (left or right side)
-     * 3. Create waypoints that move VERTICALLY along that edge
-     * 4. This ensures the drone doesn't fly diagonally across sprayed lines
-     *
-     * The legs are built in the grid's own rotated frame, not in raw lat/lon.
-     *
-     * The previous version took the obstacle's min/max *longitude* and emitted
-     * LatLng(start.latitude, edgeLon) then LatLng(end.latitude, edgeLon) — a due east/west
-     * leg followed by a due north/south one. That is only correct for a grid running exactly
-     * north-south. At any other gridAngle the transition left the spray line at an arbitrary
-     * angle and flew out to a point derived from a lat/lon bounding box, which is what
-     * "the drone deviates the path by a lot near the obstacle" was. Two smaller faults rode
-     * along: the side offset was a hardcoded 0.00001 degrees (~1.1m, and shrinking with
-     * latitude) rather than the buffer the pilot set, and the bounding box of a rotated
-     * obstacle sits well outside its real edge, widening the detour further.
-     *
-     * Now: project into along-line/across-line axes, pick the side by the real polygon
-     * vertices, and offset by a true metric distance.
-     *
-     * @param start The ending point of previous zone (last waypoint before transition)
-     * @param end The starting point of next zone (first waypoint after transition)
-     * @param expandedObstacles The obstacle polygons expanded by buffer
-     * @param gridAngleRad Grid heading in radians; the transition runs parallel to this
-     * @param bufferMeters Clearance held from the expanded polygon, in metres
-     * @return List of intermediate waypoints that follow the obstacle boundary
-     */
-    private fun calculateBoundaryTransitionPath(
-        start: LatLng,
-        end: LatLng,
-        expandedObstacles: List<List<LatLng>>,
-        gridAngleRad: Double,
-        bufferMeters: Double
-    ): List<LatLng> {
-        if (expandedObstacles.isEmpty()) return emptyList()
-
-        val transitionPoints = mutableListOf<LatLng>()
-
-        // Find which obstacle is between start and end
-        var relevantObstacle: List<LatLng>? = null
-        for (obstacle in expandedObstacles) {
-            if (obstacle.size < 3) continue
-            // Check if direct path from start to end would cross this obstacle
-            if (lineIntersectsObstacle(start, end, obstacle)) {
-                relevantObstacle = obstacle
-                break
-            }
-        }
-
-        if (relevantObstacle == null || relevantObstacle.size < 3) {
-            return emptyList()
-        }
-
-        // Work in the grid's own frame. `along` runs parallel to the spray lines, `across`
-        // runs perpendicular to them — the direction the grid steps between lines. Using the
-        // origin below keeps the numbers small; only differences matter.
-        val origin = start
-        val cosA = cos(gridAngleRad)
-        val sinA = sin(gridAngleRad)
-
-        // Metres east/north of origin, then rotated into (along, across).
-        fun project(p: LatLng): Pair<Double, Double> {
-            val east = (p.longitude - origin.longitude) *
-                    (111111.0 * cos(Math.toRadians(origin.latitude)))
-            val north = (p.latitude - origin.latitude) * 111111.0
-            return Pair(east * cosA + north * sinA, -east * sinA + north * cosA)
-        }
-
-        // Inverse: (along, across) in metres back to a LatLng.
-        fun unproject(along: Double, across: Double): LatLng {
-            val east = along * cosA - across * sinA
-            val north = along * sinA + across * cosA
-            return GridUtils.moveLatLng(origin, east, north)
-        }
-
-        // start projects to (0,0) by construction, since it is the origin.
-        val startAlong = 0.0
-        val startAcross = 0.0
-        val (endAlong, endAcross) = project(end)
-
-        // Extent of the real polygon vertices along the spray-line axis — not a lat/lon
-        // bounding box, so a rotated obstacle does not inflate the detour.
-        val projected = relevantObstacle.map { project(it) }
-        val obsMinAlong = projected.minOf { it.first }
-        val obsMaxAlong = projected.maxOf { it.first }
-
-        // Pass the obstacle on whichever end is nearer, measured along the spray line.
-        // Going "off the near end" is always the shorter way round.
-        val distPastMin = max(startAlong, endAlong) - obsMinAlong
-        val distPastMax = obsMaxAlong - min(startAlong, endAlong)
-        val useMinSide = distPastMin <= distPastMax
-
-        // Clear the polygon by the pilot's buffer, held perpendicular to the obstacle edge
-        // in real metres rather than a fixed number of degrees.
-        val edgeAlong = if (useMinSide) obsMinAlong - bufferMeters else obsMaxAlong + bufferMeters
-
-        // Leg 1: run along the current spray line to clear the obstacle end.
-        val corner1 = unproject(edgeAlong, startAcross)
-        // Leg 2: step across to the next line's offset, parallel to the obstacle edge.
-        val corner2 = unproject(edgeAlong, endAcross)
-
-        // Skip degenerate legs: if the drone is already past the obstacle end, or already on
-        // the target line, the corner adds nothing but a stutter in the path.
-        if (GridUtils.haversineDistance(start, corner1) > 1.0) {
-            transitionPoints.add(corner1)
-        }
-        if (GridUtils.haversineDistance(corner1, corner2) > 1.0) {
-            transitionPoints.add(corner2)
-        }
-
-        return transitionPoints
-    }
+    // calculateBoundaryTransitionPath used to live here. It routed the drone around the END of
+    // an obstacle when the old zone scheme moved it from the near band to the far band. The
+    // flight order no longer has bands, so there is no such move to make: a line interrupted by
+    // an obstacle is now stepped around and resumed in place, by detourAround inside
+    // generateGridSurvey, which is the only obstacle routing left.
 }

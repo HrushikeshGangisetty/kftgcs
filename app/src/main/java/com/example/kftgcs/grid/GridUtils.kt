@@ -181,6 +181,38 @@ object GridUtils {
     const val SQ_METERS_PER_ACRE = 4046.856
 
     /**
+     * Area of a polygon, in whichever unit is actually readable at that size.
+     *
+     * [calculateAndFormatPolygonArea] always reports acres, which is right for a field and
+     * useless for an obstacle: a 6 m by 7 m shed is "0.01 acres", and so is a 3 m by 3 m pole
+     * base. Below a tenth of an acre this reports square metres instead, where those two read
+     * as 42 m² and 9 m².
+     *
+     * The threshold is deliberately not at 1 acre. Between 0.1 and 1 acre both units are
+     * legible, and switching at 0.1 keeps the common case — a whole field — in acres.
+     *
+     * @return e.g. "42 m²", "150 m²" or "0.37 acres"; "0 m²" for a degenerate polygon.
+     */
+    fun formatAreaCompact(polygon: List<LatLng>): String {
+        if (polygon.size < 3) return "0 m²"
+
+        val areaSqMeters = abs(SphericalUtil.computeArea(polygon))
+        val areaAcres = areaSqMeters / SQ_METERS_PER_ACRE
+
+        return if (areaAcres < 0.1) {
+            // Whole metres below 100 m² would round a small obstacle to nothing useful, so
+            // keep one decimal until the number is big enough not to need it.
+            if (areaSqMeters < 100) {
+                String.format(Locale.US, "%.1f m²", areaSqMeters)
+            } else {
+                String.format(Locale.US, "%.0f m²", areaSqMeters)
+            }
+        } else {
+            String.format(Locale.US, "%.2f acres", areaAcres)
+        }
+    }
+
+    /**
      * Geodesic area of a plot polygon in acres. Numeric counterpart of
      * [calculateAndFormatPolygonArea], for use in flight/telemetry math.
      * @return acres, or 0.0 for a degenerate polygon (< 3 points).

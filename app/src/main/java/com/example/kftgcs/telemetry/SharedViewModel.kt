@@ -4891,6 +4891,203 @@ class SharedViewModel : ViewModel() {
     }
 
     /**
+     * What [prepareResumeMission] did. [failureReason] is written for a pilot, not a log.
+     */
+    private data class ResumePrepResult(
+        val success: Boolean,
+        val failureReason: String? = null,
+        val itemCount: Int = 0,
+        /** The index actually resumed from. Callers report it; -1 when preparation failed. */
+        val resumeSeq: Int = -1
+    )
+
+    /**
+     * Build the resumed mission and put it on the flight controller.
+     *
+     * THE one implementation. There used to be four — processResumePoint,
+     * confirmAddResumeHere, resumeMissionFromManualPoint and resumeMissionComplete each carried
+     * their own copy of read-mission, filter, resequence, validate, upload, set-index. They
+     * drifted, because nothing kept them together: a fix went into whichever copy the bug had
+     * been reported against, and the other three kept the old behaviour. That is the mechanism
+     * behind "we fixed resume and it broke again" — resume was fixed, for one of the four
+     * buttons, and the pilot pressed a different one.
+     *
+     * Concretely, before this was extracted, only processResumePoint had the cached-mission
+     * fast path, only it retried a failed download, and only it refused to act on an unknown
+     * mission index. The other three would happily build a resume against a mission they had
+     * failed to read properly.
+     *
+     * Callers keep their own UI: popups, progress text, notifications, whether to engage AUTO
+     * afterwards. What they must NOT keep is their own copy of the protocol sequence below.
+     *
+     * @param resumeSeq  mission index to resume from. [MISSION_PROGRESS_UNKNOWN] is rejected.
+     * @param resumeLocation where the drone actually paused, inserted as the transit waypoint.
+     * @param onProgress optional pilot-facing progress text.
+     */
+    private suspend fun prepareResumeMission(
+        resumeSeq: Int,
+        resumeLocation: LatLng?,
+        onProgress: (String) -> Unit = {}
+    ): ResumePrepResult {
+        // Checked before the download too, so an unknown index costs nothing. selectResumeSeq
+        // below re-checks, because the manual-point caller cannot know its index until the
+        // mission is in hand.
+        if (resumeSeq == MISSION_PROGRESS_UNKNOWN || resumeSeq < 0) {
+            LogUtils.e("ResumeMission", "Refusing to resume: mission progress unknown (seq=$resumeSeq)")
+            return ResumePrepResult(false, "the drone has not reported its mission progress yet")
+        }
+        return prepareResumeMission(resumeLocation, onProgress) { resumeSeq }
+    }
+
+    /**
+     * As [prepareResumeMission], but the resume index is chosen FROM the mission once it has
+     * been read back.
+     *
+     * Resuming from a point dropped on the map needs the mission in hand to work out which
+     * segment the pin falls on. Passing a selector keeps that one caller on the same single
+     * implementation instead of giving it a private copy of the download — which is exactly how
+     * four copies of this sequence came to exist.
+     */
+    private suspend fun prepareResumeMission(
+        resumeLocation: LatLng?,
+        onProgress: (String) -> Unit = {},
+        selectResumeSeq: (List<MissionItemInt>) -> Int
+    ): ResumePrepResult {
+        onProgress("Checking connection...")
+        if (!_telemetryState.value.connected) {
+            return ResumePrepResult(false, "not connected to the flight controller")
+        }
+
+        // ═══ Read the mission the FC is holding ═══
+        //
+        // Fast path: reuse the mission this app uploaded, when the FC's own item count agrees
+        // with the cache. A full download costs a request and a reply per item and dominates
+        // the time a resume takes; the count probe is one round trip.
+        //
+        // Trusted ONLY on an exact count match. Everything downstream reasons by sequence
+        // number, so resuming against a mission the FC is not actually holding is precisely how
+        // the drone ends up on the wrong line. The cache is cleared on disarm-clear, on Clear
+        // Mission and on every failed upload, and is only ever written together with
+        // lastUploadedCount, so a non-empty cache whose size matches the FC is the same mission.
+        //
+        // Any disagreement, any unanswered probe, any empty cache — fall through to the real
+        // download. This is an optimisation, never a source of truth.
+        onProgress("Retrieving mission from FC...")
+        val cached = lastUploadedMissionItems
+        var allWaypoints: List<MissionItemInt>? = null
+
+        if (cached.isNotEmpty() && cached.size == lastUploadedCount) {
+            val fcCount = repo?.getMissionCountForCacheCheck()
+            if (fcCount == cached.size) {
+                LogUtils.i("ResumeMission", "FC reports $fcCount items, matching the cached mission — skipping the download")
+                allWaypoints = cached
+            } else {
+                LogUtils.i("ResumeMission", "Cached mission (${cached.size}) does not match the FC (${fcCount ?: "no answer"}) — downloading")
+            }
+        }
+
+        if (allWaypoints == null) {
+            // Retried: this is the most fragile step (a full mission download over a link also
+            // carrying video and telemetry) and it is the one whose failure used to be silent.
+            var downloaded = repo?.getAllWaypoints()
+            if (downloaded.isNullOrEmpty()) {
+                LogUtils.w("ResumeMission", "Mission download returned nothing — retrying once")
+                delay(1000)
+                downloaded = repo?.getAllWaypoints()
+            }
+            allWaypoints = downloaded
+        }
+
+        if (allWaypoints.isNullOrEmpty()) {
+            return ResumePrepResult(false, "could not read the mission back from the drone")
+        }
+        LogUtils.i("ResumeMission", "Retrieved ${allWaypoints.size} waypoints from FC")
+
+        // ═══ Which index are we resuming from? ═══
+        //
+        // A resume against an unknown index is worse than no resume at all: everything below
+        // reasons by sequence number, so a bad seq produces a confident, WRONG mission and the
+        // drone re-flies a line it has already sprayed, or skips one it has not. The FC reports
+        // progress within a second or so of AUTO starting; a pilot told "not ready yet" can wait
+        // for that. Guarded here so no entry point can skip the check.
+        val resumeSeq = selectResumeSeq(allWaypoints)
+        if (resumeSeq == MISSION_PROGRESS_UNKNOWN || resumeSeq < 0) {
+            LogUtils.e("ResumeMission", "Refusing to resume: mission progress unknown (seq=$resumeSeq)")
+            return ResumePrepResult(false, "the drone has not reported its mission progress yet")
+        }
+
+        // ═══ Cut the mission down to what is left, keeping the pause point ═══
+        onProgress("Filtering waypoints from resume point...")
+        val filtered = repo?.filterWaypointsForResume(
+            allWaypoints,
+            resumeSeq,
+            resumeLatitude = resumeLocation?.latitude,
+            resumeLongitude = resumeLocation?.longitude,
+            restoreSpray = _sprayWasActiveBeforePause
+        )
+        if (filtered.isNullOrEmpty()) {
+            return ResumePrepResult(false, "no waypoints left after the resume point")
+        }
+        LogUtils.i("ResumeMission", "Filtered to ${filtered.size} waypoints")
+
+        onProgress("Resequencing waypoints...")
+        val resequenced = repo?.resequenceWaypoints(filtered)
+        if (resequenced.isNullOrEmpty()) {
+            return ResumePrepResult(false, "could not renumber the resumed mission")
+        }
+
+        // The FC rejects a mission whose seqs are not 0..n-1, and it rejects it mid-transfer,
+        // after the clear has already wiped what was there. Catch it here instead.
+        val sequences = resequenced.map { it.seq.toInt() }
+        if (sequences != resequenced.indices.toList()) {
+            LogUtils.e("ResumeMission", "Invalid sequence numbers: $sequences")
+            return ResumePrepResult(false, "the resumed mission was numbered wrongly")
+        }
+        LogUtils.i("ResumeMission", "Resequenced and validated: ${resequenced.size} waypoints")
+
+        // ═══ Upload ═══
+        //
+        // Short settle first. getAllWaypoints closes its download with a MISSION_ACK, but give
+        // any item the FC had already put on the wire time to drain before the upload's
+        // MISSION_CLEAR_ALL starts waiting on an ack of its own.
+        delay(300)
+        onProgress("Uploading modified mission to FC...")
+        val uploadSuccess = repo?.uploadMissionWithAck(resequenced) ?: false
+        if (!uploadSuccess) {
+            return ResumePrepResult(false, "the drone rejected the resumed mission")
+        }
+        LogUtils.i("ResumeMission", "Modified mission uploaded to FC")
+
+        // Read the count back. Advisory only — the upload's own ack is the contract — but a
+        // mismatch here is the earliest visible sign that the FC did not commit what it acked.
+        delay(500)
+        val verifyCount = repo?.getMissionCount()
+        if (verifyCount != null && verifyCount != resequenced.size) {
+            LogUtils.w("ResumeMission", "FC reports $verifyCount waypoints but ${resequenced.size} were uploaded")
+        }
+
+        // ═══ Point the FC at the inserted transit waypoint ═══
+        //
+        // Not fatal. onModeChangedToAuto re-asserts the index through resumeMission() and
+        // refuses to engage AUTO unless it is confirmed, so a drop here is recoverable. Worth a
+        // warning though: it usually means the link is congested.
+        onProgress("Setting current waypoint...")
+        val setWpResult = repo?.setCurrentWaypoint(RESUME_TRANSIT_WAYPOINT_SEQ) ?: false
+        if (!setWpResult) {
+            LogUtils.w("ResumeMission", "FC did not confirm the mission index; will be re-asserted when AUTO is engaged")
+        }
+
+        // The FC now holds this mission, so the cache must describe it — including for the next
+        // resume's fast path, which compares against exactly these two fields.
+        _missionUploaded.value = true
+        _missionLoadedOnFc.value = true
+        lastUploadedCount = resequenced.size
+        lastUploadedMissionItems = resequenced.toList()
+
+        return ResumePrepResult(true, itemCount = resequenced.size, resumeSeq = resumeSeq)
+    }
+
+    /**
      * Process the resume point - retrieves and uploads modified mission
      * This runs in the background after user confirms
      *
@@ -4917,155 +5114,24 @@ class SharedViewModel : ViewModel() {
      */
     private fun processResumePoint(waypointNumber: Int) {
         viewModelScope.launch {
-            LogUtils.i("SharedVM", "═══════════════════════════════════════")
-            LogUtils.i("SharedVM", "=== AUTO PROCESSING RESUME POINT (BACKGROUND) ===")
-            LogUtils.i("SharedVM", "Resume waypoint: $waypointNumber")
-
-            // Get the resume location (where drone was paused)
             val resumeLocation = effectiveResumeLocation()
-            LogUtils.i("SharedVM", "Resume location: ${resumeLocation?.latitude}, ${resumeLocation?.longitude}")
-            LogUtils.i("SharedVM", "═══════════════════════════════════════")
+            LogUtils.i("SharedVM", "=== AUTO PROCESSING RESUME POINT (BACKGROUND) ===")
+            LogUtils.i("SharedVM", "Resume waypoint: $waypointNumber, location: ${resumeLocation?.latitude}, ${resumeLocation?.longitude}")
 
             _resumePreparationFailed.value = false
             _resumePreparationInProgress.value = true
 
             try {
-                // Step 1: Check connection
-                if (!_telemetryState.value.connected) {
-                    reportResumePreparationFailed("not connected to the flight controller")
+                val result = prepareResumeMission(waypointNumber, resumeLocation)
+                if (!result.success) {
+                    reportResumePreparationFailed(result.failureReason ?: "unexpected error")
                     return@launch
                 }
 
-                // Step 2: Get current mission from FC (silent - no progress updates)
-                //
-                // Fast path: reuse the mission the GCS itself put on the FC.
-                //
-                // A full download is one request and one timeout window per item, so on a big
-                // spray grid it dominates the 30-40 s a resume took — and in the common case
-                // it re-reads, item by item, a mission this app uploaded and still holds in
-                // lastUploadedMissionItems.
-                //
-                // Trusted ONLY when the FC's own item count agrees with the cache, which is a
-                // single round trip to check. That guard matters: every consumer downstream
-                // reasons by sequence number, so resuming against a mission the FC is not
-                // actually holding is precisely how the drone ends up flying the wrong line.
-                // The cache is cleared on disarm-clear, on Clear Mission and on every failed
-                // upload, and is only ever written together with lastUploadedCount, so a
-                // non-empty cache whose size matches the FC is the same mission.
-                //
-                // Any disagreement, any unanswered probe, any empty cache — fall through to
-                // the real download. This is an optimisation, never a source of truth.
-                val cached = lastUploadedMissionItems
-                var allWaypoints: List<MissionItemInt>? = null
-
-                if (cached.isNotEmpty() && cached.size == lastUploadedCount) {
-                    val fcCount = repo?.getMissionCountForCacheCheck()
-                    if (fcCount == cached.size) {
-                        LogUtils.i("SharedVM", "✓ FC reports $fcCount items, matching the cached mission — skipping the download")
-                        allWaypoints = cached
-                    } else {
-                        LogUtils.i("SharedVM", "Cached mission (${cached.size}) does not match the FC (${fcCount ?: "no answer"}) — downloading")
-                    }
-                }
-
-                if (allWaypoints == null) {
-                    // Retried: this is by far the most fragile step (a full mission download
-                    // over a link that is also carrying video and telemetry) and it is the one
-                    // whose failure used to be invisible.
-                    LogUtils.i("SharedVM", "Retrieving mission from FC (background)...")
-                    var downloaded = repo?.getAllWaypoints()
-                    if (downloaded.isNullOrEmpty()) {
-                        LogUtils.w("SharedVM", "Mission download returned nothing — retrying once")
-                        delay(1000)
-                        downloaded = repo?.getAllWaypoints()
-                    }
-                    allWaypoints = downloaded
-                }
-                if (allWaypoints.isNullOrEmpty()) {
-                    reportResumePreparationFailed("could not read the mission back from the drone")
-                    return@launch
-                }
-
-                LogUtils.i("SharedVM", "Retrieved ${allWaypoints.size} waypoints from FC")
-
-                // Step 3: Filter waypoints from resume point, inserting resume location as first WP
-                LogUtils.i("SharedVM", "Filtering waypoints from resume point (background)...")
-                val filtered = repo?.filterWaypointsForResume(
-                    allWaypoints,
-                    waypointNumber,
-                    resumeLatitude = resumeLocation?.latitude,
-                    resumeLongitude = resumeLocation?.longitude,
-                    restoreSpray = _sprayWasActiveBeforePause
-                )
-                if (filtered == null || filtered.isEmpty()) {
-                    reportResumePreparationFailed("no waypoints left after the resume point")
-                    return@launch
-                }
-
-                LogUtils.i("SharedVM", "Filtered to ${filtered.size} waypoints")
-
-                // Step 4: Resequence waypoints
-                LogUtils.i("SharedVM", "Resequencing waypoints (background)...")
-                val resequenced = repo?.resequenceWaypoints(filtered)
-                if (resequenced == null || resequenced.isEmpty()) {
-                    reportResumePreparationFailed("could not renumber the resumed mission")
-                    return@launch
-                }
-
-                LogUtils.i("SharedVM", "Resequenced to ${resequenced.size} waypoints")
-
-                // Step 5: Validate sequence numbers
-                val sequences = resequenced.map { it.seq.toInt() }
-                val expectedSequences = (0 until resequenced.size).toList()
-                if (sequences != expectedSequences) {
-                    LogUtils.e("SharedVM", "❌ Invalid sequence numbers: $sequences")
-                    reportResumePreparationFailed("the resumed mission was numbered wrongly")
-                    return@launch
-                }
-                LogUtils.i("SharedVM", "✅ Sequence validation passed")
-
-                // Step 6: Upload modified mission to FC (silent)
-                //
-                // Short settle first: getAllWaypoints now closes the download with a MISSION_ACK,
-                // but give any item the FC had already put on the wire time to drain before the
-                // upload's MISSION_CLEAR_ALL starts waiting on its own ack.
-                delay(300)
-                LogUtils.i("SharedVM", "Uploading modified mission to FC (background)...")
-                val uploadSuccess = repo?.uploadMissionWithAck(resequenced) ?: false
-                if (!uploadSuccess) {
-                    reportResumePreparationFailed("the drone rejected the resumed mission")
-                    return@launch
-                }
-
-                LogUtils.i("SharedVM", "✅ Modified mission uploaded to FC")
-
-                delay(500)
-
-                // Step 7: point the FC at the inserted transit waypoint.
-                //
-                // Not fatal if it fails: onModeChangedToAuto re-asserts the index through
-                // resumeMission() and refuses to engage AUTO unless it is confirmed, so a
-                // drop here is recoverable. Worth a warning, though — it usually means the
-                // link is congested and the resume is about to be slow.
-                val setWpResult = repo?.setCurrentWaypoint(RESUME_TRANSIT_WAYPOINT_SEQ) ?: false
-                if (setWpResult) {
-                    LogUtils.i("SharedVM", "✅ Current waypoint set to $RESUME_TRANSIT_WAYPOINT_SEQ")
-                } else {
-                    LogUtils.w("SharedVM", "⚠️ FC did not confirm the mission index; will be re-asserted when AUTO is engaged")
-                }
-
-                // Mark that resume mission is ready
                 _resumeMissionReady.value = true
                 _resumePreparationFailed.value = false
-                _missionUploaded.value = true
-                // Anything on the FC is something Clear Mission may need to remove.
-                _missionLoadedOnFc.value = true
-                lastUploadedCount = resequenced.size
-                lastUploadedMissionItems = resequenced.toList()
 
-                LogUtils.i("SharedVM", "═══════════════════════════════════════")
-                LogUtils.i("SharedVM", "✅ Resume mission ready (background processing complete)")
-                LogUtils.i("SharedVM", "═══════════════════════════════════════")
+                LogUtils.i("SharedVM", "Resume mission ready (${result.itemCount} items)")
 
                 // Confirm it, for the same reason the failures are announced: the pilot has
                 // to be able to tell the two states apart before they touch the mode switch.
@@ -5115,6 +5181,73 @@ class SharedViewModel : ViewModel() {
     }
 
     /**
+     * Put the aircraft into AUTO so the resumed mission starts flying.
+     *
+     * Cuts the pump first. The transit leg back to the resume point must be dry — the uploaded
+     * mission turns spray back on with its own DO_SPRAYER item when the drone arrives, so
+     * leaving it running here double-doses everything between here and there.
+     *
+     * Retried three times: a mode change can be refused while the FC is still digesting the
+     * mission upload that immediately precedes it.
+     */
+    private suspend fun engageAutoForResume(onProgress: (String) -> Unit = {}): Boolean {
+        ensureSprayerOffForTransit()
+
+        onProgress("Switching to AUTO mode...")
+        repeat(3) { attempt ->
+            if (repo?.changeMode(MavMode.AUTO) == true) {
+                LogUtils.i("ResumeMission", "Switched to AUTO (attempt ${attempt + 1})")
+                return true
+            }
+            LogUtils.w("ResumeMission", "AUTO mode attempt ${attempt + 1}/3 failed")
+            if (attempt < 2) delay(2000)
+        }
+        LogUtils.e("ResumeMission", "Failed to switch to AUTO after 3 attempts; mode is ${_telemetryState.value.mode}")
+        return false
+    }
+
+    /**
+     * Drop the paused-mission state, now that a resume is actually flying.
+     *
+     * Only called once AUTO is confirmed. Clearing it earlier would leave a pilot whose mode
+     * change failed looking at a GCS that says the mission is running when it is not.
+     */
+    private fun markMissionResumed(resumeSeq: Int) {
+        _telemetryState.update {
+            it.copy(missionPaused = false, pausedAtWaypoint = null)
+        }
+        _pendingResumeLocation = null
+        _missionPauseLocation = null
+
+        try {
+            WebSocketManager.getInstance().sendMissionStatus(WebSocketManager.MISSION_STATUS_RESUMED)
+            WebSocketManager.getInstance().sendMissionEvent(
+                eventType = "MISSION_RESUMED",
+                eventStatus = "INFO",
+                description = "Mission resumed"
+            )
+        } catch (e: Exception) {
+            LogUtils.e("ResumeMission", "Failed to send RESUMED status", e)
+        }
+
+        // Spray restore is handled by the uploaded mission's DO_SPRAYER items (see
+        // filterWaypointsForResume) — off for the transit leg, back on at the resume waypoint.
+        // Do NOT fire an immediate spray-on here.
+        if (_sprayWasActiveBeforePause) {
+            LogUtils.i("ResumeMission", "Spray resumes at waypoint $resumeSeq via the mission's DO_SPRAYER item (off during transit)")
+            _sprayWasActiveBeforePause = false
+        }
+
+        addNotification(
+            Notification(
+                message = "Mission resumed from waypoint $resumeSeq",
+                type = NotificationType.SUCCESS
+            )
+        )
+        ttsManager?.announceMissionResumed()
+    }
+
+    /**
      * Called when user confirms "Add Resume Here" in the popup
      * This stores the resume point and prepares the mission for resume
      */
@@ -5126,223 +5259,32 @@ class SharedViewModel : ViewModel() {
                 return@launch
             }
 
-            // Get the resume location (where drone was paused)
             val resumeLocation = effectiveResumeLocation()
-
-            LogUtils.i("ResumeMission", "═══════════════════════════════════════")
             LogUtils.i("ResumeMission", "=== CONFIRM ADD RESUME HERE ===")
-            LogUtils.i("ResumeMission", "Resume waypoint: $resumeWaypoint")
-            LogUtils.i("ResumeMission", "Resume location: ${resumeLocation?.latitude}, ${resumeLocation?.longitude}")
-            LogUtils.i("ResumeMission", "═══════════════════════════════════════")
+            LogUtils.i("ResumeMission", "Resume waypoint: $resumeWaypoint, location: ${resumeLocation?.latitude}, ${resumeLocation?.longitude}")
 
             _showAddResumeHerePopup.value = false
 
             try {
-                // Step 1: Check connection
-                onProgress("Checking connection...")
-                if (!_telemetryState.value.connected) {
-                    LogUtils.e("SharedVM", "Not connected to FC")
-                    onResult(false, "Not connected to flight controller")
+                val result = prepareResumeMission(resumeWaypoint, resumeLocation, onProgress)
+                if (!result.success) {
+                    onResult(false, result.failureReason)
                     return@launch
                 }
 
-                onProgress("Retrieving mission from FC...")
-
-                // Step 2: Get current mission from FC
-                val allWaypoints = repo?.getAllWaypoints()
-                if (allWaypoints == null || allWaypoints.isEmpty()) {
-                    LogUtils.e("SharedVM", "Failed to retrieve mission from FC")
-                    onResult(false, "Failed to retrieve mission from flight controller")
+                if (!engageAutoForResume(onProgress)) {
+                    onResult(false, "Failed to switch to AUTO. Stuck in: ${_telemetryState.value.mode}")
                     return@launch
                 }
 
-                LogUtils.i("SharedVM", "Retrieved ${allWaypoints.size} waypoints from FC")
-
-                // Log original mission
-                LogUtils.i("SharedVM", "--- Original Mission ---")
-                allWaypoints.forEach { wp ->
-                    val cmdName = wp.command.entry?.name ?: "CMD_${wp.command.value}"
-                    LogUtils.i("SharedVM", "  seq=${wp.seq}: $cmdName frame=${wp.frame.value} current=${wp.current}")
-                }
-
-                onProgress("Filtering waypoints from resume point...")
-
-                // Step 3: Filter waypoints from resume point, inserting resume location as first WP
-                val filtered = repo?.filterWaypointsForResume(
-                    allWaypoints,
-                    resumeWaypoint,
-                    resumeLatitude = resumeLocation?.latitude,
-                    resumeLongitude = resumeLocation?.longitude,
-                    restoreSpray = _sprayWasActiveBeforePause
-                )
-                if (filtered == null || filtered.isEmpty()) {
-                    LogUtils.e("SharedVM", "Filtering resulted in empty mission")
-                    onResult(false, "No waypoints after resume point")
-                    return@launch
-                }
-
-                LogUtils.i("SharedVM", "Filtered to ${filtered.size} waypoints")
-
-                onProgress("Resequencing waypoints...")
-
-                // Step 4: Resequence waypoints
-                val resequenced = repo?.resequenceWaypoints(filtered)
-                if (resequenced == null || resequenced.isEmpty()) {
-                    LogUtils.e("SharedVM", "Resequencing failed")
-                    onResult(false, "Failed to resequence waypoints")
-                    return@launch
-                }
-
-                LogUtils.i("SharedVM", "Resequenced to ${resequenced.size} waypoints")
-
-                // Log final mission structure
-                LogUtils.i("SharedVM", "--- Final Resume Mission ---")
-                resequenced.forEach { wp ->
-                    val cmdName = wp.command.entry?.name ?: "CMD_${wp.command.value}"
-                    LogUtils.i("SharedVM", "  seq=${wp.seq}: $cmdName frame=${wp.frame.value} alt=${wp.z}m target=${wp.targetSystem}:${wp.targetComponent}")
-                }
-
-                // Step 5: Validate sequence numbers (skip TAKEOFF validation for resume)
-                onProgress("Validating mission...")
-                val sequences = resequenced.map { it.seq.toInt() }
-                val expectedSequences = (0 until resequenced.size).toList()
-                if (sequences != expectedSequences) {
-                    LogUtils.e("SharedVM", "❌ Invalid sequence numbers!")
-                    LogUtils.e("SharedVM", "Expected: $expectedSequences, Got: $sequences")
-                    onResult(false, "Invalid mission sequence")
-                    return@launch
-                }
-                LogUtils.i("SharedVM", "✅ Sequence validation passed")
-
-                onProgress("Uploading modified mission to FC...")
-
-                // Step 6: Upload modified mission to FC
-                val uploadSuccess = repo?.uploadMissionWithAck(resequenced) ?: false
-                if (uploadSuccess) {
-                    LogUtils.i("SharedVM", "✅ Modified mission uploaded to FC")
-
-                    // Verify by reading back the mission count
-                    // Delay allows FC to fully commit mission to storage before verification
-                    delay(1000)
-                    val verifyCount = repo?.getMissionCount() ?: 0
-                    if (verifyCount != resequenced.size) {
-                        LogUtils.e("SharedVM", "⚠️ WARNING: FC reports $verifyCount waypoints but we uploaded ${resequenced.size}")
-                    } else {
-                        LogUtils.i("SharedVM", "✅ FC confirms $verifyCount waypoints stored")
-                    }
-                } else {
-                    LogUtils.e("SharedVM", "❌ Mission upload FAILED - FC rejected mission")
-                    onResult(false, "Mission upload failed - flight controller rejected mission")
-                    return@launch
-                }
-
-                // Step 7: Set Current Waypoint to start execution
-                onProgress("Setting current waypoint...")
-                LogUtils.i("SharedVM", "Setting current waypoint to the inserted transit waypoint (first mission item after HOME)")
-                val setWaypointSuccess = repo?.setCurrentWaypoint(RESUME_TRANSIT_WAYPOINT_SEQ) ?: false
-
-                if (!setWaypointSuccess) {
-                    LogUtils.w("SharedVM", "Failed to set current waypoint, continuing anyway")
-                }
-
-                delay(500)
-
-                // Make sure the pump is off before the drone starts flying back to the resume
-                // point. The mission's DO_SPRAYER(1) turns it on again on arrival.
-                ensureSprayerOffForTransit()
-
-                // Step 8: Switch to AUTO Mode
-                onProgress("Switching to AUTO mode...")
-                val currentMode = _telemetryState.value.mode
-                LogUtils.i("SharedVM", "Current mode: $currentMode")
-
-                var autoSuccess = false
-                var retryCount = 0
-                val maxRetries = 3
-
-                while (!autoSuccess && retryCount < maxRetries) {
-                    val attempt = retryCount + 1
-                    LogUtils.i("SharedVM", "Attempt $attempt/$maxRetries: Sending AUTO mode command...")
-
-                    autoSuccess = repo?.changeMode(MavMode.AUTO) ?: false
-
-                    LogUtils.i("SharedVM", "Attempt $attempt result: ${if (autoSuccess) "SUCCESS" else "FAILED"}")
-
-                    if (!autoSuccess) {
-                        retryCount++
-                        if (retryCount < maxRetries) {
-                            LogUtils.w("SharedVM", "Waiting 2 seconds before retry...")
-                            delay(2000)
-                        }
-                    }
-                }
-
-                if (!autoSuccess) {
-                    val finalMode = _telemetryState.value.mode
-                    LogUtils.e("SharedVM", "❌ Failed to switch to AUTO after $maxRetries attempts")
-                    LogUtils.e("SharedVM", "Final mode: $finalMode")
-                    onResult(false, "Failed to switch to AUTO. Stuck in: $finalMode")
-                    return@launch
-                }
-
-                LogUtils.i("SharedVM", "✅ Successfully switched to AUTO mode")
-
-                // Complete: Update state
                 onProgress("Mission resumed!")
-                _telemetryState.update {
-                    it.copy(
-                        missionPaused = false,
-                        pausedAtWaypoint = null
-                    )
-                }
-                _pendingResumeLocation = null
-                _missionPauseLocation = null
+                markMissionResumed(resumeWaypoint)
 
-                // ✅ Send mission status RESUMED to backend (crash-safe)
-                try {
-                    WebSocketManager.getInstance().sendMissionStatus(WebSocketManager.MISSION_STATUS_RESUMED)
-                    WebSocketManager.getInstance().sendMissionEvent(
-                        eventType = "MISSION_RESUMED",
-                        eventStatus = "INFO",
-                        description = "Mission resumed"
-                    )
-                } catch (e: Exception) {
-                    LogUtils.e("SharedVM", "Failed to send RESUMED status", e)
-                }
-
-                // Mark mission as uploaded
-                _missionUploaded.value = true
-                // Anything on the FC is something Clear Mission may need to remove.
-                _missionLoadedOnFc.value = true
-                lastUploadedCount = resequenced.size
-                lastUploadedMissionItems = resequenced.toList()
-                LogUtils.i("SharedVM", "✅ Mission upload status updated: uploaded=$_missionUploaded, count=$lastUploadedCount")
-
-                // ✅ Spray restore is handled by the uploaded mission's DO_SPRAYER items
-                // (see filterWaypointsForResume) — off for the transit leg, back on when the
-                // drone reaches the resume waypoint. Do NOT fire an immediate spray-on here.
-                if (_sprayWasActiveBeforePause) {
-                    LogUtils.i("SharedVM", "💧 Spray will resume at waypoint $resumeWaypoint via the mission's DO_SPRAYER item (off during transit)")
-                    _sprayWasActiveBeforePause = false
-                }
-
-                // Complete
-                addNotification(
-                    Notification(
-                        message = "Mission resumed from waypoint $resumeWaypoint",
-                        type = NotificationType.SUCCESS
-                    )
-                )
-                ttsManager?.announceMissionResumed()
-
-                LogUtils.i("ResumeMission", "═══════════════════════════════════════")
-                LogUtils.i("ResumeMission", "✅ Resume Mission Complete!")
-                LogUtils.i("ResumeMission", "═══════════════════════════════════════")
-
+                LogUtils.i("ResumeMission", "Resume mission complete (${result.itemCount} items)")
                 onResult(true, null)
 
             } catch (e: Exception) {
-                LogUtils.e("ResumeMission", "❌ Resume mission failed", e)
+                LogUtils.e("ResumeMission", "Resume mission failed", e)
                 addNotification(Notification("Resume mission failed: ${e.message}", NotificationType.ERROR))
                 onResult(false, e.message)
             }
@@ -5373,99 +5315,58 @@ class SharedViewModel : ViewModel() {
             // meanwhile must be told "still uploading", not "no resume point loaded".
             _resumePreparationInProgress.value = true
             try {
-                onProgress("Step 1/6: Pre-flight checks...")
-                if (!_telemetryState.value.connected) {
-                    onResult(false, "Not connected to flight controller")
-                    return@launch
-                }
+                val result = prepareResumeMission(
+                    resumeLocation = LatLng(lat, lng),
+                    onProgress = onProgress
+                ) { allWaypoints ->
+                    // Find the mission segment (WPi → WPi+1) the dropped pin lies closest to,
+                    // and resume from the segment END. The drone then flies to the exact placed
+                    // point first (filterWaypointsForResume inserts it) and carries on from
+                    // WPi+1 — it never backtracks to the start of the segment it was already
+                    // part-way along.
+                    val navWaypoints = allWaypoints
+                        .filter { it.seq.toInt() > 0 && it.x != 0 && it.y != 0 }
+                        .sortedBy { it.seq.toInt() }
 
-                onProgress("Step 2/6: Retrieving mission from flight controller...")
-                val allWaypoints = repo?.getAllWaypoints()
-                if (allWaypoints == null || allWaypoints.isEmpty()) {
-                    onResult(false, "Failed to retrieve mission from flight controller")
-                    return@launch
-                }
-                LogUtils.i("ManualResume", "Retrieved ${allWaypoints.size} waypoints from FC")
+                    if (navWaypoints.size >= 2) {
+                        var bestSegEndSeq = navWaypoints.last().seq.toInt()
+                        var bestDist = Double.MAX_VALUE
 
-                // Build an ordered list of NAV waypoints (have real lat/lng coords, seq > 0)
-                onProgress("Step 3/6: Locating resume segment in mission...")
-                val navWaypoints = allWaypoints
-                    .filter { it.seq.toInt() > 0 && it.x != 0 && it.y != 0 }
-                    .sortedBy { it.seq.toInt() }
+                        for (i in 0 until navWaypoints.size - 1) {
+                            val aLat = navWaypoints[i].x / 1e7
+                            val aLng = navWaypoints[i].y / 1e7
+                            val bLat = navWaypoints[i + 1].x / 1e7
+                            val bLng = navWaypoints[i + 1].y / 1e7
 
-                // Find which segment (navWaypoints[i] → navWaypoints[i+1]) is closest to the
-                // dropped pin. Use the perpendicular distance from point to line segment.
-                // The segment END (navWaypoints[i+1]) becomes the resumeWaypointSeq so the
-                // drone flies: exact resume point → segment end → rest of mission (no backtrack).
-                val resumeWaypointSeq: Int
-                if (navWaypoints.size >= 2) {
-                    var bestSegEndSeq = navWaypoints.last().seq.toInt()
-                    var bestDist = Double.MAX_VALUE
-
-                    for (i in 0 until navWaypoints.size - 1) {
-                        val aLat = navWaypoints[i].x / 1e7
-                        val aLng = navWaypoints[i].y / 1e7
-                        val bLat = navWaypoints[i + 1].x / 1e7
-                        val bLng = navWaypoints[i + 1].y / 1e7
-
-                        val dist = pointToSegmentDistanceSq(lat, lng, aLat, aLng, bLat, bLng)
-                        if (dist < bestDist) {
-                            bestDist = dist
-                            bestSegEndSeq = navWaypoints[i + 1].seq.toInt()
+                            val dist = pointToSegmentDistanceSq(lat, lng, aLat, aLng, bLat, bLng)
+                            if (dist < bestDist) {
+                                bestDist = dist
+                                bestSegEndSeq = navWaypoints[i + 1].seq.toInt()
+                            }
                         }
+                        bestSegEndSeq
+                    } else {
+                        // A pin dropped against a mission with no flyable legs has nothing to
+                        // resume from. MISSION_PROGRESS_UNKNOWN makes prepareResumeMission say
+                        // so; the old code defaulted to 1, which silently sent the drone to the
+                        // start of the mission.
+                        navWaypoints.firstOrNull()?.seq?.toInt() ?: MISSION_PROGRESS_UNKNOWN
                     }
-                    resumeWaypointSeq = bestSegEndSeq
-                } else {
-                    resumeWaypointSeq = navWaypoints.firstOrNull()?.seq?.toInt() ?: 1
                 }
 
-                LogUtils.i("ManualResume", "Resume segment end seq=$resumeWaypointSeq → drone will fly to exact point then continue from WP$resumeWaypointSeq")
-
-                onProgress("Step 4/6: Filtering waypoints for resume...")
-                val filtered = repo?.filterWaypointsForResume(
-                    allWaypoints,
-                    resumeWaypointSeq,
-                    resumeLatitude = lat,
-                    resumeLongitude = lng,
-                    restoreSpray = _sprayWasActiveBeforePause
-                )
-                if (filtered == null || filtered.isEmpty()) {
-                    onResult(false, "Mission filtering failed - no waypoints to resume")
+                if (!result.success) {
+                    onResult(false, result.failureReason)
                     return@launch
                 }
 
-                val resequenced = repo?.resequenceWaypoints(filtered)
-                if (resequenced == null || resequenced.isEmpty()) {
-                    onResult(false, "Mission resequencing failed")
-                    return@launch
-                }
-                LogUtils.i("ManualResume", "Resequenced to ${resequenced.size} waypoints")
-
-                onProgress("Step 5/6: Uploading modified mission to flight controller...")
-                val uploadSuccess = repo?.uploadMissionWithAck(resequenced) ?: false
-                if (!uploadSuccess) {
-                    LogUtils.e("ManualResume", "❌ Mission upload FAILED")
-                    onResult(false, "Mission upload failed - flight controller rejected mission")
-                    return@launch
-                }
-                LogUtils.i("ManualResume", "✅ Manual resume mission uploaded to FC")
-
-                delay(500)
-                // Best-effort here; onModeChangedToAuto re-asserts and confirms the index
-                // before it will engage AUTO.
-                repo?.setCurrentWaypoint(RESUME_TRANSIT_WAYPOINT_SEQ)
+                LogUtils.i("ManualResume", "Resuming from segment end seq=${result.resumeSeq}: fly to the exact point, then continue from WP${result.resumeSeq}")
 
                 _resumeMissionReady.value = true
                 _resumePreparationFailed.value = false
-                _missionUploaded.value = true
-                // Anything on the FC is something Clear Mission may need to remove.
-                _missionLoadedOnFc.value = true
-                lastUploadedCount = resequenced.size
-                lastUploadedMissionItems = resequenced.toList()
 
-                onProgress("Step 6/6: Done!")
+                onProgress("Done!")
                 addNotification(Notification("Resume point set — mission ready to resume", NotificationType.SUCCESS))
-                LogUtils.i("ManualResume", "✅ Manual resume mission ready")
+                LogUtils.i("ManualResume", "Manual resume mission ready (${result.itemCount} items)")
                 onResult(true, null)
 
             } catch (e: Exception) {
@@ -6220,225 +6121,28 @@ class SharedViewModel : ViewModel() {
     ) {
         viewModelScope.launch {
             try {
-                // Get the resume location (where drone was paused)
                 val resumeLocation = effectiveResumeLocation()
+                LogUtils.i("ResumeMission", "Starting Resume Mission at waypoint $resumeWaypointNumber, location: ${resumeLocation?.latitude}, ${resumeLocation?.longitude}")
 
-                LogUtils.i("ResumeMission", "═══════════════════════════════════════")
-                LogUtils.i("ResumeMission", "Starting Resume Mission")
-                LogUtils.i("ResumeMission", "Resume at waypoint: $resumeWaypointNumber")
-                LogUtils.i("ResumeMission", "Resume location: ${resumeLocation?.latitude}, ${resumeLocation?.longitude}")
-                LogUtils.i("ResumeMission", "═══════════════════════════════════════")
-
-                // Step 1: Pre-flight Checks
-                onProgress("Step 1/8: Pre-flight checks...")
-                if (!_telemetryState.value.connected) {
-                    onResult(false, "Not connected to flight controller")
+                val result = prepareResumeMission(resumeWaypointNumber, resumeLocation, onProgress)
+                if (!result.success) {
+                    onResult(false, result.failureReason)
                     return@launch
                 }
 
-                // Step 2: Retrieve Current Mission from FC
-                onProgress("Step 2/8: Retrieving mission from flight controller...")
-                LogUtils.i("ResumeMission", "Retrieving current mission from FC...")
-                val allWaypoints = repo?.getAllWaypoints()
-
-                if (allWaypoints == null || allWaypoints.isEmpty()) {
-                    LogUtils.e("ResumeMission", "❌ Failed to retrieve mission from FC")
-                    onResult(false, "Failed to retrieve mission from flight controller")
+                if (!engageAutoForResume(onProgress)) {
+                    onResult(false, "Failed to switch to AUTO. Stuck in: ${_telemetryState.value.mode}")
                     return@launch
                 }
 
-                // Log original mission structure
-                LogUtils.i("ResumeMission", "════════════════════════════════")
-                LogUtils.i("ResumeMission", "Original mission count: ${allWaypoints.size}")
-                LogUtils.i("ResumeMission", "Resume from waypoint: $resumeWaypointNumber")
-                allWaypoints.forEach { wp ->
-                    LogUtils.i("ResumeMission", "  Original: seq=${wp.seq} cmd=${wp.command.value} current=${wp.current}")
-                }
-
-                // Step 3: Filter Waypoints for Resume, inserting resume location as first WP
-                onProgress("Step 3/8: Filtering waypoints...")
-                LogUtils.i("ResumeMission", "Filtering waypoints for resume from waypoint $resumeWaypointNumber...")
-                val filtered = repo?.filterWaypointsForResume(
-                    allWaypoints,
-                    resumeWaypointNumber,
-                    resumeLatitude = resumeLocation?.latitude,
-                    resumeLongitude = resumeLocation?.longitude,
-                    restoreSpray = _sprayWasActiveBeforePause
-                )
-
-                if (filtered == null || filtered.isEmpty()) {
-                    LogUtils.e("ResumeMission", "❌ Filtering resulted in empty mission")
-                    onResult(false, "Mission filtering failed - no waypoints to resume")
-                    return@launch
-                }
-
-                LogUtils.i("ResumeMission", "────────────────────────────────")
-                LogUtils.i("ResumeMission", "Filtered mission count: ${filtered.size}")
-                filtered.forEach { wp ->
-                    LogUtils.i("ResumeMission", "  Filtered: seq=${wp.seq} cmd=${wp.command.value} current=${wp.current}")
-                }
-
-                // Step 4: Resequence Waypoints
-                onProgress("Step 4/8: Resequencing waypoints...")
-                LogUtils.i("ResumeMission", "Resequencing waypoints...")
-                val resequenced = repo?.resequenceWaypoints(filtered)
-
-                if (resequenced == null || resequenced.isEmpty()) {
-                    LogUtils.e("ResumeMission", "❌ Resequencing resulted in empty mission")
-                    onResult(false, "Mission resequencing failed")
-                    return@launch
-                }
-
-                LogUtils.i("ResumeMission", "────────────────────────────────")
-                LogUtils.i("ResumeMission", "Resequenced mission count: ${resequenced.size}")
-                resequenced.forEach { wp ->
-                    LogUtils.i("ResumeMission", "  Resequenced: seq=${wp.seq} cmd=${wp.command.value} current=${wp.current}")
-                }
-                LogUtils.i("ResumeMission", "════════════════════════════════")
-
-                // Step 5: Validate Mission Structure
-                onProgress("Step 5/8: Validating mission...")
-                val (isValid, validationError) = validateMissionStructure(resequenced)
-                if (!isValid) {
-                    LogUtils.e("ResumeMission", "❌ Mission validation failed: $validationError")
-                    onResult(false, "Mission validation failed: $validationError")
-                    return@launch
-                }
-                LogUtils.i("ResumeMission", "✅ Mission validation passed")
-
-                // Step 6: Upload Modified Mission to FC
-                onProgress("Step 6/8: Uploading mission to flight controller...")
-                LogUtils.i("ResumeMission", "Uploading ${resequenced.size} waypoints to FC...")
-                val success = repo?.uploadMissionWithAck(resequenced) ?: false
-
-                if (success) {
-                    LogUtils.i("ResumeMission", "✅ Mission upload confirmed by FC")
-
-                    // Verify by reading back the mission count
-                    // Delay allows FC to fully commit mission to storage before verification
-                    delay(1000)
-                    val verifyCount = repo?.getMissionCount() ?: 0
-                    if (verifyCount != resequenced.size) {
-                        LogUtils.e("ResumeMission", "⚠️ WARNING: FC reports $verifyCount waypoints but we uploaded ${resequenced.size}")
-                    } else {
-                        LogUtils.i("ResumeMission", "✅ FC confirms $verifyCount waypoints stored")
-                    }
-                } else {
-                    LogUtils.e("ResumeMission", "❌ Mission upload FAILED - FC rejected mission")
-                    onResult(false, "Mission upload failed - flight controller rejected mission")
-                    return@launch
-                }
-
-                // Step 7: Set Current Waypoint to start execution
-                onProgress("Step 7/8: Setting current waypoint...")
-                LogUtils.i("ResumeMission", "Setting current waypoint to the inserted transit waypoint (first mission item after HOME)")
-                val setWaypointSuccess = repo?.setCurrentWaypoint(RESUME_TRANSIT_WAYPOINT_SEQ) ?: false
-
-                if (!setWaypointSuccess) {
-                    LogUtils.w("ResumeMission", "Failed to set current waypoint, continuing anyway")
-                }
-
-                delay(500)
-
-                // Make sure the pump is off before the drone starts flying back to the resume
-                // point. The mission's DO_SPRAYER(1) turns it on again on arrival.
-                ensureSprayerOffForTransit()
-
-                // Step 8: Switch to AUTO Mode
-                onProgress("Step 8/8: Switching to AUTO mode...")
-                val currentMode = _telemetryState.value.mode
-                LogUtils.i("ResumeMission", "Current mode: $currentMode")
-
-                var autoSuccess = false
-                var retryCount = 0
-                val maxRetries = 3
-
-                while (!autoSuccess && retryCount < maxRetries) {
-                    val attempt = retryCount + 1
-                    LogUtils.i("ResumeMission", "Attempt $attempt/$maxRetries: Sending AUTO mode command...")
-
-                    autoSuccess = repo?.changeMode(MavMode.AUTO) ?: false
-
-                    LogUtils.i("ResumeMission", "Attempt $attempt result: ${if (autoSuccess) "SUCCESS" else "FAILED"}")
-
-                    if (!autoSuccess) {
-                        retryCount++
-                        if (retryCount < maxRetries) {
-                            LogUtils.w("ResumeMission", "Waiting 2 seconds before retry...")
-                            delay(2000)
-                        }
-                    }
-                }
-
-                if (!autoSuccess) {
-                    val finalMode = _telemetryState.value.mode
-                    LogUtils.e("ResumeMission", "❌ Failed to switch to AUTO after $maxRetries attempts")
-                    LogUtils.e("ResumeMission", "Final mode: $finalMode")
-                    onResult(false, "Failed to switch to AUTO. Stuck in: $finalMode")
-                    return@launch
-                }
-
-                LogUtils.i("ResumeMission", "✅ Successfully switched to AUTO mode")
-
-                // Complete: Update state
                 onProgress("Mission resumed!")
-                _telemetryState.update {
-                    it.copy(
-                        missionPaused = false,
-                        pausedAtWaypoint = null
-                    )
-                }
-                _pendingResumeLocation = null
-                _missionPauseLocation = null
+                markMissionResumed(resumeWaypointNumber)
 
-                // ✅ Send mission status RESUMED to backend (crash-safe)
-                try {
-                    WebSocketManager.getInstance().sendMissionStatus(WebSocketManager.MISSION_STATUS_RESUMED)
-                    WebSocketManager.getInstance().sendMissionEvent(
-                        eventType = "MISSION_RESUMED",
-                        eventStatus = "INFO",
-                        description = "Mission resumed"
-                    )
-                } catch (e: Exception) {
-                    LogUtils.e("SharedVM", "Failed to send RESUMED status", e)
-                }
-
-                // Mark mission as uploaded
-                _missionUploaded.value = true
-                // Anything on the FC is something Clear Mission may need to remove.
-                _missionLoadedOnFc.value = true
-                lastUploadedCount = resequenced.size
-                lastUploadedMissionItems = resequenced.toList()
-                LogUtils.i("ResumeMission", "✅ Mission upload status updated: uploaded=$_missionUploaded, count=$lastUploadedCount")
-
-                // ✅ Spray restore is handled BY THE MISSION, not from here.
-                // filterWaypointsForResume already bracketed the resume waypoint with
-                // DO_SPRAYER(0) → resume WP → DO_SPRAYER(1), so the FC turns the pump back
-                // on only once the drone has actually arrived at the resume point. Firing
-                // setSprayEnabled(true) here as well is what made it spray the whole transit
-                // leg from wherever the pilot left the drone back to that point.
-                if (_sprayWasActiveBeforePause) {
-                    LogUtils.i("ResumeMission", "💧 Spray will resume at waypoint $resumeWaypointNumber via the mission's DO_SPRAYER item (off during transit)")
-                    _sprayWasActiveBeforePause = false
-                }
-
-                // Complete
-                addNotification(
-                    Notification(
-                        message = "Mission resumed from waypoint $resumeWaypointNumber - Switch to AUTO to resume",
-                        type = NotificationType.SUCCESS
-                    )
-                )
-                ttsManager?.announceMissionResumed()
-
-                LogUtils.i("ResumeMission", "═══════════════════════════════════════")
-                LogUtils.i("ResumeMission", "✅ Resume Mission Complete!")
-                LogUtils.i("ResumeMission", "═══════════════════════════════════════")
-
+                LogUtils.i("ResumeMission", "Resume Mission Complete (${result.itemCount} items)")
                 onResult(true, null)
 
             } catch (e: Exception) {
-                LogUtils.e("ResumeMission", "❌ Resume mission failed", e)
+                LogUtils.e("ResumeMission", "Resume mission failed", e)
                 addNotification(Notification("Resume mission failed: ${e.message}", NotificationType.ERROR))
                 onResult(false, e.message)
             }

@@ -3217,41 +3217,11 @@ class MavlinkTelemetryRepository(
         // Mission progress logging: MISSION_ITEM_REACHED, MISSION_CURRENT, and mode
 
 
-        // Helper to request mission items from FCU and return as list
-        suspend fun requestMissionItemsFromFcu(timeoutMs: Long = 5000): List<MissionItemInt> {
-            val items = mutableListOf<MissionItemInt>()
-            val expectedCountDeferred = CompletableDeferred<Int?>()
-            val perSeqMap = mutableMapOf<Int, CompletableDeferred<Unit>>()
-            // Buffered flow — see uploadMissionWithAck.
-            val job = AppScope.launch {
-                mavFrame.collect { frame ->
-                    when (val msg = frame.message) {
-                        is MissionCount -> {
-                            expectedCountDeferred.complete(msg.count.toInt())
-                        }
-                        is MissionItemInt -> {
-                            items.add(msg)
-                            perSeqMap[msg.seq.toInt()]?.let { d -> if (!d.isCompleted) d.complete(Unit) }
-                        }
-                        else -> {}
-                    }
-                }
-            }
-            val req = MissionRequestList(targetSystem = fcuSystemId, targetComponent = fcuComponentId)
-            connection.trySendUnsignedV2(gcsSystemId, gcsComponentId, req)
-            val expectedCount = withTimeoutOrNull(timeoutMs) { expectedCountDeferred.await() } ?: 0
-            for (seq in 0 until expectedCount) {
-                val seqDeferred = CompletableDeferred<Unit>()
-                perSeqMap[seq] = seqDeferred
-                val reqItem = MissionRequestInt(targetSystem = fcuSystemId, targetComponent = fcuComponentId, seq = seq.toUShort())
-                connection.trySendUnsignedV2(gcsSystemId, gcsComponentId, reqItem)
-                withTimeoutOrNull(1500L) { seqDeferred.await() }
-                perSeqMap.remove(seq)
-            }
-            delay(200)
-            job.cancel()
-            return items.sortedBy { it.seq.toInt() }
-        }
+        // A local mission-download helper used to live here. It was dead code — nothing ever
+        // called it — and it was a landmine: it opened a MISSION_REQUEST_LIST transfer without
+        // holding missionProtocolMutex and without the closing MISSION_ACK, so the first caller
+        // to wire it up would have left the FC retransmitting into the next upload.
+        // getAllWaypoints() is the one supported mission download.
     }
 
     suspend fun sendCommand(command: MavCmd, param1: Float = 0f, param2: Float = 0f, param3: Float = 0f, param4: Float = 0f, param5: Float = 0f, param6: Float = 0f, param7: Float = 0f) {
@@ -3709,7 +3679,10 @@ class MavlinkTelemetryRepository(
                 }
 
                 // Verify the clear actually took effect before trusting it.
-                val remaining = getMissionCount(timeoutMs = 3000L)
+                // getMissionCountLocked, NOT getMissionCount: we are inside
+                // missionProtocolMutex.withLock here and the mutex is not reentrant, so the
+                // public wrapper would deadlock and hang the upload until its 45s timeout.
+                val remaining = getMissionCountLocked(timeoutMs = 3000L)
                 if (remaining == null) {
                     // Could not read back. The ack was positive, so proceed rather than
                     // blocking an upload on a readback the FC may simply be slow to answer.
@@ -4025,74 +3998,39 @@ class MavlinkTelemetryRepository(
         }
     }
 
+    /**
+     * Read the mission back from the FC and log it. Diagnostic only — nothing acts on it.
+     *
+     * This was a fourth hand-rolled mission download: sequential, 1.5s per item, reading the
+     * RAW connection.mavFrame (which drops frames when a consumer falls behind, unlike the
+     * buffered mavFrame), taking no lock, and — like every other copy — never closing the
+     * transfer its MISSION_REQUEST_LIST opened. It also collected every item into a list and
+     * then logged none of them, so it was an expensive no-op that left the FC retransmitting
+     * into whatever the pilot did next.
+     *
+     * It now goes through getAllWaypoints, which is serialized, closes its transfer, and
+     * refuses to return a partial mission. And it actually prints what it read.
+     */
     suspend fun requestMissionAndLog(timeoutMs: Long = 5000) {
         if (!state.value.fcuDetected) {
+            LogUtils.w("MissionReadback", "No FCU detected - nothing to read back")
             return
         }
-        try {
-            val received = mutableListOf<Pair<Int, String>>()
-            val expectedCountDeferred = CompletableDeferred<Int?>()
-            val perSeqMap = mutableMapOf<Int, CompletableDeferred<Unit>>()
 
-            val job = AppScope.launch {
-                connection.mavFrame.collect { frame ->
-                    when (val msg = frame.message) {
-                        is MissionCount -> {
-                            expectedCountDeferred.complete(msg.count.toInt())
-                        }
-                        is MissionItemInt -> {
-                            val lat = msg.x / 1e7
-                            val lon = msg.y / 1e7
-                            received.add(msg.seq.toInt() to "INT: lat=$lat lon=$lon alt=${msg.z}")
-                            perSeqMap[msg.seq.toInt()]?.let { d -> if (!d.isCompleted) d.complete(Unit) }
-                        }
-                        is MissionItem -> {
-                            received.add(msg.seq.toInt() to "FLT: x=${msg.x} y=${msg.y} z=${msg.z}")
-                            perSeqMap[msg.seq.toInt()]?.let { d -> if (!d.isCompleted) d.complete(Unit) }
-                        }
-                        is MissionAck -> {
-                        }
-                        else -> {}
-                    }
-                }
-            }
+        val items = getAllWaypoints(timeoutMs)
+        if (items == null) {
+            LogUtils.e("MissionReadback", "Could not read the mission back from the FC")
+            return
+        }
 
-            try {
-                val req = MissionRequestList(targetSystem = fcuSystemId, targetComponent = fcuComponentId)
-                connection.trySendUnsignedV2(gcsSystemId, gcsComponentId, req)
-            } catch (e: Exception) {
-            }
-
-            val expectedCount = withTimeoutOrNull(timeoutMs) { expectedCountDeferred.await() } ?: run {
-                job.cancel()
-                return
-            }
-
-
-            for (seq in 0 until expectedCount) {
-                val seqDeferred = CompletableDeferred<Unit>()
-                perSeqMap[seq] = seqDeferred
-                try {
-                    val reqItem = MissionRequestInt(targetSystem = fcuSystemId, targetComponent = fcuComponentId, seq = seq.toUShort())
-                    connection.trySendUnsignedV2(gcsSystemId, gcsComponentId, reqItem)
-                } catch (e: Exception) {
-                }
-
-                val got = withTimeoutOrNull(1500L) {
-                    seqDeferred.await()
-                    true
-                } ?: false
-
-                if (!got) {
-                }
-
-                perSeqMap.remove(seq)
-            }
-
-            delay(200)
-            job.cancel()
-
-        } catch (e: Exception) {
+        LogUtils.i("MissionReadback", "Mission readback: ${items.size} item(s)")
+        items.forEach { item ->
+            LogUtils.i(
+                "MissionReadback",
+                "  seq=${item.seq} cmd=${item.command.entry?.name ?: item.command.value} " +
+                    "lat=${item.x / 1e7} lon=${item.y / 1e7} alt=${item.z} " +
+                    "p1=${item.param1} p2=${item.param2} p3=${item.param3} p4=${item.param4}"
+            )
         }
     }
 
@@ -4658,29 +4596,22 @@ class MavlinkTelemetryRepository(
     }
 
     /**
-     * Get the mission count from the flight controller.
-     * Returns the number of mission items stored in the FC.
-     */
-    /**
      * How many items the FC currently holds, WITHOUT downloading them.
      *
      * One round trip, used by the resume path to decide whether the mission on the FC is
-     * still the one the GCS uploaded and cached. A full [getAllWaypoints] costs one request
-     * and one 2s-timeout window PER ITEM, so on a large spray grid this probe is the
-     * difference between ~0.2s and 15-20s.
+     * still the one the GCS uploaded and cached. A full [getAllWaypoints] costs a request and
+     * a reply per item, so on a large spray grid this probe is the difference between ~0.2s
+     * and 15-20s.
      *
-     * Takes [missionProtocolMutex] and closes the transfer it opens — see
-     * [getMissionCountLocked]. Callers already holding the mutex must use that instead.
+     * Kept as a named alias of [getMissionCount] because the call sites read better for it —
+     * it says why the count is being asked for. It is the same single implementation; there is
+     * deliberately no second one.
      */
-    suspend fun getMissionCountForCacheCheck(timeoutMs: Long = 3000): Int? {
-        if (!state.value.fcuDetected) {
-            return null
-        }
-        return missionProtocolMutex.withLock { getMissionCountLocked(timeoutMs) }
-    }
+    suspend fun getMissionCountForCacheCheck(timeoutMs: Long = 3000): Int? =
+        getMissionCount(timeoutMs)
 
     /**
-     * Body of [getMissionCountForCacheCheck]. Callers must hold [missionProtocolMutex].
+     * The one mission-count implementation. Callers must hold [missionProtocolMutex].
      *
      * MISSION_REQUEST_LIST OPENS ArduPilot's mission-transfer state machine — the FC will sit
      * there expecting to be pulled through the whole mission. [getAllWaypointsLocked] closes
@@ -4741,42 +4672,32 @@ class MavlinkTelemetryRepository(
         }
     }
 
+    /**
+     * How many MISSION items the FC currently holds.
+     *
+     * This used to have its own implementation, and that implementation was the single most
+     * damaging thing in the mission stack. It sent MISSION_REQUEST_LIST — which OPENS
+     * ArduPilot's mission-transfer state machine — with no missionType, accepted a
+     * MISSION_COUNT from any source (so a FENCE or RALLY count answered it), took no lock, and
+     * never sent the closing MISSION_ACK. The FC was left mid-transfer, retransmitting.
+     *
+     * uploadMissionWithAck calls this from its clear-verify step, so EVERY upload opened a
+     * transfer and abandoned it in the instant before sending MISSION_COUNT. That is the
+     * corruption the resume work kept rediscovering from a different direction: an upload that
+     * aborts while the FC still holds the previous mission, so AUTO carries on from the FC's
+     * own index and the drone flies the wrong line.
+     *
+     * There is now ONE implementation, [getMissionCountLocked], which holds
+     * [missionProtocolMutex] and closes what it opens.
+     *
+     * Callers that already hold the mutex must call [getMissionCountLocked] directly — this
+     * one would deadlock, as the mutex is not reentrant.
+     */
     suspend fun getMissionCount(timeoutMs: Long = 5000): Int? {
         if (!state.value.fcuDetected) {
             return null
         }
-
-        try {
-            val expectedCountDeferred = CompletableDeferred<Int?>()
-
-            // Buffered flow — see uploadMissionWithAck.
-            val job = AppScope.launch {
-                mavFrame.collect { frame ->
-                    when (val msg = frame.message) {
-                        is MissionCount -> {
-                            expectedCountDeferred.complete(msg.count.toInt())
-                        }
-                        else -> {}
-                    }
-                }
-            }
-
-            try {
-                val req = MissionRequestList(targetSystem = fcuSystemId, targetComponent = fcuComponentId)
-                connection.trySendUnsignedV2(gcsSystemId, gcsComponentId, req)
-            } catch (e: Exception) {
-                job.cancel()
-                return null
-            }
-
-            val count = withTimeoutOrNull(timeoutMs) { expectedCountDeferred.await() }
-            job.cancel()
-
-            return count
-
-        } catch (e: Exception) {
-            return null
-        }
+        return missionProtocolMutex.withLock { getMissionCountLocked(timeoutMs) }
     }
 
     /**
@@ -6240,9 +6161,26 @@ class MavlinkTelemetryRepository(
     }
 
     /**
-     * Request fence items from FC using mission protocol
+     * Request fence items from FC using the mission protocol (FENCE type).
+     *
+     * Serialized on [missionProtocolMutex] like every other mission-protocol operation. The FC
+     * runs ONE mission-transfer state machine and it is shared across MISSION, FENCE and RALLY
+     * types — a fence download overlapping a mission upload means the two steal each other's
+     * replies. This ran unlocked, so a geofence read triggered from the map while a mission was
+     * uploading did exactly that.
      */
-    private suspend fun requestFenceItemsFromFcu(): List<MissionItemInt> {
+    private suspend fun requestFenceItemsFromFcu(): List<MissionItemInt> =
+        missionProtocolMutex.withLock { requestFenceItemsFromFcuLocked() }
+
+    /**
+     * Body of [requestFenceItemsFromFcu]. Callers must hold [missionProtocolMutex].
+     *
+     * Closes the transfer it opens with a FENCE MISSION_ACK on every exit path, including the
+     * empty and failed ones. MISSION_REQUEST_LIST opens ArduPilot's transfer state machine and
+     * an unclosed one leaves the FC retransmitting into whatever comes next — see
+     * [getMissionCountLocked] for the same reasoning on the MISSION side.
+     */
+    private suspend fun requestFenceItemsFromFcuLocked(): List<MissionItemInt> {
         return suspendCancellableCoroutine { continuation ->
             val job = AppScope.launch {
                 try {
@@ -6330,6 +6268,24 @@ class MavlinkTelemetryRepository(
 
                 } catch (e: Exception) {
                     continuation.resume(emptyList())
+                } finally {
+                    // Close the transfer the MISSION_REQUEST_LIST above opened, on EVERY path:
+                    // the zero-count early return, a seq that never arrived, a thrown
+                    // exception, and success. Whichever way this download ends, the FC must not
+                    // be left mid-transfer.
+                    try {
+                        connection.trySendUnsignedV2(
+                            gcsSystemId, gcsComponentId,
+                            MissionAck(
+                                targetSystem = fcuSystemId,
+                                targetComponent = fcuComponentId,
+                                type = MavEnumValue.of(MavMissionResult.MAV_MISSION_ACCEPTED),
+                                missionType = MavEnumValue.of(MavMissionType.FENCE)
+                            )
+                        )
+                    } catch (e: Exception) {
+                        Timber.w("Geofence: ⚠️ could not send the closing FENCE MISSION_ACK: ${e.message}")
+                    }
                 }
             }
 

@@ -56,16 +56,22 @@ import com.example.kftgcs.utils.LogUtils
 import com.example.kftgcs.viewmodel.OptionsViewModel
 
 /**
- * Range of the obstacle boundary (buffer) controls, in metres.
+ * Range of the obstacle boundary (buffer) controls, in metres: 0..5 m, the pilot's call.
  *
- * The minimum is GridGenerator's hard safety floor, deliberately: the generator clamps
- * anything below it, so offering a lower value on the slider means the number on screen is
- * not the clearance flown. The old 1..5m and 1..10m ranges did exactly that and the bottom
- * of the travel was dead — which is what "the obstacle margin is not increasing" was.
+ * Zero is a real, selectable setting and means what it says — plan right up to the drawn edge,
+ * no clearance held. The generator does not override it; MIN_OBSTACLE_BUFFER_M is 0 to match, so
+ * every position on this travel is live and the number on screen is the clearance actually
+ * flown. (An earlier version clamped to 3 m underneath the slider, which made the bottom of the
+ * travel dead and the displayed number a lie.)
+ *
+ * OBSTACLE_BOUNDARY_DEFAULT_M is deliberately NOT the minimum: a pilot who never touches the
+ * control gets a metre of clearance rather than none. Choosing zero has to be a choice.
+ *
  * Both controls on this screen drive the same `obstacleBoundary` state, so they share it.
  */
 private val OBSTACLE_BOUNDARY_MIN_M = GridGenerator.MIN_OBSTACLE_BUFFER_M.toFloat()
-private const val OBSTACLE_BOUNDARY_MAX_M = 8f
+private const val OBSTACLE_BOUNDARY_MAX_M = 5f
+private const val OBSTACLE_BOUNDARY_DEFAULT_M = 1f
 
 @Suppress("UnusedMaterial3ScaffoldPaddingParameter", "UNUSED_PARAMETER")
 @Composable
@@ -194,7 +200,7 @@ fun PlanScreen(
     // Starts at the 3m safety floor GridGenerator enforces. The range used to be 1..5m while
     // the generator clamped to a 3m minimum, so the bottom five positions all produced the
     // same grid and raising the margin appeared to do nothing.
-    var obstacleBoundary by remember { mutableStateOf(OBSTACLE_BOUNDARY_MIN_M) }
+    var obstacleBoundary by remember { mutableStateOf(OBSTACLE_BOUNDARY_DEFAULT_M) }
 
     // Waypoint list panel state
     var showWaypointList by remember { mutableStateOf(false) }
@@ -980,7 +986,7 @@ fun PlanScreen(
                             value = obstacleBoundary,
                             onValueChange = { obstacleBoundary = it },
                             valueRange = OBSTACLE_BOUNDARY_MIN_M..OBSTACLE_BOUNDARY_MAX_M,
-                            steps = 9, // (8-3)/0.5 - 1 = 9 steps for 0.5m increments
+                            steps = 9, // (5-0)/0.5 - 1 = 9 steps for 0.5m increments
                             modifier = Modifier.fillMaxWidth(),
                             colors = SliderDefaults.colors(
                                 thumbColor = Color.White,
@@ -2189,7 +2195,7 @@ fun PlanScreen(
                                         onValueChange = { if (!isPlanSaved) obstacleBoundary = it },
                                         enabled = !isPlanSaved,
                                         valueRange = OBSTACLE_BOUNDARY_MIN_M..OBSTACLE_BOUNDARY_MAX_M,
-                                        steps = 9, // (8-3)/0.5 - 1 = 9 steps for 0.5m increments
+                                        steps = 9, // (5-0)/0.5 - 1 = 9 steps for 0.5m increments
                                         modifier = Modifier.weight(1f),
                                         colors = SliderDefaults.colors(
                                             thumbColor = if (isPlanSaved) Color.Gray else Color.Red,
