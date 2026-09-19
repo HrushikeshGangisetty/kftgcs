@@ -5280,6 +5280,43 @@ class MavlinkTelemetryRepository(
             // Will insert DO_SPRAYER(1) in resumed mission to restore spray
         }
 
+        // ═══ The speed the mission was flying at when it was paused ═══
+        //
+        // DO_CHANGE_SPEED is a LATCHING command: the FC holds that speed until another one
+        // tells it otherwise. GridMissionConverter emits one at the start of every spray line,
+        // so the speed in force at any point is set by an item that may be far earlier in the
+        // mission — and the filter below drops everything before the resume point, that item
+        // included.
+        //
+        // Nothing then sets the speed, so the FC falls back to its own WPNAV_SPEED parameter,
+        // which defaults to 10 m/s. A mission planned at 4 m/s resumed at 10 — over-flying the
+        // line, and at a spray rate calibrated for 4. It self-corrected at the NEXT line start,
+        // which is why it looked intermittent: the closer the pause was to the start of a line,
+        // the more of that line got sprayed at the wrong speed.
+        //
+        // So carry the last one forward. Re-inserted after the transit waypoint below, next to
+        // the DO_SPRAYER, so it takes effect exactly when the drone rejoins the mission.
+        val speedAtResumePoint = allWaypoints
+            .filter {
+                it.seq.toInt() < resumeWaypointSeq &&
+                    it.command.value == MavCmd.DO_CHANGE_SPEED.value
+            }
+            .maxByOrNull { it.seq.toInt() }
+
+        if (speedAtResumePoint != null) {
+            LogUtils.i(
+                "ResumeMission",
+                "Carrying the mission speed forward: ${speedAtResumePoint.param2} m/s " +
+                    "(from DO_CHANGE_SPEED at seq=${speedAtResumePoint.seq})"
+            )
+        } else {
+            LogUtils.i(
+                "ResumeMission",
+                "No DO_CHANGE_SPEED before seq=$resumeWaypointSeq — the resumed mission's own " +
+                    "speed commands govern, or the FC's WPNAV_SPEED if it has none"
+            )
+        }
+
         // Altitude for the inserted resume waypoint: the next real waypoint the drone will fly
         // to. Looked up by "first positional item at or after the resume seq" rather than by
         // exact seq, because the resume seq can legitimately land on a DO_SPRAYER /
@@ -5343,13 +5380,41 @@ class MavlinkTelemetryRepository(
                         z = effectiveAltitude
                     )
                     filtered.add(resumeWp)
+
+                    // Restore the planned speed, immediately after the transit waypoint, so the
+                    // drone is already back at the mission speed the moment it rejoins the line.
+                    //
+                    // Deliberately inside this branch. It has to go AFTER the transit waypoint,
+                    // because that waypoint must stay at index 1 (see RESUME_TRANSIT_WAYPOINT_SEQ)
+                    // and anything ahead of it would shift it — and if there is no transit
+                    // waypoint to sit behind, there is no safe slot for it at all: it would
+                    // itself become index 1 and the FC would be pointed at a DO command instead
+                    // of a position. In that case the mission's own DO_CHANGE_SPEED at the next
+                    // line start corrects the speed, which is the behaviour as it was.
+                    //
+                    // One side effect, worth knowing rather than fixing: the ferry leg back to
+                    // the resume point still flies at the FC's WPNAV_SPEED, since the speed
+                    // command only executes once the transit waypoint has been REACHED. That leg
+                    // is dry, so covering it faster is not a problem.
+                    if (speedAtResumePoint != null) {
+                        filtered.add(
+                            speedAtResumePoint.copy(
+                                // Renumbered by resequenceWaypoints; only the order matters here.
+                                seq = 2u,
+                                current = 0u,
+                                autocontinue = 1u,
+                                targetSystem = fcuSystemId,
+                                targetComponent = fcuComponentId
+                            )
+                        )
+                    }
                 }
 
                 // Insert DO_SPRAYER(1) command right AFTER the resume waypoint, so the FC only
                 // executes it once that waypoint has been REACHED — i.e. spray comes back on at
                 // the resume point, not the instant AUTO is engaged.
                 if (shouldInsertSprayerOn) {
-                    filtered.add(sprayerItem(placeholderSeq = 2u, on = true))
+                    filtered.add(sprayerItem(placeholderSeq = 3u, on = true))
                 }
                 continue
             }

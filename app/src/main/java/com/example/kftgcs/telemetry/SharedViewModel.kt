@@ -4031,28 +4031,23 @@ class SharedViewModel : ViewModel() {
     val dronePathPoints: StateFlow<List<DronePathPoint>> = _dronePathPoints.asStateFlow()
 
     /**
-     * Cap on retained trail points. The trail is drawn as polyline segments, so an unbounded
-     * list would grow for the whole flight; 2000 points at the ~1Hz that position+spray
-     * changes are recorded covers a long mission with room to spare.
-     */
-    private val MAX_DRONE_PATH_POINTS = 2000
-
-    /**
      * Append one position sample to the trail, if it differs from the last one.
      *
      * Called from GcsMap on each position / spray-status change. A point is recorded when the
      * position moved OR the spray status flipped — the latter is what creates the boundary
      * between a red segment and a green one, so it must never be skipped.
+     *
+     * Unbounded on purpose: the pilot needs the whole flown trail intact until they explicitly
+     * hit "Clear Map" (see [clearDronePath]) — a length cap here silently truncated the oldest
+     * points once a long spray mission passed it, which looked like sprayed lines vanishing
+     * mid-flight.
      */
     fun recordDronePathPoint(position: LatLng, isSpraying: Boolean) {
         val current = _dronePathPoints.value
         val last = current.lastOrNull()
         if (last != null && last.position == position && last.isSpraying == isSpraying) return
 
-        val appended = current + DronePathPoint(position, isSpraying)
-        _dronePathPoints.value =
-            if (appended.size > MAX_DRONE_PATH_POINTS) appended.takeLast(MAX_DRONE_PATH_POINTS)
-            else appended
+        _dronePathPoints.value = current + DronePathPoint(position, isSpraying)
     }
 
     /** Drop the whole trail. Only for an explicit "clear map" — never on resume. */

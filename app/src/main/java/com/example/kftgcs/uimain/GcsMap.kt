@@ -788,25 +788,46 @@ fun GcsMap(
                         else -> String.format(Locale.US, "%.0f m²", areaInSqMeters)
                     }
 
-                    // Calculate centroid of the geofence polygon for area label
+                    // ═══ Where the fence's area label goes ═══
+                    //
+                    // NOT at the fence centroid. The fence is a buffer drawn AROUND the mission
+                    // polygon, so the two shapes share a centroid to within a metre or two — put
+                    // both area labels there and they land on top of each other. The previous
+                    // code worked around that by anchoring this one 1.6x above its point, which
+                    // only converted the overlap into two badges stacked in mid-field, neither
+                    // of them visibly belonging to the boundary it measured.
+                    //
+                    // Instead, put it in the RING: the band between the mission polygon's edge
+                    // and the fence's edge, which is ground only the fence encloses. Directly
+                    // above the mission polygon's top edge, halfway out to the fence's own top
+                    // edge. The label then sits inside the shape it is measuring and outside the
+                    // other one, so which number belongs to which boundary needs no explaining.
+                    //
+                    // With no mission polygon drawn there is no ring to aim for, so it falls back
+                    // to halfway between the fence centroid and the fence's top — still clearly
+                    // within the fence, and nothing to collide with.
                     val centroidLat = geofencePolygon.map { it.latitude }.average()
                     val centroidLon = geofencePolygon.map { it.longitude }.average()
-                    val centroid = LatLng(centroidLat, centroidLon)
+                    val fenceTopLat = geofencePolygon.maxOf { it.latitude }
+                    val innerTopLat = if (surveyPolygon.size >= 3) {
+                        surveyPolygon.maxOf { it.latitude }.coerceIn(centroidLat, fenceTopLat)
+                    } else {
+                        centroidLat
+                    }
+                    val labelPosition = LatLng((innerTopLat + fenceTopLat) / 2, centroidLon)
 
                     // Create area label marker with yellow background to match geofence color
                     val areaLabelIcon = remember(areaText) {
                         createSmallLabelMarker(areaText, android.graphics.Color.rgb(255, 235, 59)) // Yellow background
                     }
 
-                    // The geofence is a buffer drawn around the mission's survey polygon, so its
-                    // centroid sits almost exactly on top of the mission area label's centroid.
-                    // Anchor this one above its point (rather than centered) so the two labels
-                    // stack instead of overlapping and becoming unreadable.
                     Marker(
-                        state = MarkerState(position = centroid),
+                        state = MarkerState(position = labelPosition),
                         title = "Geofence Area: $areaText",
                         icon = areaLabelIcon,
-                        anchor = Offset(0.5f, 1.6f),
+                        // Centred on its point now that it has a place of its own; the old 1.6x
+                        // vertical offset existed only to dodge the mission label.
+                        anchor = Offset(0.5f, 0.5f),
                         zIndex = 8f // Below geofence markers but above other elements
                     )
 
@@ -1221,12 +1242,16 @@ fun GcsMap(
                         createSmallLabelMarker(areaText)
                     }
 
+                    // Stays at the mission polygon's own centroid — this label is already
+                    // inside the boundary it measures. The fence's label is the one that moved,
+                    // out into the ring between the two shapes, so these no longer compete for
+                    // the same pixels (see the geofence area label above).
                     Marker(
                         state = MarkerState(position = centroid),
                         title = "Area: $areaText",
                         icon = areaLabelIcon,
                         anchor = Offset(0.5f, 0.5f),
-                        zIndex = 8.5f // Above the geofence area label so mission area stays legible
+                        zIndex = 8.5f
                     )
 
                     // Display edge dimensions for each side of the polygon

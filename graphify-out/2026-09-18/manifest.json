@@ -294,9 +294,9 @@
     "semantic_hash": "9293bb7046f3bd2b9c76af08aedcb721"
   },
   "app/src/main/java/com/example/kftgcs/grid/GridGenerator.kt": {
-    "mtime": 1789704372.306306,
-    "seen": 1789714339.6454566,
-    "ast_hash": "491b90313ca738426afa33be6e78e6cb",
+    "mtime": 1789632783.2054634,
+    "seen": 1789632814.2862983,
+    "ast_hash": "10f19cc3e16b33e0980e4fe85b7e3ef2",
     "semantic_hash": ""
   },
   "app/src/main/java/com/example/kftgcs/grid/GridMissionConverter.kt": {
@@ -306,10 +306,10 @@
     "semantic_hash": "aee26459724586ab0722de3975ab076c"
   },
   "app/src/main/java/com/example/kftgcs/grid/GridUtils.kt": {
-    "mtime": 1789703455.6814728,
-    "seen": 1789714339.6454566,
-    "ast_hash": "e3a35ce55b225f0709bb0a508caebc81",
-    "semantic_hash": ""
+    "mtime": 1784732800.824197,
+    "seen": 1789573354.355936,
+    "ast_hash": "a9f70510ea3bc1d85da11561de4178f5",
+    "semantic_hash": "a9f70510ea3bc1d85da11561de4178f5"
   },
   "app/src/main/java/com/example/kftgcs/grid/GridWaypoint.kt": {
     "mtime": 1773753795.6847277,
@@ -684,9 +684,9 @@
     "semantic_hash": "2e810a2736a2deb0aff6e72561ef7805"
   },
   "app/src/main/java/com/example/kftgcs/telemetry/SharedViewModel.kt": {
-    "mtime": 1789714329.1528468,
-    "seen": 1789714339.648948,
-    "ast_hash": "d76ab122a8f9fce16b7366248399b4c2",
+    "mtime": 1789632751.9292865,
+    "seen": 1789632814.2888315,
+    "ast_hash": "f5b590fb130083e8bbf64ae1b002c75a",
     "semantic_hash": ""
   },
   "app/src/main/java/com/example/kftgcs/telemetry/SprayTelemetryUtils.kt": {
@@ -696,9 +696,9 @@
     "semantic_hash": "75b44909c88905dab2737b3532c01a5e"
   },
   "app/src/main/java/com/example/kftgcs/telemetry/TelemetryRepository.kt": {
-    "mtime": 1789714025.033793,
-    "seen": 1789714339.648948,
-    "ast_hash": "4194cc37741178bb060e9dd99096584e",
+    "mtime": 1789624939.9540904,
+    "seen": 1789624964.384936,
+    "ast_hash": "3ef2382f02091404b76f6f98b4bff628",
     "semantic_hash": ""
   },
   "app/src/main/java/com/example/kftgcs/telemetry/WebSocketManager.kt": {
@@ -972,9 +972,9 @@
     "semantic_hash": "4dfa2cbafd320ff0e03e4541a864f74e"
   },
   "app/src/main/java/com/example/kftgcs/uimain/GcsMap.kt": {
-    "mtime": 1789714129.575348,
-    "seen": 1789714339.6559844,
-    "ast_hash": "7e83ec8b4a3d8fcbfabdd7a4b1214576",
+    "mtime": 1789632708.852844,
+    "seen": 1789632814.2953753,
+    "ast_hash": "11e89b6bb735bd58f2766685f7605310",
     "semantic_hash": ""
   },
   "app/src/main/java/com/example/kftgcs/uimain/LevelSensorCalibrationScreen.kt": {
@@ -1002,9 +1002,9 @@
     "semantic_hash": "72e9ef8b8d90ac7c74ae3b184a1683c5"
   },
   "app/src/main/java/com/example/kftgcs/uimain/PlanScreen.kt": {
-    "mtime": 1789702969.0410123,
-    "seen": 1789714339.6559844,
-    "ast_hash": "80d2de4a831719fcc23ee161c7e4f04d",
+    "mtime": 1789632771.379982,
+    "seen": 1789632814.2953753,
+    "ast_hash": "9de473b5dc02f7b42ee832612d627c38",
     "semantic_hash": ""
   },
   "app/src/main/java/com/example/kftgcs/uimain/ProximityOverlay.kt": {
