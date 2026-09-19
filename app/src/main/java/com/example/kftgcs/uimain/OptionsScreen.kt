@@ -25,6 +25,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.navigation.NavHostController
+import com.example.kftgcs.telemetry.BatteryFsAction
 import com.example.kftgcs.telemetry.SharedViewModel
 import com.example.kftgcs.viewmodel.OptionsViewModel
 import java.util.Locale
@@ -35,6 +36,17 @@ private val BorderGray = Color(0xFF4A5568)
 private val SectionBackground = Color(0xFF2C2F33)
 
 private val actionOptions = listOf("HOVER" to "Hover", "RTL" to "RTL", "LAND" to "Land")
+
+// The battery failsafe actions are the drone's own BATT_FS_LOW_ACT / BATT_FS_CRT_ACT, so they offer
+// the Smart RTL variants too. "Hover" is None on the drone. Terminate (5) is deliberately not
+// selectable, but is displayed if the drone already holds it (see ActionDropdown's fallback label).
+private val batteryActionOptions = listOf(
+    "HOVER" to "Hover (drone: None)",
+    "RTL" to "RTL",
+    "LAND" to "Land",
+    "SMART_RTL" to "Smart RTL or RTL",
+    "SMART_RTL_LAND" to "Smart RTL or Land"
+)
 
 // Tank Empty has an extra "Report Only" action: the drone keeps flying and only
 // reports that the tank is empty, instead of switching to a safe/stop mode.
@@ -192,13 +204,22 @@ fun OptionsScreen(
                     onValueChange = { viewModel.updateLowVoltLevel1(it) }
                 )
 
-                Spacer(modifier = Modifier.height(8.dp))
+                Spacer(modifier = Modifier.height(12.dp))
+
+                // Level 1 Action Dropdown — BATT_FS_LOW_ACT. The drone's own setting is the
+                // source of truth: this shows what it holds and Save & Sync writes it back.
+                ActionDropdown(
+                    label = "Level 1 Action — BATT_FS_LOW_ACT",
+                    selected = options.lowVoltLevel1Action,
+                    onSelectionChanged = { viewModel.updateLowVoltLevel1Action(it) },
+                    options = batteryActionOptions
+                )
 
                 Text(
-                    text = "Action: Alert only (popup + TTS every 5 sec)",
+                    text = "The tablet always alerts (popup + TTS every few seconds); the action above is what the drone itself does.",
                     color = Color(0xFFB0B0B0),
                     fontSize = 13.sp,
-                    modifier = Modifier.padding(start = 4.dp, bottom = 12.dp)
+                    modifier = Modifier.padding(start = 4.dp, top = 6.dp, bottom = 16.dp)
                 )
 
                 // Level 2
@@ -210,11 +231,20 @@ fun OptionsScreen(
 
                 Spacer(modifier = Modifier.height(12.dp))
 
-                // Level 2 Action Dropdown
+                // Level 2 Action Dropdown — BATT_FS_CRT_ACT
                 ActionDropdown(
-                    label = "Level 2 Action",
+                    label = "Level 2 Action — BATT_FS_CRT_ACT",
                     selected = options.lowVoltLevel2Action,
-                    onSelectionChanged = { viewModel.updateLowVoltLevel2Action(it) }
+                    onSelectionChanged = { viewModel.updateLowVoltLevel2Action(it) },
+                    options = batteryActionOptions
+                )
+
+                Text(
+                    text = "Read from the drone when this screen opens (refresh to re-read) and written to it by Save & Sync. " +
+                        "The tablet takes the same action, so the drone and tablet agree.",
+                    color = Color(0xFFB0B0B0),
+                    fontSize = 13.sp,
+                    modifier = Modifier.padding(start = 4.dp, top = 6.dp)
                 )
             }
 
@@ -322,7 +352,7 @@ fun OptionsScreen(
                 Spacer(modifier = Modifier.height(8.dp))
                 Text(
                     text = status,
-                    color = if (status.contains("Failed")) Color(0xFFFF6B6B) else Color(0xFF90EE90),
+                    color = if (status.contains("Failed") || status.contains("Not saved")) Color(0xFFFF6B6B) else Color(0xFF90EE90),
                     fontSize = 14.sp,
                     modifier = Modifier.padding(horizontal = 4.dp)
                 )
@@ -407,7 +437,14 @@ private fun NumericTextField(
     value: Float,
     onValueChange: (Float) -> Unit
 ) {
-    var text by remember(value) { mutableStateOf(value.toString()) }
+    // Not keyed on `value`: every valid keystroke pushes a new value up to the ViewModel, and a
+    // remember(value) key threw away what was being typed and re-seeded the field from the parsed
+    // number — so "42" became "4" -> "4.0" -> "4.02". The text is only re-seeded when `value`
+    // changes to something the current text does NOT already represent (e.g. a load from drone).
+    var text by remember { mutableStateOf(value.toString()) }
+    LaunchedEffect(value) {
+        if (text.toFloatOrNull() != value) text = value.toString()
+    }
 
     OutlinedTextField(
         value = text,
@@ -437,10 +474,13 @@ private fun NumericTextField(
 private fun ActionDropdown(
     label: String,
     selected: String,
-    onSelectionChanged: (String) -> Unit
+    onSelectionChanged: (String) -> Unit,
+    options: List<Pair<String, String>> = actionOptions
 ) {
     var expanded by remember { mutableStateOf(false) }
-    val displayLabel = actionOptions.firstOrNull { it.first == selected }?.second ?: selected
+    // A value the drone holds that is not in the menu (e.g. TERMINATE) still shows truthfully.
+    val displayLabel = options.firstOrNull { it.first == selected }?.second
+        ?: BatteryFsAction.label(selected)
 
     ExposedDropdownMenuBox(
         expanded = expanded,
@@ -477,7 +517,7 @@ private fun ActionDropdown(
             onDismissRequest = { expanded = false },
             modifier = Modifier.background(SectionBackground)
         ) {
-            actionOptions.forEach { (value, displayText) ->
+            options.forEach { (value, displayText) ->
                 DropdownMenuItem(
                     text = { Text(displayText, color = Color.White) },
                     onClick = {

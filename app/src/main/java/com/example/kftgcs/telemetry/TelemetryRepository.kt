@@ -22,6 +22,7 @@ import com.example.kftgcs.fence.FenceZone
 import com.example.kftgcs.grid.GridUtils
 import com.google.android.gms.maps.model.LatLng
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.async
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
@@ -206,6 +207,9 @@ private const val MISSION_DOWNLOAD_WINDOW_TIMEOUT_MS = 2500L
  * leaves headroom above the ~1440 params seen on current airframes.
  */
 private const val PARAM_VALUE_BUFFER_CAPACITY = 4096
+
+/** How long a fence-parameter read/write waits for its reply before re-sending the request. */
+private const val FENCE_PARAM_RESEND_MS = 1000L
 
 /** Matches RC1_OPTION .. RC16_OPTION, capturing the channel number. */
 private val RC_OPTION_PARAM_REGEX = Regex("""^RC(\d{1,2})_OPTION$""")
@@ -1635,7 +1639,8 @@ class MavlinkTelemetryRepository(
                                 currentA = currentA,
                                 // resolvePackVoltage() arbitrates between this cell-sum and the
                                 // SYS_STATUS fallback; never write the raw sum directly.
-                                voltage = resolved ?: s.voltage
+                                voltage = resolved ?: s.voltage,
+                                voltageReceivedAtMs = if (resolved != null) System.currentTimeMillis() else s.voltageReceivedAtMs
                             )
                         }
                     }
@@ -2505,6 +2510,7 @@ class MavlinkTelemetryRepository(
                         // an unconditional null here could blank out a valid BATTERY_STATUS
                         // reading whenever SYS_STATUS reports its 0xFFFF sentinel.
                         voltage = resolvedVoltage ?: it.voltage,
+                        voltageReceivedAtMs = if (resolvedVoltage != null) System.currentTimeMillis() else it.voltageReceivedAtMs,
                         batteryPercent = pct,
                         armable = armable
                     ) }
@@ -3500,7 +3506,7 @@ class MavlinkTelemetryRepository(
      * exceptions and MAVLink COMMAND_LONG is unacknowledged/unreliable, a single dropped
      * packet on a busy or marginal link meant the failsafe silently did nothing: the caller
      * logged a failure, the one-shot latch was already consumed, and nothing ever retried.
-     * With BATT_FS_CRT_ACT forced to 0 there is no FC-side fallback either.
+     * With the FC critical action set to None there is no FC-side fallback either.
      *
      * So: re-send on a fixed cadence for the whole timeout window. The FC ignores a
      * DO_SET_MODE that asks for the mode it is already in, so re-sending is harmless.
@@ -6127,7 +6133,12 @@ class MavlinkTelemetryRepository(
      */
     suspend fun readFenceParameter(paramId: String, timeoutMs: Long = 3000L): Float? {
         return try {
-            val valueDeferred = AppScope.async {
+            // UNDISPATCHED so the collector is registered on mavFrame before async{} returns.
+            // A dispatched start plus a fixed delay(50) only hoped it would be attached in time;
+            // on a busy device (Default pool contended by the ~40 collectors, or a param burst
+            // in flight) it wasn't, and since mavFrame has no replay the reply was missed and
+            // the read came back null.
+            val valueDeferred = AppScope.async(start = CoroutineStart.UNDISPATCHED) {
                 withTimeoutOrNull(timeoutMs) {
                     mavFrame
                         .filter { it.systemId == fcuSystemId }
@@ -6136,9 +6147,6 @@ class MavlinkTelemetryRepository(
                         .first { it.paramId.trim().replace("\u0000", "") == paramId }
                 }
             }
-            // Give the collector a moment to attach before the request goes out.
-            delay(50)
-
             val request = ParamRequestRead(
                 targetSystem = fcuSystemId,
                 targetComponent = fcuComponentId,
@@ -6146,6 +6154,14 @@ class MavlinkTelemetryRepository(
                 paramIndex = -1
             )
             connection.trySendUnsignedV2(gcsSystemId, gcsComponentId, request)
+            // Re-send while waiting: one PARAM_REQUEST_READ lost on a lossy link otherwise costs
+            // the whole timeout. Replies to the duplicates are identical and harmless.
+            while (!valueDeferred.isCompleted) {
+                withTimeoutOrNull(FENCE_PARAM_RESEND_MS) { valueDeferred.join() }
+                if (!valueDeferred.isCompleted) {
+                    connection.trySendUnsignedV2(gcsSystemId, gcsComponentId, request)
+                }
+            }
 
             val result = valueDeferred.await()?.paramValue
             if (result == null) {
@@ -6154,6 +6170,10 @@ class MavlinkTelemetryRepository(
                 Timber.i("Geofence: read $paramId = $result")
             }
             result
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            // Cancelled caller (e.g. a superseded connect sync): propagate rather than report a
+            // read failure, which callers turn into "unreadable" warnings.
+            throw e
         } catch (e: Exception) {
             Timber.e(e, "Geofence: failed reading $paramId")
             null
@@ -6166,19 +6186,26 @@ class MavlinkTelemetryRepository(
             val job = AppScope.launch {
                 try {
                     // Start listening BEFORE the write, so a fast ack cannot arrive in the
-                    // gap between sending and subscribing.
-                    val ackDeferred = async {
+                    // gap between sending and subscribing. UNDISPATCHED makes that a guarantee
+                    // (the collector is registered before async{} returns) instead of a hope
+                    // that a 50 ms delay is long enough.
+                    //
+                    // Only an ack carrying the value we wrote counts: a stale PARAM_VALUE for the
+                    // same name (late reply to an earlier read, a param-list burst) used to be
+                    // taken as the ack, fail the comparison and burn an attempt.
+                    val ackDeferred = async(start = CoroutineStart.UNDISPATCHED) {
                         withTimeoutOrNull(3000) {
                             mavFrame
                                 .filter { it.systemId == fcuSystemId }
                                 .map { it.message }
                                 .filterIsInstance<ParamValue>()
                                 // Strip MAVLink's fixed-width NUL padding before comparing.
-                                .first { it.paramId.trim().replace("\u0000", "") == paramId }
+                                .first {
+                                    it.paramId.trim().replace("\u0000", "") == paramId &&
+                                        it.paramValue == value
+                                }
                         }
                     }
-                    // Give the collector a moment to attach.
-                    delay(50)
 
                     val paramSet = ParamSet(
                         targetSystem = fcuSystemId,
@@ -6188,9 +6215,15 @@ class MavlinkTelemetryRepository(
                         paramType = MavEnumValue.of(MavParamType.REAL32)
                     )
                     connection.trySendUnsignedV2(gcsSystemId, gcsComponentId, paramSet)
+                    // PARAM_SET is idempotent, so re-send while waiting for the ack.
+                    while (!ackDeferred.isCompleted) {
+                        withTimeoutOrNull(FENCE_PARAM_RESEND_MS) { ackDeferred.join() }
+                        if (!ackDeferred.isCompleted) {
+                            connection.trySendUnsignedV2(gcsSystemId, gcsComponentId, paramSet)
+                        }
+                    }
 
-                    val ack = ackDeferred.await()
-                    continuation.resume(ack != null && ack.paramValue == value)
+                    continuation.resume(ackDeferred.await() != null)
                 } catch (e: Exception) {
                     continuation.resume(false)
                 }

@@ -5,6 +5,7 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.kftgcs.telemetry.SharedViewModel
 import com.example.kftgcs.utils.LogUtils
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -81,12 +82,21 @@ class SpraySettingsViewModel(
     private val _state = MutableStateFlow(SpraySettingsState())
     val state: StateFlow<SpraySettingsState> = _state.asStateFlow()
 
+    private var fetchJob: Job? = null
+
     init {
         viewModelScope.launch {
             sharedViewModel.telemetryState.collect { telemetry ->
                 val wasConnected = _state.value.isDroneConnected
                 _state.update { it.copy(isDroneConnected = telemetry.connected) }
-                if (telemetry.connected && !wasConnected && _state.value.values.isEmpty()) {
+                if (telemetry.connected && !wasConnected) {
+                    // Every new connection reloads. This used to fetch only while `values` was
+                    // empty, so after one successful load the screen kept showing the previous
+                    // connection's (possibly another drone's) values, and an edit that happened
+                    // to equal a stale value was judged "unchanged" and never written.
+                    // A load still running from the dropped link is abandoned, not waited on.
+                    fetchJob?.cancel()
+                    _state.update { it.copy(isLoading = false) }
                     fetchSprayParams()
                 }
             }
@@ -103,7 +113,7 @@ class SpraySettingsViewModel(
 
         _state.update { it.copy(isLoading = true, errorMessage = null) }
 
-        viewModelScope.launch {
+        fetchJob = viewModelScope.launch {
             val loaded = mutableMapOf<String, Float>()
             for (name in paramNames) {
                 val value = sharedViewModel.readParameter(name, 3000L)
@@ -158,9 +168,14 @@ class SpraySettingsViewModel(
 
                 if (ack != null) {
                     val confirmed = ack.paramValue
-                    results.add(SprayWriteResult(name, newValue, confirmed, true))
+                    // An ack only proves the FC answered. It counts as a success only when the FC
+                    // now holds the value we asked for — otherwise it clamped or rejected it, and
+                    // "updated" would be a lie. The screen still shows the value the FC reports.
+                    val accepted = sharedViewModel.paramAckMatches(ack, newValue)
+                    results.add(SprayWriteResult(name, newValue, confirmed, accepted))
                     _state.update { it.copy(values = it.values + (name to confirmed)) }
-                    LogUtils.d(TAG, "✅ $name confirmed = $confirmed")
+                    if (accepted) LogUtils.d(TAG, "✅ $name confirmed = $confirmed")
+                    else LogUtils.e(TAG, "❌ $name not accepted: wrote $newValue, FC holds $confirmed")
                 } else {
                     results.add(SprayWriteResult(name, newValue, null, false))
                     LogUtils.e(TAG, "❌ Failed to write $name")

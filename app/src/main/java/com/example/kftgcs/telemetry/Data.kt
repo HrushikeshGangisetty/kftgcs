@@ -217,6 +217,10 @@ data class TelemetryState(
     val climbRateSmoothed: Float? = null,
     //Battery
     val voltage: Float? = null,
+    // Wall-clock time of the last frame that produced [voltage]. `voltage` itself keeps its last
+    // value when frames stop, so without this a stale reading is indistinguishable from a live
+    // one — and the critical-battery debounce cannot count distinct readings.
+    val voltageReceivedAtMs: Long? = null,
     val batteryPercent: Int? = null,
     val currentA : Float? = null,
     //RC Battery

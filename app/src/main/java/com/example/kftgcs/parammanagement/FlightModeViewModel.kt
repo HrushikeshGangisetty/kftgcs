@@ -82,7 +82,9 @@ class FlightModeViewModel(
         _state.update { it.copy(isLoading = true, errorMessage = null, successMessage = null) }
 
         viewModelScope.launch {
-            val modes = MutableList<Int?>(6) { null }
+            // Start from what is already loaded: a slot whose read fails keeps its last known
+            // value instead of being blanked back to "not loaded" by a partial refresh.
+            val modes = _state.value.modes.toMutableList()
             var anyFailure = false
 
             PARAM_NAMES.forEachIndexed { idx, paramName ->

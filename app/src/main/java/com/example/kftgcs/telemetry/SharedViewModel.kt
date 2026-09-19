@@ -101,6 +101,64 @@ data class UsbDeviceInfo(
 enum class ArmingCheckState { HIDDEN, PROMPT_WRITE, WRITING, WRITE_FAILED, PROMPT_REBOOT }
 
 /**
+ * ArduPilot's BATT_FS_LOW_ACT / BATT_FS_CRT_ACT values <-> the action names stored in prefs and
+ * shown in Options. The FC is the source of truth for these, so the mapping has to round-trip
+ * every value the FC can hold — including ones Options does not offer (see [isFcManaged]).
+ */
+object BatteryFsAction {
+    const val HOVER = "HOVER"                   // 0 None — the GCS itself brakes/holds at level 2
+    const val LAND = "LAND"                     // 1
+    const val RTL = "RTL"                       // 2
+    const val SMART_RTL = "SMART_RTL"           // 3 SmartRTL or RTL
+    const val SMART_RTL_LAND = "SMART_RTL_LAND" // 4 SmartRTL or Land
+    const val TERMINATE = "TERMINATE"           // 5 motors stop — display only, never offered
+
+    /** FC parameter value -> action name, or null for a value ArduPilot does not define. */
+    fun fromFcValue(value: Float): String? {
+        if (value != Math.floor(value.toDouble()).toFloat()) return null
+        return when (value.toInt()) {
+            0 -> HOVER
+            1 -> LAND
+            2 -> RTL
+            3 -> SMART_RTL
+            4 -> SMART_RTL_LAND
+            5 -> TERMINATE
+            else -> null
+        }
+    }
+
+    /** Action name -> FC parameter value, or null for a name this does not know. */
+    fun toFcValue(action: String): Float? = when (action.uppercase()) {
+        HOVER, "LOITER" -> 0f
+        LAND -> 1f
+        RTL -> 2f
+        SMART_RTL -> 3f
+        SMART_RTL_LAND -> 4f
+        TERMINATE -> 5f
+        else -> null
+    }
+
+    /**
+     * Actions the FC carries out entirely by itself. The GCS must not ALSO command a mode change
+     * for these: it has no equivalent of Smart RTL, and second-guessing a Terminate is not its call.
+     */
+    fun isFcManaged(action: String): Boolean =
+        action.equals(SMART_RTL, ignoreCase = true) ||
+            action.equals(SMART_RTL_LAND, ignoreCase = true) ||
+            action.equals(TERMINATE, ignoreCase = true)
+
+    fun label(action: String): String = when (action.uppercase()) {
+        HOVER, "LOITER" -> "Hover"
+        LAND -> "Land"
+        RTL -> "RTL"
+        SMART_RTL -> "Smart RTL or RTL"
+        SMART_RTL_LAND -> "Smart RTL or Land"
+        TERMINATE -> "TERMINATE"
+        else -> action
+    }
+}
+
+/**
  * The failsafe configuration the pilot must acknowledge on every connection before the
  * drone can be armed. See [SharedViewModel.preflightFailsafeSummary].
  */
@@ -111,8 +169,10 @@ data class PreflightFailsafeSummary(
     val criticalVoltage: Float,
     /** Tank empty action; reads "HOVER" or "HOVER / RTL (Manual / Auto)" when they differ. */
     val tankEmptyAction: String,
-    /** Action the GCS takes at the critical voltage: HOVER / RTL / LAND. */
+    /** Action at the critical voltage, from the FC's BATT_FS_CRT_ACT (e.g. "Hover", "RTL", "Land"). */
     val batteryFailsafeAction: String,
+    /** Action at the level 1 (warning) voltage, from the FC's BATT_FS_LOW_ACT. */
+    val lowVoltLevel1Action: String,
     /**
      * What the FC does on a fence breach, from its FENCE_ACTION parameter — NOT a GCS
      * default. DGCA requires the drone to act on the parameters actually set on it, so the
@@ -161,6 +221,24 @@ class SharedViewModel : ViewModel() {
     private var voltageCriticalSince = 0L      // 0 = not currently below threshold
     private var voltageCriticalSamples = 0
     private var voltageCriticalWarned = false
+    /** Timestamp of the last voltage frame counted toward the debounce (see voltageReceivedAtMs). */
+    private var lastVoltageSampleStampMs = 0L
+
+    // The level-2 latch is consumed the moment the action is issued, and with the FC
+    // critical action set to None nothing on the FC backs it up. So an action that did NOT take (target mode and
+    // the LAND fallback both refused) is remembered here and retried, a bounded number of times
+    // so it can never fight a pilot who has taken over.
+    private var voltageActionFailed = false
+    private var voltageActionRetrying = false
+    private var voltageActionRetries = 0
+    private val VOLTAGE_ACTION_MAX_RETRIES = 3
+
+    // BATTERY_STATUS / SYS_STATUS stream at ~4Hz each. A reading older than this is the last
+    // value the state held, not evidence about the pack now, so it is neither acted on nor
+    // counted toward the debounce.
+    private val VOLTAGE_STALE_MS = 3000L
+    private val VOLTAGE_STALE_WARN_INTERVAL_MS = 10_000L
+    private var lastVoltageStaleWarnTime = 0L
     /**
      * True while the critical-battery action is genuinely in progress (voltage still low).
      * Distinct from [voltageAlertLevel2Triggered], which is the one-shot latch that stops
@@ -573,7 +651,12 @@ class SharedViewModel : ViewModel() {
             _telemetryState.collect { state ->
                 // Only monitor when connected and armed (in flight)
                 if (state.connected && state.armed) {
-                    state.voltage?.let { handleBatteryVoltageFailsafe(it) }
+                    val packVoltage = state.voltage
+                    if (packVoltage != null) {
+                        handleBatteryVoltageFailsafe(packVoltage, state.voltageReceivedAtMs)
+                    } else {
+                        warnBatteryVoltageUnavailable(System.currentTimeMillis())
+                    }
                     state.altitudeRelative?.let { handleAltitudeFailsafe(it, state) }
                     handleMaxRangeFailsafe(state)
                 } else if (!state.armed) {
@@ -585,6 +668,10 @@ class SharedViewModel : ViewModel() {
                     voltageCriticalSamples = 0
                     voltageCriticalWarned = false
                     voltageCriticalActive = false
+                    lastVoltageSampleStampMs = 0L
+                    voltageActionFailed = false
+                    voltageActionRetries = 0
+                    lastVoltageStaleWarnTime = 0L
                     latchedCellCount = null
                     repository?.setVoltageFailsafeActive(false)
 
@@ -675,8 +762,8 @@ class SharedViewModel : ViewModel() {
      * window, so a `false` here means the vehicle genuinely did not enter the mode — not that
      * one packet was lost. That is the case the failsafes previously only LOGGED: the
      * one-shot latch had already been consumed before the coroutine launched, so a failed
-     * failsafe was never retried for the rest of the arm cycle, and with BATT_FS_CRT_ACT
-     * forced to 0 there is no FC-side fallback to catch it.
+     * failsafe was never retried for the rest of the arm cycle, and with the FC
+     * critical action set to None there is no FC-side fallback to catch it.
      *
      * Escalation order: the configured action, then LAND as a last resort for anything that
      * was not already trying to descend. LAND is the safest universal fallback — it needs no
@@ -741,8 +828,12 @@ class SharedViewModel : ViewModel() {
      * must stay at/below the threshold for both a duration and a sample count before the mode
      * change is issued, because a single frame was never enough evidence to justify an
      * irreversible action. The pilot hears "Battery critical" on the first sample regardless.
+     *
+     * The action is skipped when the vehicle is already landing / returning / braking (see
+     * [batteryActionAlreadySatisfied]), and retried a bounded number of times if the mode change
+     * did not take (see [retryBatteryFailsafeAction]).
      */
-    private fun handleBatteryVoltageFailsafe(voltage: Float) {
+    private fun handleBatteryVoltageFailsafe(voltage: Float, voltageReceivedAtMs: Long?) {
         val context = GCSApplication.getInstance() ?: return
 
         val level1Threshold = getLowVoltLevel1(context)
@@ -750,6 +841,14 @@ class SharedViewModel : ViewModel() {
         val level2Action = getLowVoltLevel2Action(context)
 
         val now = System.currentTimeMillis()
+
+        // The state keeps the last voltage when frames stop, and this runs on every telemetry
+        // emission. Judging that leftover value would count one old reading as many samples and
+        // could trigger the irreversible action on stale data — so say so and wait for fresh frames.
+        if (voltageReceivedAtMs != null && now - voltageReceivedAtMs > VOLTAGE_STALE_MS) {
+            warnBatteryVoltageUnavailable(now)
+            return
+        }
 
         // Level 2 (critical) - takes priority
         if (voltage <= level2Threshold) {
@@ -766,7 +865,14 @@ class SharedViewModel : ViewModel() {
                 voltageCriticalSince = now
                 voltageCriticalSamples = 0
             }
-            voltageCriticalSamples++
+            // Count distinct voltage READINGS, not telemetry emissions. This runs on every state
+            // update (position, attitude, ...), so counting calls made the "5 samples" requirement
+            // meaningless: one stale low frame satisfied it in a few tens of milliseconds. Frames
+            // without a timestamp fall back to counting calls.
+            if (voltageReceivedAtMs == null || voltageReceivedAtMs != lastVoltageSampleStampMs) {
+                lastVoltageSampleStampMs = voltageReceivedAtMs ?: 0L
+                voltageCriticalSamples++
+            }
 
             if (!voltageCriticalWarned) {
                 voltageCriticalWarned = true
@@ -811,8 +917,8 @@ class SharedViewModel : ViewModel() {
                 LogUtils.i("BatteryFailsafe", "⚠️ CRITICAL: Battery voltage ${voltage}V <= ${level2Threshold}V - Triggering $level2Action (one-shot)")
 
                 // ═══ Diagnostic: capture state when a critical-battery failsafe fires near a fence ═══
-                // The GCS handles the action (BRAKE/RTL/LAND); the FC's own critical action is
-                // forced to 0 (None) so it can't RTL through the geofence. This line records the
+                // The GCS handles the action (BRAKE/RTL/LAND) and the FC's own critical action is
+                // whatever the operator set (see BatteryFsAction). This line records the
                 // voltage/mode/fence context so any future "didn't stop at the fence" report can
                 // be traced to the exact failsafe sequence.
                 LogUtils.i("BatteryFailsafe", "🔎 FENCE-CONTEXT: voltage=${voltage}V crit=${level2Threshold}V mode=${_telemetryState.value.mode} geofenceEnabled=${_geofenceEnabled.value} fenceBreached=${_geofenceViolationDetected.value} action=$level2Action")
@@ -820,10 +926,29 @@ class SharedViewModel : ViewModel() {
                 // TTS alert — matches the "Battery Failsafe" popup text exactly.
                 ttsManager?.speak("Battery Failsafe")
 
+                // Which mode the configured action means, and whether the vehicle is already
+                // doing at least that. Without this check the default HOVER action (BRAKE) was
+                // commanded over a LAND or RTL already under way — halting the descent or the
+                // return home and leaving the drone hovering on a critical battery.
+                val (targetMode, targetModeName) = batteryFailsafeTarget(level2Action)
+                val currentModeName = _telemetryState.value.mode
+                val fcManagesAction = BatteryFsAction.isFcManaged(level2Action)
+                val alreadySatisfied = fcManagesAction || batteryActionAlreadySatisfied(currentModeName, targetMode)
+                // Why the GCS is not commanding a mode, for the popup, the log and the server event.
+                val skipReason = if (fcManagesAction) {
+                    "the drone's own ${BatteryFsAction.label(level2Action)} failsafe is handling it"
+                } else {
+                    "already in $currentModeName, mode left unchanged"
+                }
+
                 // Add notification
                 addNotification(
                     Notification(
-                        message = "⚠️ CRITICAL BATTERY: ${String.format(Locale.US, "%.1f", voltage)}V - Activating $level2Action",
+                        message = if (alreadySatisfied) {
+                            "⚠️ CRITICAL BATTERY: ${String.format(Locale.US, "%.1f", voltage)}V - $skipReason"
+                        } else {
+                            "⚠️ CRITICAL BATTERY: ${String.format(Locale.US, "%.1f", voltage)}V - Activating $targetModeName"
+                        },
                         type = NotificationType.ERROR
                     )
                 )
@@ -842,28 +967,24 @@ class SharedViewModel : ViewModel() {
                     repo?.resetAutoModeSprayDetection()
                     LogUtils.i("BatteryFailsafe", "🚿 Reset spray detection to prevent false Tank Empty")
 
-                    // Note: "HOVER" or "LOITER" setting uses BRAKE mode to keep drone in place
-                    val targetMode = when (level2Action.uppercase()) {
-                        "RTL" -> MavMode.RTL
-                        "LAND" -> MavMode.LAND
-                        else -> MavMode.BRAKE // Use BRAKE mode for hover - keeps drone in place
+                    if (alreadySatisfied) {
+                        LogUtils.i("BatteryFailsafe", "✅ Not commanding $targetModeName: $skipReason")
+                    } else {
+                        val ok = executeFailsafeModeChange("BatteryFailsafe", targetMode, targetModeName)
+                        if (!ok) {
+                            // Neither the target mode nor the LAND fallback took. The latch is
+                            // already consumed, so remember this and retry while still critical.
+                            voltageActionFailed = true
+                            LogUtils.e("BatteryFailsafe", "❌ Critical-battery action did not take — will retry while voltage stays critical")
+                        }
                     }
-                    
-                    val targetModeName = when (targetMode) {
-                        MavMode.RTL -> "RTL"
-                        MavMode.LAND -> "LAND"
-                        MavMode.BRAKE -> "BRAKE"
-                        else -> level2Action
-                    }
-
-                    executeFailsafeModeChange("BatteryFailsafe", targetMode, targetModeName)
 
                     // Send event to WebSocket
                     try {
                         WebSocketManager.getInstance().sendMissionEvent(
                             eventType = "BATTERY_CRITICAL",
                             eventStatus = "CRITICAL",
-                            description = "Battery voltage critical (${String.format(Locale.US, "%.1f", voltage)}V) - $targetModeName activated"
+                            description = "Battery voltage critical (${String.format(Locale.US, "%.1f", voltage)}V) - ${if (alreadySatisfied) skipReason else "$targetModeName activated"}"
                         )
                     } catch (e: Exception) {
                         LogUtils.e("BatteryFailsafe", "Failed to send battery critical event", e)
@@ -875,24 +996,40 @@ class SharedViewModel : ViewModel() {
                 lastVoltageAlertLevel2Time = now
                 LogUtils.i("BatteryFailsafe", "⚠️ CRITICAL (repeat alert): Battery voltage ${voltage}V still below ${level2Threshold}V (action already taken this arm cycle)")
                 ttsManager?.speak("Critical! Battery voltage ${String.format(Locale.US, "%.1f", voltage)} volts.")
+
+                // If the action never took, try again — a few times only, so a pilot who has
+                // taken over manually is not fought indefinitely.
+                if (voltageActionFailed && !voltageActionRetrying &&
+                    voltageActionRetries < VOLTAGE_ACTION_MAX_RETRIES) {
+                    retryBatteryFailsafeAction(level2Action)
+                }
             }
         }
         // ═══ RECOVERY ═══
-        // Clear the debounce accumulator once the voltage climbs back above the threshold
-        // (plus hysteresis, so a reading hovering on the boundary doesn't chatter). Without
-        // this, brief dips scattered across a long flight would accumulate into a trigger.
+        // Two different resets, on two different thresholds:
         //
-        // voltageCriticalActive also clears here so the altitude-ceiling failsafe stops
-        // deferring; voltageAlertLevel2Triggered deliberately does NOT — the action stays
-        // one-shot per arm cycle so it can never fight the pilot repeatedly.
-        else if (voltage > level2Threshold + VOLTAGE_RECOVERY_HYSTERESIS_V) {
-            if (voltageCriticalSince != 0L || voltageCriticalActive) {
-                LogUtils.i("BatteryFailsafe", "🔋 Voltage recovered to ${voltage}V (> ${level2Threshold}V + ${VOLTAGE_RECOVERY_HYSTERESIS_V}V) — critical condition cleared")
+        //  - The DEBOUNCE accumulator (Since/Samples) resets the moment the voltage is back above
+        //    the threshold. It must measure a CONTINUOUS stretch below it: reset only past the
+        //    hysteresis band, a dip that recovered to just inside the band kept its start time,
+        //    and the next single-frame dip — possibly minutes later — inherited it and fired the
+        //    action immediately. That is the "scattered dips accumulate" failure it exists to stop.
+        //
+        //  - The "critical" STATE (Active/Warned) clears only past the hysteresis band, so a
+        //    reading hovering on the boundary doesn't chatter the TTS or the altitude-ceiling
+        //    deferral. voltageAlertLevel2Triggered deliberately does NOT clear — the action stays
+        //    one-shot per arm cycle so it can never fight the pilot repeatedly.
+        else {
+            if (voltage > level2Threshold) {
+                voltageCriticalSince = 0L
+                voltageCriticalSamples = 0
             }
-            voltageCriticalSince = 0L
-            voltageCriticalSamples = 0
-            voltageCriticalWarned = false
-            voltageCriticalActive = false
+            if (voltage > level2Threshold + VOLTAGE_RECOVERY_HYSTERESIS_V) {
+                if (voltageCriticalWarned || voltageCriticalActive) {
+                    LogUtils.i("BatteryFailsafe", "🔋 Voltage recovered to ${voltage}V (> ${level2Threshold}V + ${VOLTAGE_RECOVERY_HYSTERESIS_V}V) — critical condition cleared")
+                }
+                voltageCriticalWarned = false
+                voltageCriticalActive = false
+            }
         }
 
         // Level 1 (warning) - alert only, every 3 seconds
@@ -916,6 +1053,74 @@ class SharedViewModel : ViewModel() {
         // NOTE: recovery above clears the debounce and voltageCriticalActive, but NOT
         // voltageAlertLevel2Triggered — that resets only on DISARM, keeping the failsafe
         // action truly one-shot per arm cycle.
+    }
+
+    /** The mode a level-2 action stands for. HOVER / LOITER (and anything unrecognised) mean BRAKE. */
+    private fun batteryFailsafeTarget(action: String): Pair<UInt, String> = when (action.uppercase()) {
+        "RTL" -> MavMode.RTL to "RTL"
+        "LAND" -> MavMode.LAND to "LAND"
+        else -> MavMode.BRAKE to "BRAKE" // BRAKE keeps the drone in place, which is what "hover" means here
+    }
+
+    /**
+     * True when the vehicle is already doing at least what the level-2 action asks for, so
+     * commanding it would only interrupt something better.
+     *
+     * LAND and RTL both outrank BRAKE: BRAKE stops the aircraft where it is, which is the WRONG
+     * thing to do to a descent or a return that is already under way. Only a LAND action can
+     * replace an RTL (it is explicitly configured to land), and nothing replaces a LAND.
+     */
+    private fun batteryActionAlreadySatisfied(mode: String?, target: UInt): Boolean {
+        val m = mode ?: return false
+        val landing = m.equals("Land", ignoreCase = true)
+        val returning = m.contains("RTL", ignoreCase = true)   // "RTL" and "Smart_RTL"
+        val braking = m.equals("Brake", ignoreCase = true)
+        return when (target) {
+            MavMode.LAND -> landing
+            MavMode.RTL -> landing || returning
+            else -> landing || returning || braking
+        }
+    }
+
+    /**
+     * Re-issue a critical-battery action that did not take. Called from the repeat-alert branch,
+     * at most [VOLTAGE_ACTION_MAX_RETRIES] times, and only while the vehicle is still not in a
+     * mode that satisfies the action.
+     */
+    private fun retryBatteryFailsafeAction(level2Action: String) {
+        val (targetMode, targetModeName) = batteryFailsafeTarget(level2Action)
+        if (batteryActionAlreadySatisfied(_telemetryState.value.mode, targetMode)) {
+            voltageActionFailed = false
+            return
+        }
+
+        voltageActionRetrying = true
+        voltageActionRetries++
+        LogUtils.w("BatteryFailsafe", "↻ Retrying $targetModeName (attempt $voltageActionRetries/$VOLTAGE_ACTION_MAX_RETRIES) — the previous attempt did not take")
+        viewModelScope.launch {
+            try {
+                voltageActionFailed = !executeFailsafeModeChange("BatteryFailsafe", targetMode, targetModeName)
+            } finally {
+                voltageActionRetrying = false
+            }
+        }
+    }
+
+    /**
+     * Tell the pilot the pack voltage is missing or stale while armed — the critical-battery
+     * failsafe cannot evaluate anything, and silence would read as "battery is fine".
+     */
+    private fun warnBatteryVoltageUnavailable(now: Long) {
+        if (now - lastVoltageStaleWarnTime < VOLTAGE_STALE_WARN_INTERVAL_MS) return
+        lastVoltageStaleWarnTime = now
+        LogUtils.w("BatteryFailsafe", "⚠️ Battery voltage missing or stale — critical-battery failsafe cannot evaluate")
+        ttsManager?.speak("Battery voltage unavailable")
+        addNotification(
+            Notification(
+                message = "⚠️ Battery voltage unavailable — the critical-battery failsafe cannot evaluate",
+                type = NotificationType.WARNING
+            )
+        )
     }
 
     /**
@@ -2415,13 +2620,23 @@ class SharedViewModel : ViewModel() {
     }
 
     /**
-     * Get the user's low voltage level 2 (critical) action from SharedPreferences.
+     * The level 2 (critical) action the GCS enforces: the FC's BATT_FS_CRT_ACT, cached in
+     * SharedPreferences on connect and whenever Options reads/saves it.
      * On SVD it is fixed at RTL — there is no UI to change it.
      */
     private fun getLowVoltLevel2Action(context: Context): String {
         if (isSvdFlavor) return svdFixedFailsafeAction
         val prefs = context.getSharedPreferences("failsafe_options", Context.MODE_PRIVATE)
         return prefs.getString("low_volt_level_2_action", "HOVER") ?: "HOVER"
+    }
+
+    /**
+     * The level 1 (warning) action — the FC's BATT_FS_LOW_ACT, cached like the level 2 one. The
+     * GCS itself only ever alerts at level 1; this is what the DRONE does, reported to the pilot.
+     */
+    private fun getLowVoltLevel1Action(context: Context): String {
+        val prefs = context.getSharedPreferences("failsafe_options", Context.MODE_PRIVATE)
+        return prefs.getString("low_volt_level_1_action", "HOVER") ?: "HOVER"
     }
 
     // ═══ Altitude ceiling (FENCE_ALT_MAX) ═══
@@ -3243,73 +3458,132 @@ class SharedViewModel : ViewModel() {
     }
 
     /**
+     * One parameter read or write on the wire at a time.
+     *
+     * Reads and writes are matched to their replies by parameter NAME only, so two operations in
+     * flight at once can steal each other's replies — the connect-time sync, the Options screen,
+     * a Spray/Braking/Battery screen load and the spray slider all use this path. Each operation
+     * holds the lock only for its own round trip, so nothing queues for longer than one timeout.
+     * (The Full Param List download streams PARAM_VALUEs and deliberately does not take it.)
+     */
+    private val paramOpMutex = kotlinx.coroutines.sync.Mutex()
+
+    /** Re-send an unanswered PARAM_REQUEST_READ this often while waiting. */
+    private val PARAM_READ_RESEND_MS = 1000L
+
+    /** Re-send an unanswered PARAM_SET this often while waiting (PARAM_SET is idempotent). */
+    private val PARAM_SET_RESEND_MS = 1500L
+
+    /**
+     * After a reply carrying a DIFFERENT value than we wrote, keep listening this long for the
+     * genuine ack before concluding the FC clamped or rejected the write.
+     */
+    private val PARAM_SET_MISMATCH_GRACE_MS = 1000L
+
+    /**
+     * True when [ack] is the FC confirming it now holds [requested].
+     *
+     * Integer-typed parameters are compared after the FC's own truncation/rounding, so writing
+     * 4549.9998 to an int16 parameter that reads back 4549 still counts as accepted.
+     */
+    fun paramAckMatches(ack: com.divpundir.mavlink.definitions.common.ParamValue?, requested: Float): Boolean {
+        if (ack == null) return false
+        val actual = ack.paramValue
+        val type = ack.paramType.value.toInt()
+        // MAV_PARAM_TYPE 1..8 are the integer types (UINT8 .. INT64); 9/10 are REAL32/REAL64.
+        return if (type in 1..8) {
+            actual == requested.toInt().toFloat() || actual == Math.round(requested).toFloat()
+        } else {
+            kotlin.math.abs(actual - requested) <= kotlin.math.max(1e-6f, kotlin.math.abs(requested) * 1e-6f)
+        }
+    }
+
+    /**
      * Read a parameter value from the autopilot by name.
-     * Subscribes to the paramValue flow FIRST, then sends PARAM_REQUEST_READ,
-     * so the response is never missed due to race conditions.
+     *
+     * The request is sent from onSubscription, i.e. only once the collector is attached, so the
+     * reply cannot slip past in the gap (the flow has no replay). It is re-sent every
+     * [PARAM_READ_RESEND_MS] while unanswered, so one request lost on a lossy link no longer
+     * costs the whole timeout.
      * Returns the float value or null if timed out / not connected.
      */
     suspend fun readParameter(paramId: String, timeoutMs: Long = 3000L): Float? {
-        repo?.let { repository ->
+        val repository = repo
+        if (repository == null) {
+            LogUtils.e("OptionsVM", "Cannot read $paramId — not connected to drone")
+            return null
+        }
+        return paramOpMutex.withLock {
             try {
-                // Deferred result holder
-                var result: Float? = null
-
-                // Step 1: Start collecting BEFORE sending the request
-                val collectJob = viewModelScope.launch {
-                    paramValue.collect { pv ->
-                        val name = pv.paramId.trim().replace("\u0000", "")
-                        if (name == paramId) {
-                            result = pv.paramValue
-                        }
-                    }
-                }
-
-                // Small delay to ensure collector is active
-                delay(50)
-
-                // Step 2: Send the request
-                val paramRequestRead = com.divpundir.mavlink.definitions.common.ParamRequestRead(
+                val request = com.divpundir.mavlink.definitions.common.ParamRequestRead(
                     targetSystem = repository.fcuSystemId,
                     targetComponent = repository.fcuComponentId,
                     paramId = paramId,
                     paramIndex = -1
                 )
-                repository.connection.trySendUnsignedV2(
-                    repository.gcsSystemId,
-                    repository.gcsComponentId,
-                    paramRequestRead
-                )
-                LogUtils.d("OptionsVM", "📤 Sent PARAM_REQUEST_READ for: $paramId")
-
-                // Step 3: Wait for the response with timeout
-                val startTime = System.currentTimeMillis()
-                while (result == null && System.currentTimeMillis() - startTime < timeoutMs) {
-                    delay(50)
+                suspend fun sendRequest() {
+                    repository.connection.trySendUnsignedV2(
+                        repository.gcsSystemId,
+                        repository.gcsComponentId,
+                        request
+                    )
                 }
 
-                collectJob.cancel()
+                val reply = withTimeoutOrNull(timeoutMs) {
+                    kotlinx.coroutines.coroutineScope {
+                        val resender = launch {
+                            while (true) {
+                                delay(PARAM_READ_RESEND_MS)
+                                sendRequest()
+                            }
+                        }
+                        try {
+                            repository.paramValue
+                                .onSubscription {
+                                    sendRequest()
+                                    LogUtils.d("OptionsVM", "📤 Sent PARAM_REQUEST_READ for: $paramId")
+                                }
+                                // Drone-supplied paramId is NUL-padded to 16 bytes.
+                                .first { it.paramId.trim().replace("\u0000", "") == paramId }
+                        } finally {
+                            resender.cancel()
+                        }
+                    }
+                }
 
-                if (result != null) {
-                    LogUtils.d("OptionsVM", "📥 Received $paramId = $result")
-                    return result
+                if (reply != null) {
+                    LogUtils.d("OptionsVM", "📥 Received $paramId = ${reply.paramValue}")
                 } else {
                     LogUtils.e("OptionsVM", "⏱ Timeout reading $paramId after ${timeoutMs}ms")
                 }
+                reply?.paramValue
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
             } catch (e: Exception) {
                 LogUtils.e("OptionsVM", "Failed to read parameter $paramId", e)
+                null
             }
-        } ?: run {
-            LogUtils.e("OptionsVM", "Cannot read $paramId — not connected to drone")
         }
-        return null
     }
 
     /**
      * Set a parameter value on the autopilot.
-     * Returns the PARAM_VALUE response if successful within timeout.
+     *
+     * Returns the FC's PARAM_VALUE reply, or null if none arrived within [timeoutMs].
+     *
+     * Only a reply carrying the value we wrote is taken as the ack straight away. The name alone
+     * is not enough: a late answer to an earlier read, or an entry from a param-list download,
+     * carries the OLD value and used to be returned as "confirmed", so a write that never
+     * landed was reported as saved. When only non-matching replies arrive (the FC clamped or
+     * rejected the value) the latest one is returned after [PARAM_SET_MISMATCH_GRACE_MS], so the
+     * caller can still show what the FC actually holds — check it with [paramAckMatches].
+     *
+     * The PARAM_SET is sent from onSubscription (the flow has no replay, so sending first raced
+     * the ack) and re-sent every [PARAM_SET_RESEND_MS] while unanswered.
      */
     suspend fun setParameter(paramId: String, value: Float, timeoutMs: Long = 3000L): com.divpundir.mavlink.definitions.common.ParamValue? {
-        repo?.let { repository ->
+        val repository = repo ?: return null
+        return paramOpMutex.withLock {
             try {
                 LogUtils.d("RCCalVM", "📤 Setting parameter: $paramId = $value")
 
@@ -3320,32 +3594,59 @@ class SharedViewModel : ViewModel() {
                     paramValue = value,
                     paramType = com.divpundir.mavlink.definitions.common.MavParamType.REAL32.wrap()
                 )
-
-                // Wait for the PARAM_VALUE response confirming the set. The PARAM_SET is sent from
-                // onSubscription so it goes out only AFTER this collector is attached: the flow has
-                // no replay, so sending first raced the ack — a fast FC could answer before the
-                // collector existed, the ack was dropped, and a successful write was reported as
-                // failed, stalling every caller that gates on it for the full timeout.
-                // (readParameter() collects before sending for the same reason.)
-                // Note: paramId from drone may contain null-terminator chars, so we must clean before comparing
-                return withTimeoutOrNull(timeoutMs) {
-                    paramValue
-                        .onSubscription {
-                            repository.connection.trySendUnsignedV2(
-                                repository.gcsSystemId,
-                                repository.gcsComponentId,
-                                paramSet
-                            )
-                        }
-                        .filter { it.paramId.trim().replace("\u0000", "") == paramId }
-                        .first()
+                suspend fun sendSet() {
+                    repository.connection.trySendUnsignedV2(
+                        repository.gcsSystemId,
+                        repository.gcsComponentId,
+                        paramSet
+                    )
                 }
+
+                kotlinx.coroutines.coroutineScope {
+                    val replies = repository.paramValue
+                        .onSubscription { sendSet() }
+                        // Note: paramId from drone may contain null-terminator chars, so we must clean before comparing
+                        .filter { it.paramId.trim().replace("\u0000", "") == paramId }
+                        .produceIn(this)
+                    val resender = launch {
+                        while (true) {
+                            delay(PARAM_SET_RESEND_MS)
+                            sendSet()
+                        }
+                    }
+                    try {
+                        var deadline = System.currentTimeMillis() + timeoutMs
+                        var matched: com.divpundir.mavlink.definitions.common.ParamValue? = null
+                        var mismatched: com.divpundir.mavlink.definitions.common.ParamValue? = null
+                        while (matched == null) {
+                            val remaining = deadline - System.currentTimeMillis()
+                            if (remaining <= 0) break
+                            val reply = withTimeoutOrNull(remaining) { replies.receive() } ?: break
+                            if (paramAckMatches(reply, value)) {
+                                matched = reply
+                            } else {
+                                if (mismatched == null) {
+                                    deadline = minOf(deadline, System.currentTimeMillis() + PARAM_SET_MISMATCH_GRACE_MS)
+                                }
+                                mismatched = reply
+                            }
+                        }
+                        if (matched == null && mismatched != null) {
+                            LogUtils.w("RCCalVM", "⚠ $paramId: wrote $value but FC reports ${mismatched.paramValue}")
+                        }
+                        matched ?: mismatched
+                    } finally {
+                        resender.cancel()
+                        replies.cancel()
+                    }
+                }
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
             } catch (e: Exception) {
                 LogUtils.e("RCCalVM", "Failed to set parameter $paramId", e)
-                return null
+                null
             }
         }
-        return null
     }
 
     // ── Proximity-radar thresholds (hybrid vehicle-seeded / pilot-override) ──────
@@ -7198,6 +7499,9 @@ class SharedViewModel : ViewModel() {
         )
         private const val ARMING_CHECK_REQUIRED_VALUE = 4390f
 
+        /** Longest the pre-arm popup waits for the connect-time sync before showing what it has. */
+        private const val PREFLIGHT_SYNC_WAIT_MS = 25_000L
+
         // Fallback effective spray swath (m) used for area accounting when no auto-mission
         // line spacing is available (e.g. manual flights). Approximate boom/spray width.
         const val DEFAULT_SWATH_METERS = 5.0
@@ -7346,6 +7650,10 @@ class SharedViewModel : ViewModel() {
 
                     // Require a fresh pre-arm acknowledgement on the next connection
                     preflightAcknowledged = false
+                    // A popup coroutine still waiting out its delay must not raise the popup
+                    // for a link that is already gone.
+                    preflightPopupJob?.cancel()
+                    preflightPopupJob = null
                     _preflightFailsafeSummary.value = null
                 }
             }
@@ -7355,15 +7663,23 @@ class SharedViewModel : ViewModel() {
     // Job reference for fence status monitoring - allows cancellation on reconnect/disable
     private var fenceMonitoringJob: Job? = null
 
+    // The connect-time failsafe/fence sync, and the coroutine that raises the pre-arm popup.
+    // The popup waits on the sync so it reports what was actually read from this vehicle.
+    private var connectSyncJob: Job? = null
+    private var preflightPopupJob: Job? = null
+
     /**
      * Sync failsafe configuration with the drone immediately after connection.
      *
-     * Voltage thresholds are READ from the FC and cached — never written here. The only
-     * thing this pushes is the altitude ceiling (when the pilot has explicitly set one) and
-     * BATT_FS_LOW_ACT / BATT_FS_CRT_ACT = 0, which is a hard invariant.
+     * Voltage thresholds and the battery failsafe actions (BATT_FS_LOW_ACT / BATT_FS_CRT_ACT)
+     * are READ from the FC and cached — never written here; the FC is the source of truth. The
+     * only thing this may push is the altitude fence, when the pilot has explicitly set a ceiling.
      */
     private fun syncFailsafeOptionsOnConnect() {
-        viewModelScope.launch {
+        // One sync at a time. A connection flap used to start a second sync while the first was
+        // still mid-way, and the two interleaved reads/writes of the same parameters.
+        connectSyncJob?.cancel()
+        connectSyncJob = viewModelScope.launch {
             try {
                 val context = GCSApplication.getInstance() ?: return@launch
                 val prefs = context.getSharedPreferences("failsafe_options", Context.MODE_PRIVATE)
@@ -7422,62 +7738,85 @@ class SharedViewModel : ViewModel() {
                 // partial-cell-sum that fires a false failsafe would have silently rewritten
                 // the parameter it was being judged against.
                 //
-                // The ONLY path that writes these parameters is the pilot pressing Update in
-                // the Options tab (OptionsViewModel.updateParameters). The failsafe *actions*
-                // are still forced off below — the GCS owns the critical action.
+                // The ONLY path that writes these parameters is the pilot pressing Save & Sync
+                // in the Options tab. The failsafe ACTIONS (BATT_FS_LOW_ACT / BATT_FS_CRT_ACT)
+                // follow the same rule: read and cached below, never written on connect.
                 val readFailures = readFailsafeVoltagesFromFc(prefs)
 
                 val failures = mutableListOf<String>()
                 failures.addAll(readFailures)
-                failures.addAll(disableFcBatteryFailsafeActions())
+                failures.addAll(readFailsafeActionsFromFc(prefs))
 
                 if (failures.isEmpty()) {
                     LogUtils.i("OptionsSync", "All failsafe options synced to drone ✓")
                 } else {
                     LogUtils.w("OptionsSync", "Failed to sync: ${failures.joinToString()}")
                 }
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                // Superseded by a newer connection (or the link went down): stop quietly.
+                throw e
             } catch (e: Exception) {
                 LogUtils.e("OptionsSync", "Error syncing failsafe options on connect", e)
-                // The invariant must hold even when the sync above threw partway through —
-                // otherwise an exception in the threshold writes leaves the FC free to act.
-                try {
-                    val recoveryFailures = disableFcBatteryFailsafeActions()
-                    if (recoveryFailures.isEmpty()) {
-                        LogUtils.i("OptionsSync", "✓ FC battery actions forced to 0 after sync error")
-                    } else {
-                        LogUtils.e("OptionsSync", "✗ Could not force FC battery actions to 0 after sync error: ${recoveryFailures.joinToString()}")
-                    }
-                } catch (inner: Exception) {
-                    LogUtils.e("OptionsSync", "Error forcing FC battery actions to 0 after sync error", inner)
-                }
             }
         }
     }
 
     /**
-     * Force both of the FC's own battery failsafe actions to 0 (None).
+     * Pull BATT_FS_LOW_ACT / BATT_FS_CRT_ACT off the flight controller and cache them as the
+     * level 1 / level 2 actions — THE FC IS THE SOURCE OF TRUTH, exactly as for the thresholds.
      *
-     * Level 1 is alert-only by design. Level 2 (critical) is handled by the GCS via
-     * [handleBatteryVoltageFailsafe]; letting the FC ALSO act caused a dual failsafe where
-     * the FC's RTL took priority over the geofence and flew straight through it.
+     * These used to be forced to 0 on every connect so that the GCS alone owned the critical
+     * action. That silently overrode whatever the operator had configured on the vehicle, and it
+     * meant the Options screen could never agree with the drone. Now connecting changes nothing
+     * on the vehicle: the only writer of these parameters is the pilot pressing Save & Sync.
      *
-     * Returns the names of the parameters that failed to write.
+     * Consequence to be aware of: a non-zero critical action is now run by the FC itself, and an
+     * FC-side RTL does not respect the geofence. Actions the FC runs entirely on its own
+     * (Smart RTL variants, Terminate) are not duplicated by the GCS — see
+     * [BatteryFsAction.isFcManaged].
+     *
+     * An unreadable parameter clears the cached key rather than keeping a value that may belong
+     * to a different vehicle.
+     *
+     * Returns the names of the parameters that could not be read.
      */
-    private suspend fun disableFcBatteryFailsafeActions(): List<String> {
+    private suspend fun readFailsafeActionsFromFc(prefs: android.content.SharedPreferences): List<String> {
         val failures = mutableListOf<String>()
 
-        if (setParameter("BATT_FS_LOW_ACT", 0.0f) != null) {
-            LogUtils.i("OptionsSync", "✓ BATT_FS_LOW_ACT = 0 (alert only)")
-        } else {
-            failures.add("BATT_FS_LOW_ACT")
-            LogUtils.e("OptionsSync", "✗ Failed to set BATT_FS_LOW_ACT")
+        fun accept(name: String, key: String, value: Float?) {
+            val action = value?.let { BatteryFsAction.fromFcValue(it) }
+            if (action == null) {
+                failures.add(name)
+                prefs.edit().remove(key).apply()
+                LogUtils.w("OptionsSync", "✗ Could not read $name from FC (got $value) — falling back to the default action")
+            } else {
+                prefs.edit().putString(key, action).apply()
+                LogUtils.i("OptionsSync", "✓ Read $name = $action from FC")
+            }
         }
 
-        if (setParameter("BATT_FS_CRT_ACT", 0.0f) != null) {
-            LogUtils.i("OptionsSync", "✓ BATT_FS_CRT_ACT = 0 (None — GCS handles critical action)")
-        } else {
-            failures.add("BATT_FS_CRT_ACT")
-            LogUtils.e("OptionsSync", "✗ Failed to set BATT_FS_CRT_ACT")
+        accept("BATT_FS_LOW_ACT", "low_volt_level_1_action", readParameter("BATT_FS_LOW_ACT", timeoutMs = 4000L))
+        delay(100) // small gap between param requests
+        accept("BATT_FS_CRT_ACT", "low_volt_level_2_action", readParameter("BATT_FS_CRT_ACT", timeoutMs = 4000L))
+
+        if (failures.isNotEmpty()) {
+            addNotification(
+                Notification(
+                    message = "⚠️ Could not read the drone's battery failsafe action (${failures.joinToString()}). " +
+                        "Open Options and press refresh to check it.",
+                    type = NotificationType.WARNING
+                )
+            )
+        }
+
+        // Motors stopping in flight is never something to discover after the fact.
+        if (prefs.getString("low_volt_level_2_action", null) == BatteryFsAction.TERMINATE) {
+            addNotification(
+                Notification(
+                    message = "⚠️ The drone's critical-battery action is TERMINATE — motors will stop in flight.",
+                    type = NotificationType.WARNING
+                )
+            )
         }
 
         return failures
@@ -7573,6 +7912,8 @@ class SharedViewModel : ViewModel() {
                     )
                 )
             }
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            throw e
         } catch (e: Exception) {
             LogUtils.e("OptionsSync", "Error adopting the altitude ceiling from the FC", e)
         }
@@ -7585,31 +7926,36 @@ class SharedViewModel : ViewModel() {
      * [applyAltitudeCeilingToFc]. Connect-time sync reads instead — see
      * [adoptAltitudeCeilingFromFc] for why.
      */
-    private suspend fun pushAltitudeCeilingToFc(prefs: android.content.SharedPreferences) {
+    private suspend fun pushAltitudeCeilingToFc(prefs: android.content.SharedPreferences): Boolean {
         try {
             if (!prefs.getBoolean("max_altitude_enabled", true)) {
                 LogUtils.i("OptionsSync", "Altitude ceiling failsafe disabled — not writing FENCE_ALT_MAX")
-                return
+                return true
             }
 
             val ceiling = prefs.getFloat("max_altitude", DEFAULT_MAX_ALTITUDE_M)
-            if (ceiling <= 0f) return
+            if (ceiling <= 0f) return true
             // Biased below the pilot's ceiling so ArduPilot's climb-arrest overshoot lands
             // under it rather than over. See getFcAltitudeFenceMax().
             val fcLimit = (ceiling - FC_ALT_FENCE_SAFETY_OFFSET_M).coerceAtLeast(1f)
-            if (setParameter("FENCE_ALT_MAX", fcLimit) != null) {
+            val ack = setParameter("FENCE_ALT_MAX", fcLimit, timeoutMs = 5000L)
+            if (paramAckMatches(ack, fcLimit)) {
                 LogUtils.i("OptionsSync", "✓ FENCE_ALT_MAX = $fcLimit m (ceiling ${ceiling}m less ${FC_ALT_FENCE_SAFETY_OFFSET_M}m overshoot allowance)")
-            } else {
-                LogUtils.e("OptionsSync", "✗ Failed to set FENCE_ALT_MAX")
-                addNotification(
-                    Notification(
-                        message = "⚠️ Could not write the altitude ceiling to the drone",
-                        type = NotificationType.WARNING
-                    )
-                )
+                return true
             }
+            LogUtils.e("OptionsSync", "✗ Failed to set FENCE_ALT_MAX (FC reports ${ack?.paramValue})")
+            addNotification(
+                Notification(
+                    message = "⚠️ Could not write the altitude ceiling to the drone",
+                    type = NotificationType.WARNING
+                )
+            )
+            return false
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            throw e
         } catch (e: Exception) {
             LogUtils.e("OptionsSync", "Error pushing the altitude ceiling to the FC", e)
+            return false
         }
     }
 
@@ -7692,6 +8038,8 @@ class SharedViewModel : ViewModel() {
                     )
                 )
             }
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            throw e
         } catch (e: Exception) {
             LogUtils.e("OptionsSync", "Error syncing RTL_ALT", e)
         }
@@ -7793,6 +8141,8 @@ class SharedViewModel : ViewModel() {
                     }
                 }
             }
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            throw e
         } catch (e: Exception) {
             LogUtils.e("FenceSync", "Error syncing fence parameters", e)
         }
@@ -8008,6 +8358,8 @@ class SharedViewModel : ViewModel() {
                     )
                 )
             }
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            throw e
         } catch (e: Exception) {
             LogUtils.e("FenceSync", "Error arming the FC altitude fence", e)
         }
@@ -8022,16 +8374,24 @@ class SharedViewModel : ViewModel() {
      * at 110 m, so the breach action - an RTL - began by climbing 60 m through the very limit
      * it was recovering from. That is the "RTL alt isn't being taken as per set params"
      * report. All three writes now move together.
+     *
+     * @return whether FENCE_ALT_MAX itself was confirmed by the FC, so the Options screen can say
+     *   so instead of reporting "synced" when the ceiling never reached the vehicle. The RTL_ALT
+     *   and fence-arming steps report their own failures as notifications.
      */
-    suspend fun applyAltitudeCeilingToFc() {
-        val context = GCSApplication.getInstance() ?: return
+    suspend fun applyAltitudeCeilingToFc(): Boolean {
+        val context = GCSApplication.getInstance() ?: return false
         val prefs = context.getSharedPreferences("failsafe_options", Context.MODE_PRIVATE)
         try {
-            pushAltitudeCeilingToFc(prefs)
+            val ceilingWritten = pushAltitudeCeilingToFc(prefs)
             syncRtlAltOnConnect(prefs)
             armFcAltitudeFence()
+            return ceilingWritten
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            throw e
         } catch (e: Exception) {
             LogUtils.e("OptionsSync", "Failed to apply the altitude ceiling to the FC", e)
+            return false
         }
     }
 
@@ -8104,10 +8464,19 @@ class SharedViewModel : ViewModel() {
      * reported as the 12S default even on a 6S drone.
      */
     private fun showPreflightFailsafeSummaryOnConnect() {
-        viewModelScope.launch {
+        preflightPopupJob?.cancel()
+        preflightPopupJob = viewModelScope.launch {
             delay(3000)
+            // The 2 s in syncFailsafeOptionsOnConnect is only its INITIAL delay: the sync then
+            // makes some fifteen reads/writes that each wait up to several seconds, and the FC's
+            // voltage thresholds and fence settings are read near the end of it. Building the
+            // summary at a fixed 3 s therefore showed the previous drone's cached values, or
+            // "Unknown". Wait for the sync to finish (bounded, so a dead link cannot hold the
+            // popup back — arming re-raises it on demand anyway).
+            withTimeoutOrNull(PREFLIGHT_SYNC_WAIT_MS) { connectSyncJob?.join() }
             val context = GCSApplication.getInstance() ?: return@launch
             if (preflightAcknowledged) return@launch
+            if (!_telemetryState.value.connected) return@launch
             _preflightFailsafeSummary.value = buildPreflightFailsafeSummary(context)
             LogUtils.i("PreArm", "Showing pre-arm failsafe acknowledgement: ${_preflightFailsafeSummary.value}")
         }
@@ -8117,7 +8486,8 @@ class SharedViewModel : ViewModel() {
         lowVoltLevel1 = getLowVoltLevel1(context),
         criticalVoltage = getLowVoltLevel2(context),
         tankEmptyAction = describeTankEmptyAction(context),
-        batteryFailsafeAction = getLowVoltLevel2Action(context),
+        batteryFailsafeAction = BatteryFsAction.label(getLowVoltLevel2Action(context)),
+        lowVoltLevel1Action = BatteryFsAction.label(getLowVoltLevel1Action(context)),
         // Straight from the vehicle's FENCE_* parameters (see syncFenceParametersOnConnect).
         // "Unknown" rather than a plausible-looking default: a pilot must not acknowledge a
         // fence action we merely assumed.

@@ -383,8 +383,17 @@ class MotorTestViewModel(
         viewModelScope.launch {
             try {
                 val current = sharedViewModel.readParameter("MOT_SPIN_MIN", 4000L)
-                // MOT_SPIN_MIN is a 0.0–1.0 fraction on the FC; convert to percent.
-                val currentPercent = if (current != null) (current * 100f).toInt() else 0
+                if (current == null) {
+                    // A timed-out read is NOT a value of 0. Suggesting 0 + 3 % here invited the
+                    // pilot to overwrite a real MOT_SPIN_MIN with a much lower one.
+                    _state.update {
+                        it.copy(errorMessage = "Could not read MOT_SPIN_MIN from the drone — try again")
+                    }
+                    return@launch
+                }
+                // MOT_SPIN_MIN is a 0.0–1.0 fraction on the FC; convert to percent. Rounded, not
+                // truncated: 0.29f * 100f is 28.999998f and used to display as 28 %.
+                val currentPercent = Math.round(current * 100f)
                 val suggestion = currentPercent + 3  // "arm min + 3 %" per Mission Planner
                 _state.update { it.copy(spinMinDialogSuggestion = suggestion) }
             } catch (e: CancellationException) {

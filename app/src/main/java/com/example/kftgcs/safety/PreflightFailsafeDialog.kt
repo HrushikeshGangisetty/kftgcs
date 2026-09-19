@@ -5,6 +5,8 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -52,7 +54,14 @@ fun PreflightFailsafeDialog(
             )
         },
         text = {
-            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            // Scrollable: on short/small screens (or with a large system font) the seven rows
+            // plus the OK button overflow the dialog and the bottom rows / OK were cut off.
+            // AlertDialog bounds the text slot to the space left after the title and buttons,
+            // so the scroll state only has to be attached here — the OK button stays pinned.
+            Column(
+                modifier = Modifier.verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
                 Text(
                     text = "The drone will fly with these settings. Review them, then press OK to enable arming.",
                     fontSize = 14.sp,
@@ -61,6 +70,7 @@ fun PreflightFailsafeDialog(
                 SummaryRow("Low Voltage 1", formatVolts(summary.lowVoltLevel1))
                 SummaryRow("Critical Voltage", formatVolts(summary.criticalVoltage))
                 SummaryRow("Tank Empty Action", summary.tankEmptyAction)
+                SummaryRow("Low Voltage 1 Action", summary.lowVoltLevel1Action)
                 SummaryRow("Battery Failsafe Action", summary.batteryFailsafeAction)
                 // Fence rows read straight off the vehicle's FENCE_* parameters, so the
                 // pilot confirms what the FC will ACTUALLY do on a breach — the GCS does

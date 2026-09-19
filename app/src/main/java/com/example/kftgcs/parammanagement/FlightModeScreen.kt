@@ -55,9 +55,10 @@ fun FlightModeScreen(
     val state by viewModel.state.collectAsState()
     val ctx = LocalContext.current
 
-    // Auto-read flight modes once the drone is connected (no manual tap needed)
+    // Auto-read flight modes whenever the drone (re)connects (no manual tap needed). Not gated on
+    // "nothing loaded yet": after a reconnect the slots hold the previous connection's values.
     LaunchedEffect(state.isDroneConnected) {
-        if (state.isDroneConnected && state.modes.all { it == null } && !state.isLoading) {
+        if (state.isDroneConnected && !state.isLoading) {
             viewModel.loadFromDrone()
         }
     }

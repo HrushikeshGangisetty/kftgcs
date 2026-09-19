@@ -5,6 +5,7 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.kftgcs.telemetry.SharedViewModel
 import com.example.kftgcs.utils.LogUtils
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -64,13 +65,20 @@ class BrakingSettingsViewModel(
     private val _state = MutableStateFlow(BrakingSettingsState())
     val state: StateFlow<BrakingSettingsState> = _state.asStateFlow()
 
+    private var fetchJob: Job? = null
+
     init {
-        // Track connection status and auto-load once connected.
+        // Track connection status and reload on every new connection.
         viewModelScope.launch {
             sharedViewModel.telemetryState.collect { telemetry ->
                 val wasConnected = _state.value.isDroneConnected
                 _state.update { it.copy(isDroneConnected = telemetry.connected) }
-                if (telemetry.connected && !wasConnected && _state.value.values.isEmpty()) {
+                if (telemetry.connected && !wasConnected) {
+                    // Was `&& values.isEmpty()`, which left the previous connection's values on
+                    // screen (and edits equal to them treated as "unchanged") after a reconnect.
+                    // A load still running from the dropped link is abandoned, not waited on.
+                    fetchJob?.cancel()
+                    _state.update { it.copy(isLoading = false) }
                     fetchBrakeParams()
                 }
             }
@@ -98,7 +106,7 @@ class BrakingSettingsViewModel(
 
         _state.update { it.copy(isLoading = true, errorMessage = null) }
 
-        viewModelScope.launch {
+        fetchJob = viewModelScope.launch {
             val loaded = mutableMapOf<String, Float>()
             for (name in BRAKE_PARAM_NAMES) {
                 val value = sharedViewModel.readParameter(name, 3000L)
@@ -154,9 +162,13 @@ class BrakingSettingsViewModel(
 
                 if (ack != null) {
                     val confirmed = ack.paramValue
-                    results.add(BrakeWriteResult(name, newValue, confirmed, true))
+                    // Success only when the FC now holds the value we asked for (see
+                    // SpraySettingsViewModel.writeParams); the screen shows what it reports.
+                    val accepted = sharedViewModel.paramAckMatches(ack, newValue)
+                    results.add(BrakeWriteResult(name, newValue, confirmed, accepted))
                     _state.update { it.copy(values = it.values + (name to confirmed)) }
-                    LogUtils.d(TAG, "✅ $name confirmed = $confirmed")
+                    if (accepted) LogUtils.d(TAG, "✅ $name confirmed = $confirmed")
+                    else LogUtils.e(TAG, "❌ $name not accepted: wrote $newValue, FC holds $confirmed")
                 } else {
                     results.add(BrakeWriteResult(name, newValue, null, false))
                     LogUtils.e(TAG, "❌ Failed to write $name")

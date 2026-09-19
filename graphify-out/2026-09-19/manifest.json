@@ -618,9 +618,9 @@
     "semantic_hash": "0558f69a397064d0e70fe5411b76cb31"
   },
   "app/src/main/java/com/example/kftgcs/safety/PreflightFailsafeDialog.kt": {
-    "mtime": 1789793297.576746,
-    "seen": 1789793469.7137754,
-    "ast_hash": "c811bb8614bb84f362f61d63e5ce40f1",
+    "mtime": 1789788598.6761699,
+    "seen": 1789788786.7307382,
+    "ast_hash": "573f58483669519b96d7275179e95bf2",
     "semantic_hash": ""
   },
   "app/src/main/java/com/example/kftgcs/security/SecurePinManager.kt": {
@@ -684,9 +684,9 @@
     "semantic_hash": "2e810a2736a2deb0aff6e72561ef7805"
   },
   "app/src/main/java/com/example/kftgcs/telemetry/SharedViewModel.kt": {
-    "mtime": 1789793334.1314268,
-    "seen": 1789793469.7157817,
-    "ast_hash": "8f25c63c9a3f49dcfcd1329808e6575f",
+    "mtime": 1789790759.1930442,
+    "seen": 1789790766.0884411,
+    "ast_hash": "c51a7e95d1b30ff66b425e6803e6d995",
     "semantic_hash": ""
   },
   "app/src/main/java/com/example/kftgcs/telemetry/SprayTelemetryUtils.kt": {
@@ -696,9 +696,9 @@
     "semantic_hash": "75b44909c88905dab2737b3532c01a5e"
   },
   "app/src/main/java/com/example/kftgcs/telemetry/TelemetryRepository.kt": {
-    "mtime": 1789793329.845867,
-    "seen": 1789793469.7157817,
-    "ast_hash": "ba994a77942a074352e37b75da626ebc",
+    "mtime": 1789790558.3598678,
+    "seen": 1789790766.0884411,
+    "ast_hash": "817f3870e682260bc195c9d53c836106",
     "semantic_hash": ""
   },
   "app/src/main/java/com/example/kftgcs/telemetry/WebSocketManager.kt": {
@@ -996,9 +996,9 @@
     "semantic_hash": "657f5d81e2962d7bf66b542d417ba0a2"
   },
   "app/src/main/java/com/example/kftgcs/uimain/OptionsScreen.kt": {
-    "mtime": 1789793431.8219633,
-    "seen": 1789793469.7177868,
-    "ast_hash": "b119099170d27cc59d0f43697052a8cb",
+    "mtime": 1789789534.3828826,
+    "seen": 1789789679.8545837,
+    "ast_hash": "419ab15c5f6761ef5f6aa952ffdacfdf",
     "semantic_hash": ""
   },
   "app/src/main/java/com/example/kftgcs/uimain/PlanScreen.kt": {
@@ -1248,9 +1248,9 @@
     "semantic_hash": "16980594c3f1f8c172b9d3f69d326d60"
   },
   "app/src/main/java/com/example/kftgcs/viewmodel/OptionsViewModel.kt": {
-    "mtime": 1789793398.9294193,
-    "seen": 1789793469.7217977,
-    "ast_hash": "747b3dd7baa8d6fe5b800656a1fbeb81",
+    "mtime": 1789790739.8602467,
+    "seen": 1789790766.0884411,
+    "ast_hash": "d806746330b9692f78aedfede08cc65f",
     "semantic_hash": ""
   },
   "app/src/main/java/com/example/kftgcs/viewmodel/TlogViewModel.kt": {

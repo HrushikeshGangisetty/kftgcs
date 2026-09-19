@@ -380,6 +380,12 @@ class FullParamListViewModel(
             _state.update { it.copy(writeError = "Drone not connected") }
             return
         }
+        // One write at a time: `writingParam` holds a single name, so an overlapping write's
+        // completion would clear the other's "writing" indicator while it was still in flight.
+        if (_state.value.writingParam != null) {
+            _state.update { it.copy(writeError = "Another write is still in progress") }
+            return
+        }
 
         _state.update { it.copy(writingParam = paramName, writeSuccess = null, writeError = null) }
 
@@ -409,10 +415,15 @@ class FullParamListViewModel(
                     updatedParams[paramName]?.let { existing ->
                         updatedParams[paramName] = existing.copy(value = confirmedValue)
                     }
+                    // An ack only proves the FC answered: report success only when it now holds
+                    // the value that was asked for. The list above still shows what it reports.
+                    val accepted = sharedViewModel.paramAckMatches(ack, newValue)
                     current.copy(
                         params = updatedParams,
                         writingParam = null,
-                        writeSuccess = paramName
+                        writeSuccess = if (accepted) paramName else null,
+                        writeError = if (accepted) null
+                        else "$paramName was not accepted — the drone reports $confirmedValue"
                     )
                 }
             } else {
@@ -438,6 +449,8 @@ class FullParamListViewModel(
                     }
                     current.copy(params = updatedParams)
                 }
+            } else {
+                _state.update { it.copy(writeError = "Could not read $paramName from the drone") }
             }
         }
     }
