@@ -65,6 +65,12 @@ class OptionsViewModel(application: Application) : AndroidViewModel(application)
         private const val PARAM_BATT_FS_CRT_ACT = "BATT_FS_CRT_ACT"
         private const val PARAM_FENCE_ALT_MAX = "FENCE_ALT_MAX"
 
+        /** Per-attempt timeout for a parameter read, matching the connect-time sync's 4 s. */
+        private const val PARAM_READ_TIMEOUT_MS = 4000L
+
+        /** Gap between a failed parameter read and its retry. */
+        private const val PARAM_RETRY_GAP_MS = 300L
+
         /**
          * Read the mission completion action from SharedPreferences.
          * Can be called from anywhere without a ViewModel instance.
@@ -110,6 +116,30 @@ class OptionsViewModel(application: Application) : AndroidViewModel(application)
     }
 
     /**
+     * Read one parameter, retrying once before giving up.
+     *
+     * [SharedViewModel.readParameter] returns null both for "the FC did not answer in time" and
+     * for "not connected", and a single dropped PARAM_VALUE on a busy link was enough to leave a
+     * field showing its cached value with no indication anything had failed. The connect-time
+     * sync already found the 3 s default too short for the BATT_FS_*_ACT reads and uses 4 s;
+     * match that here, and give each parameter a second chance the way the fence parameter
+     * helper in the repository already does.
+     */
+    private suspend fun readParamWithRetry(
+        sharedViewModel: SharedViewModel,
+        paramId: String,
+        attempts: Int = 2
+    ): Float? {
+        repeat(attempts) { attempt ->
+            val value = sharedViewModel.readParameter(paramId, timeoutMs = PARAM_READ_TIMEOUT_MS)
+            if (value != null) return value
+            LogUtils.w(TAG, "↻ Retrying read of $paramId (attempt ${attempt + 1}/$attempts)")
+            kotlinx.coroutines.delay(PARAM_RETRY_GAP_MS)
+        }
+        return null
+    }
+
+    /**
      * Read BATT_LOW_VOLT and BATT_CRT_VOLT from the flight controller
      * and update the UI fields with the values currently on the drone.
      */
@@ -122,12 +152,23 @@ class OptionsViewModel(application: Application) : AndroidViewModel(application)
 
         viewModelScope.launch {
             try {
+                // The screen auto-loads the instant it opens, which on a fresh connect is while
+                // the connect-time sync is still running its ~15 parameter round trips. Every one
+                // of those holds the same parameter mutex, and the fence upload pushes its own
+                // traffic down a separate channel at the same time — so our reads both queued
+                // behind them and lost replies to the congestion. That is the "battery values
+                // don't load the first time, you have to hit refresh two or three times" report.
+                // Wait for the sync to finish before asking for anything.
+                _loadStatus.value = "Waiting for the connection sync to finish…"
+                sharedViewModel.awaitConnectSync()
+                _loadStatus.value = "Reading failsafe parameters from drone..."
+
                 droneSyncMutex.withLock {
                     val failures = mutableListOf<String>()
                     val prefs = getApplication<Application>().getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
 
                     // Read BATT_LOW_VOLT → lowVoltLevel1
-                    val volt1 = sharedViewModel.readParameter(PARAM_BATT_LOW_VOLT)
+                    val volt1 = readParamWithRetry(sharedViewModel, PARAM_BATT_LOW_VOLT)
                     // 0 is ArduPilot's "disabled" default, not a threshold. Adopting it put 0.0 in
                     // the field, and pressing Update then saved 0 V to the FC and the prefs —
                     // after which `voltage <= 0` never fires and the failsafe is silently off.
@@ -148,7 +189,7 @@ class OptionsViewModel(application: Application) : AndroidViewModel(application)
                     kotlinx.coroutines.delay(100) // small delay between requests
 
                     // Read BATT_CRT_VOLT → lowVoltLevel2
-                    val volt2 = sharedViewModel.readParameter(PARAM_BATT_CRT_VOLT)
+                    val volt2 = readParamWithRetry(sharedViewModel, PARAM_BATT_CRT_VOLT)
                     if (volt2 != null && volt2 > 0f) {
                         if (FIELD_LOW_VOLT_2 !in fieldsEditedSinceLoad) {
                             _options.value = _options.value.copy(lowVoltLevel2 = volt2)
@@ -163,7 +204,7 @@ class OptionsViewModel(application: Application) : AndroidViewModel(application)
                     kotlinx.coroutines.delay(100)
 
                     // Read FENCE_ALT_MAX → maxAltitude (the altitude ceiling failsafe)
-                    val altMax = sharedViewModel.readParameter(PARAM_FENCE_ALT_MAX)
+                    val altMax = readParamWithRetry(sharedViewModel, PARAM_FENCE_ALT_MAX)
                     if (altMax != null && altMax > 0f) {
                         // Add the safety offset back so the pilot sees the ceiling they set, not the
                         // biased value stored on the FC.
@@ -182,7 +223,7 @@ class OptionsViewModel(application: Application) : AndroidViewModel(application)
                     // Read BATT_FS_LOW_ACT / BATT_FS_CRT_ACT → the level 1 / level 2 actions.
                     // The FC is the source of truth: these used to be neither read nor shown, so
                     // the screen always said "Hover" whatever the drone was actually set to.
-                    val lowAct = sharedViewModel.readParameter(PARAM_BATT_FS_LOW_ACT)
+                    val lowAct = readParamWithRetry(sharedViewModel, PARAM_BATT_FS_LOW_ACT)
                     val lowActionName = lowAct?.let { BatteryFsAction.fromFcValue(it) }
                     if (lowActionName != null) {
                         if (FIELD_LOW_ACTION_1 !in fieldsEditedSinceLoad) {
@@ -197,7 +238,7 @@ class OptionsViewModel(application: Application) : AndroidViewModel(application)
 
                     kotlinx.coroutines.delay(100)
 
-                    val crtAct = sharedViewModel.readParameter(PARAM_BATT_FS_CRT_ACT)
+                    val crtAct = readParamWithRetry(sharedViewModel, PARAM_BATT_FS_CRT_ACT)
                     val crtActionName = crtAct?.let { BatteryFsAction.fromFcValue(it) }
                     if (crtActionName != null) {
                         if (FIELD_LOW_ACTION_2 !in fieldsEditedSinceLoad) {

@@ -307,6 +307,31 @@ class SharedViewModel : ViewModel() {
     // ─── Layer 1: the wall ───────────────────────────────────────────────────────
 
     /**
+     * Master switch for layer 1. OFF, by operator decision.
+     *
+     * The wall is the thing that acted below the pilot's number: on a 50 m ceiling its line
+     * sat at 48 m (ceiling - [ALTITUDE_WALL_BUFFER_M]) and its proximity arm commanded BRAKE
+     * as the vehicle climbed through it, which is the "we set 50 but it triggered at 48.7"
+     * report. Nothing is wrong with the wall — it did exactly what it was built to do, which
+     * is to stop the aircraft BEFORE the line so the line is never crossed.
+     *
+     * The requirement changed. The ceiling must now act at the configured altitude and a small
+     * breach is acceptable, which is the same call taken for the max-range fence (see
+     * [MAX_RANGE_ACTION_MARGIN_M]). With the wall off, the only GCS actor is layer 2 at
+     * [ALTITUDE_BREACH_MARGIN_M] = 0, i.e. the ceiling itself, and the FC's own FENCE_ALT_MAX
+     * now sits at the same altitude rather than 1 m under it.
+     *
+     * WHAT IS GIVEN UP: nothing arrests the climb before the limit any more, so the aircraft
+     * crosses the ceiling by whatever its momentum carries — the FC's climb-arrest overshoot
+     * (~0.5 m) plus, if the FC fence does not catch it, the GCS action's own latency. The
+     * prediction machinery ([projectedStopAltitude], [altitudeStopDistance]) is left in place
+     * and still sizes the approach WARNING, so flipping this back to true is all that is
+     * needed to restore prevention.
+     */
+    private val ALTITUDE_WALL_ENABLED = false
+
+
+    /**
      * How far below the ceiling the wall holds the vehicle, in metres.
      *
      * This is the altitude the pilot loses, and the three layers have to stack in the right
@@ -557,12 +582,37 @@ class SharedViewModel : ViewModel() {
     private var lastMaxRangeLimitTime = 0L
     private val MAX_RANGE_WARN_INTERVAL_MS = 4000L
     private val MAX_RANGE_LIMIT_INTERVAL_MS = 5000L
-    /** Warn this far inside the action point so the pilot can turn back first. */
+    /**
+     * Warn this far inside the projected stopping point so the pilot can turn back first.
+     *
+     * This lead matters more than it used to. The action no longer fires early enough to
+     * guarantee the vehicle stops inside the radius (see [MAX_RANGE_ACTION_MARGIN_M]), so at
+     * cruise the PILOT is the only thing that can slow the aircraft before the line. The warn
+     * point is therefore measured from the speed-aware stopping distance, not from the fixed
+     * action point — it moves outward as the drone speeds up, which is when the warning has
+     * to come earlier in wall-clock terms to be worth anything.
+     */
     private val MAX_RANGE_WARN_LEAD_M = 25f
-    /** Smallest buffer inside the radius where the action fires (near-hover case). */
-    private val MAX_RANGE_MIN_ACTION_MARGIN_M = 12f
-    /** Upper clamp so a bogus groundspeed can't shrink the usable envelope to nothing. */
-    private val MAX_RANGE_MAX_ACTION_MARGIN_M = 60f
+    /**
+     * How far inside the radius the range action fires, in metres.
+     *
+     * Deliberately tiny: the operator's requirement is that RTL is commanded ON the limit, not
+     * a speed-dependent distance short of it. 1.5 m covers GPS jitter and one evaluation
+     * interval, so a 1000 m fence triggers at 998.5 m.
+     *
+     * KNOWN TRADE-OFF, chosen explicitly. This margin does NOT cover the stopping distance, so
+     * the vehicle WILL cross the radius whenever it arrives at the line with speed on — by
+     * roughly v·1.4 + v²/4 metres, i.e. ~4 m at 2 m/s, ~10 m at 4 m/s, ~27 m at 8 m/s. The
+     * previous design sized this margin to the stopping distance (12 m floor, 60 m cap) so the
+     * line was never crossed at all, at the cost of triggering 12 m early at hover — which is
+     * the behaviour this replaced. If the overshoot at cruise ever needs to go away, the fix is
+     * a brake layer ahead of the line (as the altitude ceiling has), not a bigger margin here.
+     */
+    private val MAX_RANGE_ACTION_MARGIN_M = 1.5f
+    /** Smallest stopping-distance estimate used for the WARNING lead (near-hover case). */
+    private val MAX_RANGE_MIN_STOPPING_M = 12f
+    /** Upper clamp so a bogus groundspeed can't push the warning absurdly far inside. */
+    private val MAX_RANGE_MAX_STOPPING_M = 60f
     /**
      * Latency between crossing the trigger and RTL biting: command round trip + mode entry.
      *
@@ -601,8 +651,18 @@ class SharedViewModel : ViewModel() {
      * again even if the one-shot is already consumed. Same reasoning the altitude ceiling
      * uses for [ALTITUDE_BREACH_MARGIN_M] — the latch may spare a pilot who is managing the
      * situation inside the envelope, never one about to cross the line.
+     *
+     * 0, i.e. the radius itself. It was 3 m, which was inside the old 12-60 m action margin
+     * and so sat comfortably outside the trigger. With the action now at radius - 1.5 m a 3 m
+     * backstop would sit INSIDE the trigger point, making `atBackstop` true on the very first
+     * frame that fires and rendering the "past the trigger but still inside the line, let the
+     * pilot fly" branch unreachable. Putting it on the radius restores the intended layering:
+     *
+     *     radius - 1.5 m  →  action fires once (one-shot)
+     *     radius - 1.5 .. radius  →  latch respected, TTS only
+     *     radius and beyond  →  backstop, action re-commanded every 5 s
      */
-    private val MAX_RANGE_BACKSTOP_MARGIN_M = 3f
+    private val MAX_RANGE_BACKSTOP_MARGIN_M = 0f
 
     /**
      * A position fix older than this tells us nothing usable about where the drone is now,
@@ -1360,12 +1420,20 @@ class SharedViewModel : ViewModel() {
         // Gated on an actual climb: the band is a fifth of the ceiling wide, a sprayer works
         // inside it for whole passes at a time, and announcing "approaching" to a vehicle
         // flying dead level is how the warning became background noise.
-        else if (altitude >= ceiling - altitudeWarnMargin(ceiling) &&
+        //
+        // Judged on the PROJECTED stop altitude, not the current one. With layer 1 disabled
+        // ([ALTITUDE_WALL_ENABLED]) nothing arrests the climb before the limit any more, so
+        // this warning is the only cue the pilot gets to do it themselves — and a fixed band
+        // is worth less the faster they are climbing (10 m at 4 m/s is 2.5 s of notice). The
+        // projection widens the band exactly in proportion to how committed the vehicle
+        // already is, and collapses to the old behaviour at hover, where projectedAlt is the
+        // current altitude. This is the same move made for the max-range warning.
+        else if (projectedAlt >= ceiling - altitudeWarnMargin(ceiling) &&
             climbSmooth > ALTITUDE_WALL_CREEP_CLIMB_MPS
         ) {
             if (now - lastAltitudeWarnTime >= ALTITUDE_WARN_INTERVAL_MS) {
                 lastAltitudeWarnTime = now
-                LogUtils.i("AltitudeFailsafe", "⚠️ Approaching altitude limit: ${altitude}m of ${ceiling}m (climb=${climbSmooth}m/s)")
+                LogUtils.i("AltitudeFailsafe", "⚠️ Approaching altitude limit: ${altitude}m of ${ceiling}m (projected stop ${projectedAlt}m, climb=${climbSmooth}m/s)")
                 ttsManager?.speak("Approaching altitude limit. ${altitude.toInt()} meters.")
             }
         }
@@ -1570,6 +1638,18 @@ class SharedViewModel : ViewModel() {
         climbSmooth: Float,
         now: Long
     ): Boolean {
+        // ═══ LAYER 1 DISABLED ═══
+        // See [ALTITUDE_WALL_ENABLED]. Returning false leaves layer 2 unsuppressed, so the
+        // operator's FENCE_ACTION fires at the ceiling itself. Release first, so a wall that
+        // was already holding the vehicle when the flag was read cannot be left engaged with
+        // nothing to hand it back.
+        if (!ALTITUDE_WALL_ENABLED) {
+            if (altitudeWallEngaged && !altitudeWallBusy) {
+                releaseAltitudeWall("altitude wall disabled")
+            }
+            return false
+        }
+
         val mode = _telemetryState.value.mode
         val inBrake = mode?.contains("Brake", ignoreCase = true) == true
 
@@ -1819,10 +1899,12 @@ class SharedViewModel : ViewModel() {
      * only the *enforcement* is ours. See the constants block for why the FC's own cylinder
      * fence is not relied on.
      *
-     * The trigger sits a speed-aware margin inside the radius (see [maxRangeActionMargin]) so
-     * a drone cruising outward at 8 m/s turns around before crossing the limit rather than
-     * after. [MAX_RANGE_WARN_LEAD_M] before that is a warning zone so the pilot can turn back
-     * themselves.
+     * The trigger sits [MAX_RANGE_ACTION_MARGIN_M] (1.5 m) inside the radius — RTL is
+     * commanded ON the limit, by operator requirement, not a speed-dependent distance short of
+     * it. The consequence is that a drone arriving with speed on will cross the line by its
+     * stopping distance (see [maxRangeStoppingDistance]); that is accepted, and the warning
+     * zone ahead of it is sized from that same stopping distance plus [MAX_RANGE_WARN_LEAD_M]
+     * so the pilot has room to slow down before the limit themselves.
      *
      * One-shot per breach so a pilot who deliberately takes back control is not fought on
      * every frame; it re-arms once they return [MAX_RANGE_REARM_INSIDE_RADIUS_M] inside the
@@ -1855,13 +1937,16 @@ class SharedViewModel : ViewModel() {
             return
         }
 
-        val margin = maxRangeActionMargin(state.groundspeed, positionAgeMs)
-        val actionThreshold = radius - margin
-        val warnThreshold = actionThreshold - MAX_RANGE_WARN_LEAD_M
+        // The action point is fixed on the limit; the WARNING point is the speed-aware one.
+        // They used to be the same number, which is what made RTL fire 12 m early at hover.
+        val stoppingDistance = maxRangeStoppingDistance(state.groundspeed, positionAgeMs)
+        val actionThreshold = radius - MAX_RANGE_ACTION_MARGIN_M
+        val warnThreshold = radius - stoppingDistance - MAX_RANGE_WARN_LEAD_M
 
         // ═══ RECOVERED: re-arm the one-shot ═══
-        // Before the action branch, not as an else-if: actionThreshold moves with
-        // groundspeed, so a re-arm band expressed as an else-if could be shadowed.
+        // Before the action branch, not as an else-if. (actionThreshold no longer moves with
+        // groundspeed, which was the original reason, but the ordering still matters: the
+        // re-arm band and the action band must both get a look on the same frame.)
         //
         // Measured from the RADIUS, not from actionThreshold, and additionally requiring the
         // vehicle to have slowed down — see [MAX_RANGE_REARM_INSIDE_RADIUS_M]. A band hung
@@ -1935,7 +2020,7 @@ class SharedViewModel : ViewModel() {
                 if (backstopRefire) {
                     LogUtils.w("MaxRangeFailsafe", "MAX RANGE BACKSTOP: ${distance}m is at/over the ${radius}m limit and the one-shot was already consumed — RE-COMMANDING $announced, mode=${state.mode}")
                 } else {
-                    LogUtils.i("MaxRangeFailsafe", "MAX RANGE: ${distance}m >= threshold ${actionThreshold}m (FENCE_RADIUS ${radius}m, ${margin}m margin at ${state.groundspeed}m/s) — triggering $announced, mode=${state.mode}")
+                    LogUtils.i("MaxRangeFailsafe", "MAX RANGE: ${distance}m >= threshold ${actionThreshold}m (FENCE_RADIUS ${radius}m, ${MAX_RANGE_ACTION_MARGIN_M}m margin; projected overshoot ${stoppingDistance}m at ${state.groundspeed}m/s) — triggering $announced, mode=${state.mode}")
                 }
 
                 ttsManager?.speak("Max range reached. Activating $announced.")
@@ -1991,30 +2076,32 @@ class SharedViewModel : ViewModel() {
     }
 
     /**
-     * How far inside the radius the range action fires, in metres.
+     * How far the drone will keep travelling outward after RTL is commanded, in metres.
      *
-     * RTL is not instantaneous: the drone keeps flying outward for the command latency and
-     * then for its braking distance. A flat buffer is not enough at cruise — at 8 m/s the
-     * drone travels ~8m during the round trip and needs ~13m more to stop, so the margin
-     * tracks speed:
+     * RTL is not instantaneous: the drone flies on for the command latency and then for its
+     * braking distance.
      *
-     *     margin = v · (age + [MAX_RANGE_LATENCY_S]) + v² / (2 · [MAX_RANGE_DECEL_MPS2])
+     *     stop = v · (age + [MAX_RANGE_LATENCY_S]) + v² / (2 · [MAX_RANGE_DECEL_MPS2])
      *
-     * clamped to [[MAX_RANGE_MIN_ACTION_MARGIN_M], [MAX_RANGE_MAX_ACTION_MARGIN_M]]. At 8 m/s
-     * that is 8·1.4 + 64/4 = 11.2 + 16 ≈ 27m, so on a 1000m fence RTL fires around 973m.
-     * The earlier 1.0 s / 2.5 m/s² figures gave ~21m and the drone still crossed the line by
-     * a metre or two at that speed — the FC's mode-entry delay and the real achieved
-     * deceleration of a loaded airframe were both optimistic. Hovering falls back to the
-     * 12m floor.
+     * clamped to [[MAX_RANGE_MIN_STOPPING_M], [MAX_RANGE_MAX_STOPPING_M]]. At 8 m/s that is
+     * 8·1.4 + 64/4 = 11.2 + 16 ≈ 27 m.
+     *
+     * This used to BE the action margin: the trigger sat this far inside the radius so the
+     * vehicle stopped on the line instead of past it. That is no longer what it is for. The
+     * operator's requirement is that RTL is commanded on the limit itself, so the trigger is
+     * now the fixed [MAX_RANGE_ACTION_MARGIN_M] and this number is what the drone is expected
+     * to OVERSHOOT by — it sizes the warning lead (so the pilot is told early enough to slow
+     * down themselves, they being the only brake left) and it is logged on every trigger so a
+     * breach distance can be checked against what was predicted.
      *
      * positionAgeMs adds the distance already flown since the fix being judged was measured,
-     * so the margin grows when the link degrades rather than silently under-budgeting.
+     * so the estimate grows when the link degrades rather than silently under-budgeting.
      */
-    private fun maxRangeActionMargin(groundspeed: Float?, positionAgeMs: Long = 0L): Float {
+    private fun maxRangeStoppingDistance(groundspeed: Float?, positionAgeMs: Long = 0L): Float {
         val v = groundspeed?.takeIf { it.isFinite() && it > 0f } ?: 0f
         val ageS = positionAgeMs.coerceAtLeast(0L) / 1000f
         val stoppingDistance = v * (ageS + MAX_RANGE_LATENCY_S) + (v * v) / (2f * MAX_RANGE_DECEL_MPS2)
-        return stoppingDistance.coerceIn(MAX_RANGE_MIN_ACTION_MARGIN_M, MAX_RANGE_MAX_ACTION_MARGIN_M)
+        return stoppingDistance.coerceIn(MAX_RANGE_MIN_STOPPING_M, MAX_RANGE_MAX_STOPPING_M)
     }
 
     /**
@@ -2679,10 +2766,22 @@ class SharedViewModel : ViewModel() {
      * peaked at ~30.5 m. Biasing the FC limit down means the overshoot happens BELOW the
      * number the pilot (and an auditor) is holding us to.
      *
-     * 1.0 m covers the ~0.5 m observed at normal climb rates with margin to spare, and
-     * costs only that much usable altitude.
+     * 0 m, by operator decision: the ceiling the pilot types is the altitude the FC fence is
+     * set to, full stop. 50 m in Options means FENCE_ALT_MAX = 50.0.
+     *
+     * The overshoot described above is REAL and has not gone away — with the offset at 0 the
+     * aircraft will peak a little ABOVE the pilot's number (~0.5 m at normal climb rates)
+     * rather than a little below it. That is accepted: the requirement is now that the fence
+     * trips at exactly the configured altitude, with a small breach tolerated, rather than
+     * tripping early to guarantee the number is never exceeded. It was 1.0 m, which is what
+     * made a 50 m ceiling arm the FC's fence at 49 m.
+     *
+     * Kept as a named constant rather than deleted: every conversion between "the pilot's
+     * ceiling" and "FENCE_ALT_MAX" still goes through it (getFcAltitudeFenceMax,
+     * pushAltitudeCeilingToFc, adoptAltitudeCeilingFromFc, OptionsViewModel.loadFromDrone), so
+     * restoring a bias is a one-line change and those round trips stay symmetrical.
      */
-    val FC_ALT_FENCE_SAFETY_OFFSET_M = 1.0f
+    val FC_ALT_FENCE_SAFETY_OFFSET_M = 0.0f
 
     /**
      * The value to write to the FC's FENCE_ALT_MAX: the pilot's ceiling less
@@ -3714,6 +3813,25 @@ class SharedViewModel : ViewModel() {
     }
 
     /**
+     * Read PRX1_MIN / PRX1_MAX and hand them to the repository so it can reproduce the
+     * jiyi_radar.lua driver's forward-radar reporting window.
+     *
+     * This is what lets the obstacle widget tell the driver's synthetic "nothing detected" value
+     * apart from a real return at the same distance — without it the radar shows a permanent
+     * phantom obstacle near the top of its range. See ObstacleWindow in ProximityData.kt.
+     *
+     * Sequential with the other connect-time reads, per the shared PARAM_VALUE flow. A failed or
+     * timed-out read passes null, which falls back to RNGFND2's own bounds — correct in every
+     * configuration the driver accepts, since it faults when PRX1's window conflicts.
+     */
+    private suspend fun seedProximityWindowFromVehicle(repo: MavlinkTelemetryRepository) {
+        val prxMin = readParameter("PRX1_MIN")
+        val prxMax = readParameter("PRX1_MAX")
+        repo.setProximityWindowParams(prxMin, prxMax)
+        LogUtils.d("SharedVM", "Seeded PRX1 window from vehicle: min=$prxMin max=$prxMax")
+    }
+
+    /**
      * Read the vehicle's spray configuration on connect and seed the local state.
      *
      * Before this existed [_sprayRate] was hardcoded to 100 at startup, so the slider always
@@ -3919,6 +4037,9 @@ class SharedViewModel : ViewModel() {
                 newRepo.state.collect { state ->
                     if (state.fcuDetected && state.connected) {
                         seedRadarThresholdsFromVehicle()
+                        // Same one-shot: read PRX1's window so the forward radar's synthetic
+                        // all-clear can be told from a real obstacle.
+                        seedProximityWindowFromVehicle(newRepo)
                         // Same one-shot: read the spray config so the slider reflects the vehicle
                         // rather than its hardcoded startup value. Sequential (not a parallel
                         // launch) because readParameter drives a shared PARAM_VALUE flow and
@@ -7667,6 +7788,25 @@ class SharedViewModel : ViewModel() {
     // The popup waits on the sync so it reports what was actually read from this vehicle.
     private var connectSyncJob: Job? = null
     private var preflightPopupJob: Job? = null
+
+    /**
+     * Suspend until the connect-time failsafe sync has finished, bounded by [timeoutMs].
+     *
+     * The sync makes some fifteen parameter reads/writes that each wait up to several seconds,
+     * and every one of them takes [paramOpMutex]. A screen that fires its own reads while that
+     * is running queues behind it AND competes with the fence upload's separate parameter
+     * channel for link bandwidth, which is exactly when a PARAM_VALUE reply goes missing — the
+     * Options screen auto-loads on open, so on a fresh connect it lost that race and showed
+     * cached values instead of the drone's. Waiting our turn first is the fix.
+     *
+     * Bounded, for the same reason the pre-arm popup bounds it: a dead link must not hang the
+     * caller forever. Returns when the sync is done, or when the bound expires.
+     */
+    suspend fun awaitConnectSync(timeoutMs: Long = PREFLIGHT_SYNC_WAIT_MS) {
+        val job = connectSyncJob ?: return
+        if (job.isCompleted) return
+        withTimeoutOrNull(timeoutMs) { job.join() }
+    }
 
     /**
      * Sync failsafe configuration with the drone immediately after connection.

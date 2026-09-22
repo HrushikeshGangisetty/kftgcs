@@ -1,28 +1,25 @@
 package com.example.kftgcs.uimain
 
 import androidx.compose.foundation.Canvas
-import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectTransformGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.DeleteSweep
 import androidx.compose.material.icons.filled.Radar
 import androidx.compose.material.icons.filled.Remove
-import androidx.compose.material.icons.filled.Terrain
 import androidx.compose.material.icons.filled.VerticalAlignBottom
 import androidx.compose.material.icons.filled.VerticalAlignCenter
 import androidx.compose.material3.FloatingActionButton
@@ -36,7 +33,6 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
@@ -48,15 +44,15 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.text.TextMeasurer
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.drawText
-import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.rememberTextMeasurer
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.kftgcs.telemetry.ProximityData
+import com.example.kftgcs.telemetry.RadarSwitchState
 import com.example.kftgcs.telemetry.RadarThresholds
-import com.example.kftgcs.telemetry.TerrainData
 import com.example.kftgcs.telemetry.proximityColor
 import java.util.Locale
 import kotlin.math.cos
@@ -69,8 +65,12 @@ private val RingColor = Color(0xFF4A5568)
 private val Accent = Color(0xFF87CEEB) // sky-blue digital-readout accent used across the app
 private val LabelGray = Color.Gray
 private val RingLabelGreen = Color(0xFF4CD964) // Mission-Planner-style green range-ring labels
-private const val WIDGET_SIZE_DP = 230
-private const val OBSTACLE_WIDGET_SIZE_DP = 290 // obstacle radar runs a little larger than terrain
+// "Radar is alive and says the path is clear" vs "the radar is not telling us anything". These
+// must never look alike: under the Lua driver a clear is a positive report, while silence means
+// the sensor is off the bus and avoidance has nothing to work with.
+private val ClearGreen = Color(0xFF4CD964)
+private val WarnAmber = Color(0xFFFFB300)
+private const val OBSTACLE_WIDGET_SIZE_DP = 290 // preferred side; shrinks to fit short screens
 private const val RADAR_RADIUS_FACTOR = 0.70f   // bullseye radius as a fraction of the half-canvas
 
 // Fixed obstacle-radar range rings (metres). Non-uniform: 2 m steps to 10 m, then 5 m steps to 20 m.
@@ -93,15 +93,21 @@ private fun obstacleRingsForRange(maxRange: Float): List<Float> = when {
 }
 
 /**
- * Floating map overlay hosting the "Terrain" and "Obstacles" toggle buttons plus their square
- * widgets. Placed by the caller via [modifier] (e.g. `Modifier.align(Alignment.TopStart)`).
+ * Floating map overlay hosting the "Obstacles" toggle button (plus the optional Clear Mission
+ * action) and the obstacle radar widget. Placed by the caller via [modifier] (e.g.
+ * `Modifier.align(Alignment.TopStart)`).
  *
- * Toggle state is owned here; each widget renders only while its toggle is ON, so closed widgets
- * never intercept map touch. [terrain] and [proximity] come from `TelemetryState` and stream live.
+ * Toggle state is owned here; the widget renders only while its toggle is ON, so a closed widget
+ * never intercepts map touch. [proximity] comes from `TelemetryState` and streams live.
  *
- * The buttons stack VERTICALLY. They used to sit side by side, but a third control (Clear
- * Mission) would have pushed the row into the map's pan area on a phone-width screen; a column
- * keeps every control against the left edge and leaves the map clear.
+ * There is no terrain widget: distance-to-ground is already on the bottom telemetry bar
+ * ("obs-alt"), and a second popup cost vertical space the obstacle radar needs.
+ *
+ * Layout is buttons in a column on the LEFT, the radar to their RIGHT. Stacking the radar under
+ * the buttons ran ~720dp tall with the old terrain card, far more than a landscape handheld
+ * (Skydroid MK15, ~400dp tall) has, so the cards were squeezed to slivers or not drawn at all.
+ * Side by side, the radar only competes for height with the screen itself, and it still shrinks
+ * to whatever height the caller leaves it (e.g. under a failsafe popup).
  *
  * Clear Mission is optional: pass [onClearMission] to show it. Left null (the default) the
  * button is not composed at all, so this overlay stays usable anywhere the action makes no
@@ -110,9 +116,9 @@ private fun obstacleRingsForRange(maxRange: Float): List<Float> = when {
  */
 @Composable
 fun ProximityMapOverlay(
-    terrain: TerrainData?,
     proximity: ProximityData?,
     thresholds: RadarThresholds,
+    switches: RadarSwitchState = RadarSwitchState(),
     modifier: Modifier = Modifier,
     onClearMission: (() -> Unit)? = null,
     clearMissionEnabled: Boolean = false,
@@ -121,45 +127,43 @@ fun ProximityMapOverlay(
     // translated wording.
     clearMissionLabel: String = "Clear\nMission"
 ) {
-    var isTerrainWidgetOpen by remember { mutableStateOf(false) }
     var isObstacleWidgetOpen by remember { mutableStateOf(false) }
 
-    Column(
+    Row(
         modifier = modifier,
-        verticalArrangement = Arrangement.spacedBy(8.dp)
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+        verticalAlignment = Alignment.Top
     ) {
-        ToggleButton(
-            icon = Icons.Default.Terrain,
-            label = "Terrain",
-            active = isTerrainWidgetOpen,
-            onClick = { isTerrainWidgetOpen = !isTerrainWidgetOpen }
-        )
-        ToggleButton(
-            icon = Icons.Default.Radar,
-            label = "Obstacles",
-            active = isObstacleWidgetOpen,
-            onClick = { isObstacleWidgetOpen = !isObstacleWidgetOpen }
-        )
-
-        if (onClearMission != null) {
+        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
             ToggleButton(
-                icon = Icons.Default.DeleteSweep,
-                label = clearMissionLabel,
-                // Never "active": this is an action, not a toggle. Red rather than the accent
-                // colour so it does not read as a third view to switch on.
-                active = false,
-                enabled = clearMissionEnabled,
-                containerColor = ClearMissionRed.copy(alpha = 0.75f),
-                onClick = onClearMission
+                icon = Icons.Default.Radar,
+                label = "Obstacles",
+                active = isObstacleWidgetOpen,
+                onClick = { isObstacleWidgetOpen = !isObstacleWidgetOpen }
             )
+
+            if (onClearMission != null) {
+                ToggleButton(
+                    icon = Icons.Default.DeleteSweep,
+                    label = clearMissionLabel,
+                    // Never "active": this is an action, not a toggle. Red rather than the accent
+                    // colour so it does not read as a second view to switch on.
+                    active = false,
+                    enabled = clearMissionEnabled,
+                    containerColor = ClearMissionRed.copy(alpha = 0.75f),
+                    onClick = onClearMission
+                )
+            }
         }
 
-        if (isTerrainWidgetOpen) {
-            ProximityWidgetCard { TerrainGaugeView(terrain, thresholds) }
-        }
         if (isObstacleWidgetOpen) {
-            ProximityWidgetCard(sizeDp = OBSTACLE_WIDGET_SIZE_DP) {
-                ObstacleRadarView(proximity, thresholds)
+            // Square card at its preferred size, clamped to the space actually left to us so a
+            // short landscape screen gets a smaller radar instead of a clipped or missing one.
+            BoxWithConstraints {
+                val side = minOf(OBSTACLE_WIDGET_SIZE_DP.dp, maxWidth, maxHeight)
+                ProximityWidgetCard(side = side) {
+                    ObstacleRadarView(proximity, thresholds, switches.obstacleEnabled)
+                }
             }
         }
     }
@@ -226,14 +230,14 @@ private fun ToggleButton(
     }
 }
 
-/** Reusable semi-transparent dark square popup card; [sizeDp] is its side length in dp. */
+/** Reusable semi-transparent dark square popup card; [side] is its side length. */
 @Composable
-private fun ProximityWidgetCard(sizeDp: Int = WIDGET_SIZE_DP, content: @Composable () -> Unit) {
+private fun ProximityWidgetCard(side: Dp, content: @Composable () -> Unit) {
     Surface(
         shape = RoundedCornerShape(12.dp),
         color = WidgetBg,
         shadowElevation = 8.dp,
-        modifier = Modifier.size(sizeDp.dp)
+        modifier = Modifier.size(side)
     ) {
         Box(modifier = Modifier.padding(12.dp)) {
             content()
@@ -246,18 +250,33 @@ private fun ProximityWidgetCard(sizeDp: Int = WIDGET_SIZE_DP, content: @Composab
 // ---------------------------------------------------------------------------------------------
 
 /**
- * 2D top-down proximity radar: the drone sits at the centre. The forward rangefinder reports a
- * single obstacle distance, drawn as one coloured wedge locked to the 0° (forward, up) sector at
- * its measured range (near the centre = close). Nose points up.
+ * 2D top-down proximity radar: the drone sits at the centre. The forward radar reports a single
+ * obstacle distance, drawn as one coloured wedge locked to the 0° (forward, up) sector at its
+ * measured range (near the centre = close). Nose points up.
+ *
+ * Three states, and keeping them distinct is the whole point of this widget under the
+ * jiyi_radar.lua driver:
+ *   - **CLEAR** — the radar is alive and reports nothing ahead. The driver signals this with a
+ *     synthetic in-range distance near the top of its window, which a naive reader draws as a
+ *     permanent obstacle at ~19 m; [ProximityData.isClear] unmasks it.
+ *   - **target** — a real return, drawn as the wedge.
+ *   - **OFFLINE** — no message at all, i.e. the radar is off the CAN bus. NOT a clear, and shown
+ *     in warning amber, because a dead forward radar means avoidance has nothing to act on.
+ *
+ * [switchEnabled] is the RC8 enable switch. It never suppresses readings (the driver keeps feeding
+ * real forward distances so the logs stay honest), it only decides whether ArduPilot may avoid, so
+ * it is shown as a note rather than changing how the data is drawn.
  */
 @Composable
 private fun ObstacleRadarView(
     proximity: ProximityData?,
     thresholds: RadarThresholds,
+    switchEnabled: Boolean?,
     modifier: Modifier = Modifier
 ) {
     val forwardDist = proximity?.forwardDistanceM
-    val hasData = forwardDist != null
+    val isOffline = proximity == null
+    val isClear = proximity?.isClear == true
     val textMeasurer = rememberTextMeasurer()
     // Zoom: index into ObstacleZoomStopsM. 0 = fully zoomed out (20 m); higher = zoomed in.
     var zoomIndex by remember { mutableStateOf(0) }
@@ -301,12 +320,16 @@ private fun ObstacleRadarView(
                 if (proximity != null) drawForwardBlip(geom, proximity, thresholds, maxRange)
                 drawDroneIcon(geom.center)
             }
-            if (!hasData) {
+            if (forwardDist == null) {
                 // In forward-only mode the drone sits at the bottom, so surface the state up top.
+                // "Clear" and "Radar Offline" are deliberately different words in different
+                // colours: one means the path ahead is confirmed empty, the other means nothing is
+                // being confirmed at all.
                 Text(
-                    text = "No Target",
-                    color = LabelGray,
+                    text = if (isOffline) "Radar Offline" else "Clear",
+                    color = if (isOffline) WarnAmber else ClearGreen,
                     fontSize = 10.sp,
+                    fontWeight = if (isOffline) FontWeight.Bold else FontWeight.Normal,
                     modifier = Modifier
                         .align(if (pinnedToBottom) Alignment.TopCenter else Alignment.BottomCenter)
                         .padding(vertical = 2.dp)
@@ -332,12 +355,40 @@ private fun ObstacleRadarView(
                 modifier = Modifier.align(Alignment.BottomEnd)
             )
         }
-        forwardDist?.let { dist ->
-            Text(
-                text = String.format(Locale.US, "forward  %.1f m", dist),
-                color = proximityColor(dist, thresholds),
+        // Footer readout. A clamped return is prefixed "≤": the driver pins anything nearer than
+        // the window minimum to that minimum instead of dropping it, so the number is a floor and
+        // the real obstacle may be closer still.
+        when {
+            forwardDist != null -> Text(
+                text = if (proximity?.isAtWindowFloor == true) {
+                    String.format(Locale.US, "forward  ≤ %.1f m", forwardDist)
+                } else {
+                    String.format(Locale.US, "forward  %.1f m", forwardDist)
+                },
+                color = proximityColor(forwardDist, thresholds),
                 fontSize = 13.sp,
                 fontWeight = FontWeight.Bold
+            )
+            isClear -> Text(
+                text = "forward  clear",
+                color = ClearGreen,
+                fontSize = 13.sp,
+                fontWeight = FontWeight.Bold
+            )
+            isOffline -> Text(
+                text = "no radar data",
+                color = WarnAmber,
+                fontSize = 13.sp,
+                fontWeight = FontWeight.Bold
+            )
+        }
+        // RC8 low does not blind the radar — real distances keep coming — but ArduPilot will not
+        // act on them, so say so rather than letting a live-looking widget imply active avoidance.
+        if (switchEnabled == false) {
+            Text(
+                text = "avoidance OFF (RC8)",
+                color = WarnAmber,
+                fontSize = 10.sp
             )
         }
     }
@@ -493,8 +544,9 @@ private fun DrawScope.drawPolarGrid(
 /**
  * Draws the single forward obstacle reading as one colour-coded wedge locked to the 0° (forward)
  * sector — a 30°-wide slice spanning 345°..15° at the top of the bullseye — at its measured range.
- * An invalid / out-of-range reading ([ProximityData.forwardDistanceM] null) draws nothing, leaving
- * the clean grid and the "No Target" state.
+ * Draws nothing when [ProximityData.forwardDistanceM] is null — which under the Lua driver is the
+ * normal case, since a clear arrives as a synthetic in-range value that must NOT be drawn as an
+ * obstacle. The caller's status line distinguishes clear from radar-offline.
  */
 private fun DrawScope.drawForwardBlip(
     geom: RadarGeometry,
@@ -560,64 +612,4 @@ private fun DrawScope.drawDroneIcon(center: Offset) {
         close()
     }
     drawPath(nosePath, color = Accent)
-}
-
-// ---------------------------------------------------------------------------------------------
-// Terrain gauge (DISTANCE_SENSOR 132)
-// ---------------------------------------------------------------------------------------------
-
-/** Vertical altitude bar + large digital distance-to-ground readout. */
-@Composable
-private fun TerrainGaugeView(
-    terrain: TerrainData?,
-    thresholds: RadarThresholds,
-    modifier: Modifier = Modifier
-) {
-    val valid = terrain?.hasValidReading == true
-    val current = terrain?.currentDistanceM ?: 0f
-    val maxRange = terrain?.maxDistanceM?.takeIf { it > 0f } ?: 1f
-    val fraction = (current / maxRange).coerceIn(0f, 1f)
-    val fillColor = if (valid) proximityColor(current, thresholds) else LabelGray
-
-    Column(modifier = modifier.fillMaxSize()) {
-        Text("TERRAIN", color = LabelGray, fontSize = 12.sp, fontWeight = FontWeight.Medium)
-        Spacer(Modifier.height(6.dp))
-        Row(modifier = Modifier.fillMaxWidth().weight(1f)) {
-            // Vertical altitude bar (fills from the bottom with the current ground distance).
-            Box(
-                modifier = Modifier
-                    .width(28.dp)
-                    .fillMaxHeight()
-                    .clip(RoundedCornerShape(6.dp))
-                    .background(Color(0xFF2A2E33))
-            ) {
-                Box(
-                    modifier = Modifier
-                        .align(Alignment.BottomCenter)
-                        .fillMaxWidth()
-                        .fillMaxHeight(if (valid) fraction else 0f)
-                        .clip(RoundedCornerShape(6.dp))
-                        .background(fillColor)
-                )
-            }
-            Spacer(Modifier.width(14.dp))
-            // Digital readout (Cell style: small gray label + large accent value).
-            Column(verticalArrangement = Arrangement.Center, modifier = Modifier.fillMaxHeight()) {
-                Text("DIST TO GROUND", color = LabelGray, fontSize = 11.sp)
-                Spacer(Modifier.height(2.dp))
-                Text(
-                    text = if (valid) String.format(Locale.US, "%.1f", current) else "—",
-                    color = Accent,
-                    fontSize = 30.sp,
-                    fontWeight = FontWeight.Bold,
-                    fontFamily = FontFamily.Monospace
-                )
-                Text("meters", color = LabelGray, fontSize = 12.sp)
-                if (terrain != null && !terrain.isDownwardFacing) {
-                    Spacer(Modifier.height(6.dp))
-                    Text("sensor not downward", color = Color.Yellow, fontSize = 10.sp)
-                }
-            }
-        }
-    }
 }

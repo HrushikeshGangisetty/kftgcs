@@ -215,6 +215,14 @@ private const val FENCE_PARAM_RESEND_MS = 1000L
 private val RC_OPTION_PARAM_REGEX = Regex("""^RC(\d{1,2})_OPTION$""")
 
 /**
+ * Matches the jiyi_radar.lua driver's enable-switch STATUSTEXT, e.g. "JIYI: terrain OFF",
+ * capturing the radar name and the state. Anchored so the driver's "JIYI!" fault lines and
+ * "JIYI DANGER:" lines cannot match.
+ */
+private val JIYI_SWITCH_REGEX =
+    Regex("""^JIYI:\s+(obstacle|terrain)\s+(ON|OFF)$""", RegexOption.IGNORE_CASE)
+
+/**
  * Returned by [MavlinkTelemetryRepository.currentMissionTargetSeq] when the FC has not reported
  * any mission progress yet, so there is no honest answer to "which item is the drone flying to".
  *
@@ -237,6 +245,14 @@ class MavlinkTelemetryRepository(
 
     // Battery voltage smoothing (EMA filter for SYS_STATUS fallback)
     private var smoothedVoltage: Float? = null
+
+    // When smoothedVoltage was last updated. Expired for the same reason the cell-sum is: a
+    // stale SYS_STATUS value is the reference the ratio backstop below compares against, and
+    // `cellSum < sys * 0.90 -> sys` hands back that reference. If SYS_STATUS stops while
+    // BATTERY_STATUS keeps coming, a genuine pack sag would be compared against — and then
+    // replaced by — a frozen, higher number, which is exactly the masking this guard exists
+    // to prevent, only from the other direction.
+    private var smoothedVoltageAtMs: Long = 0L
     // Low alpha = more smoothing. 0.1 gives ~9-second EMA time-constant at 1 Hz.
     // Kept low because this path is only a fallback; BATTERY_STATUS cell-sum takes priority.
     private val VOLTAGE_ALPHA = 0.1f
@@ -244,6 +260,16 @@ class MavlinkTelemetryRepository(
     // Voltage from BATTERY_STATUS (sum of cell voltages — no 65.535V UShort limit).
     // When populated, this overrides the SYS_STATUS voltage which caps at 65.535V.
     private var battStatusVoltage: Float? = null
+
+    // When battStatusVoltage was last written. Without it the cell-sum had no expiry: if
+    // BATTERY_STATUS stopped arriving (link degradation, or the FC dropping a stream it was
+    // deferring) while SYS_STATUS kept coming at 4Hz, resolvePackVoltage() still took the
+    // `else -> cellSum` branch and returned the FROZEN sum — and the SYS_STATUS collector
+    // stamped voltageReceivedAtMs with "now" on every frame, so the failsafe's staleness guard
+    // never fired either. The pack could discharge past critical while the screen and the
+    // failsafe both read a healthy number that had stopped moving. The live SYS_STATUS value
+    // was sitting right there, being ignored.
+    private var battStatusVoltageAtMs: Long = 0L
 
     // ── Partial cell-sum detection (see resolvePackVoltage) ─────────────────────────────
     // How many cells went into the last battStatusVoltage sum. When the FC omits
@@ -272,6 +298,14 @@ class MavlinkTelemetryRepository(
     // enough that one bad frame moves the output by a quarter of its error.
     private val PACK_VOLTAGE_ALPHA = 0.25f
 
+    // How long a BATTERY_STATUS cell-sum stays authoritative. BATTERY_STATUS is requested at
+    // 10Hz, so 3s is ~30 missed frames: far past any normal jitter, and short enough that the
+    // SYS_STATUS fallback takes over well inside the failsafe's own 3s staleness window.
+    private val BATT_STATUS_STALE_MS = 3000L
+
+    // SYS_STATUS is requested at 4Hz, so 3s is ~12 missed frames.
+    private val SYS_STATUS_STALE_MS = 3000L
+
     // Track if disconnection was intentional (user-initiated)
     private var intentionalDisconnect = false
 
@@ -291,6 +325,52 @@ class MavlinkTelemetryRepository(
     // How often the DISTANCE_SENSOR staleness watchdog ticks. Well under SENSOR_STALE_AFTER_MS so a
     // dropped rangefinder reading clears within ~1.5-1.75s rather than lingering on screen.
     private val STALE_SENSOR_CHECK_INTERVAL_MS = 250L
+
+    // PRX1_MIN / PRX1_MAX, read once per connection by SharedViewModel and pushed in here via
+    // [setProximityWindowParams]. They are needed to reproduce the jiyi_radar.lua driver's usable
+    // window and therefore the exact value it emits to mean "nothing detected" — see
+    // ObstacleWindow. They never arrive in DISTANCE_SENSOR itself, hence the side channel. Null
+    // until read; obstacleWindowOf() falls back to RNGFND2's own bounds, which is correct whenever
+    // PRX1 does not narrow the window (the only configuration the driver accepts without faulting).
+    @Volatile private var prx1MinM: Float? = null
+    @Volatile private var prx1MaxM: Float? = null
+
+    /**
+     * Supply the vehicle's PRX1_MIN / PRX1_MAX so the forward-radar window (and with it the
+     * driver's synthetic-clear value) can be reproduced exactly. Called once per connection by
+     * SharedViewModel after the parameters have been read; pass null for a read that failed, which
+     * leaves that bound at RNGFND2's own. Takes effect on the next DISTANCE_SENSOR frame, i.e.
+     * within ~250 ms — no need to rebuild the current reading.
+     */
+    fun setProximityWindowParams(prxMinM: Float?, prxMaxM: Float?) {
+        prx1MinM = prxMinM?.takeIf { it > 0f }
+        prx1MaxM = prxMaxM?.takeIf { it > 0f }
+        LogUtils.d("ObstacleDistanceDbg", "PRX1 window params: min=$prx1MinM max=$prx1MaxM")
+    }
+
+    /**
+     * Applies the jiyi_radar.lua driver's enable-switch announcements — exactly
+     * `JIYI: obstacle ON` / `JIYI: terrain OFF`, sent at startup and on each transition — to
+     * [previous], returning the updated state, or null for any other STATUSTEXT.
+     *
+     * Each line carries ONE radar, so the other field is carried over rather than reset. Anchored
+     * and narrow on purpose: the driver's fault lines all start `JIYI!` or `JIYI DANGER:` and must
+     * not be mistaken for a switch report.
+     */
+    private fun applyJiyiSwitchAnnouncement(
+        message: String,
+        previous: RadarSwitchState
+    ): RadarSwitchState? {
+        // STATUSTEXT is a fixed-width char array, so the payload can arrive NUL-padded. The regex
+        // is anchored, and an unstripped NUL would silently defeat it.
+        val m = JIYI_SWITCH_REGEX.find(message.trim(Char(0), ' ', '\t', '\n', '\r')) ?: return null
+        val on = m.groupValues[2].equals("ON", ignoreCase = true)
+        return if (m.groupValues[1].equals("obstacle", ignoreCase = true)) {
+            previous.copy(obstacleEnabled = on)
+        } else {
+            previous.copy(terrainEnabled = on)
+        }
+    }
 
     // KFT Auth state
     private val _authStatus = MutableStateFlow(AuthResult.FAILED)
@@ -950,12 +1030,34 @@ class MavlinkTelemetryRepository(
      * would leave expectedCellCount at 0 (guard inert) during motor spin-up, which is
      * exactly when the sag that triggers a false failsafe occurs.
      */
+    /**
+     * The cell-sum, or null once it is too old to be trusted.
+     *
+     * Everything that reads [battStatusVoltage] must go through here: a sum that has stopped
+     * being refreshed is not a measurement, and treating it as one is what let a frozen reading
+     * outrank live SYS_STATUS data indefinitely.
+     */
+    private fun freshCellSum(): Float? {
+        val sum = battStatusVoltage ?: return null
+        val age = System.currentTimeMillis() - battStatusVoltageAtMs
+        if (age > BATT_STATUS_STALE_MS) return null
+        return sum
+    }
+
+    /** The smoothed SYS_STATUS voltage, or null once it has stopped being refreshed. */
+    private fun freshSysVoltage(): Float? {
+        val v = smoothedVoltage ?: return null
+        val age = System.currentTimeMillis() - smoothedVoltageAtMs
+        if (age > SYS_STATUS_STALE_MS) return null
+        return v
+    }
+
     private fun learnCellCount() {
         if (battStatusIsPackTotal) return
         val n = battStatusCellCount
         if (n <= 0 || n > 14) return          // 14 = MAVLink's max (voltages + voltagesExt)
-        val sum = battStatusVoltage ?: return
-        val sys = smoothedVoltage
+        val sum = freshCellSum() ?: return
+        val sys = freshSysVoltage()
         val corroborated = sys == null || sys >= 65.0f || sum >= sys * 0.90f
         if (corroborated && n > expectedCellCount) {
             LogUtils.i("VoltageDbg", "Learned expectedCellCount=$n (was $expectedCellCount, sum=${sum}V sys=${sys}V)")
@@ -978,10 +1080,12 @@ class MavlinkTelemetryRepository(
      * that is precisely why the original guard never caught this bug.
      */
     private fun resolvePackVoltage(): Float? {
-        val cellSum = battStatusVoltage
-        val sys = smoothedVoltage
+        val cellSum = freshCellSum()
+        val sys = freshSysVoltage()
 
         val resolved = when {
+            // Also covers "the cell-sum went stale": once BATTERY_STATUS stops arriving we fall
+            // through to the live SYS_STATUS value instead of republishing a frozen number.
             cellSum == null -> sys
 
             // Fewer cells than we have confidently seen before ⇒ the FC dropped cells from
@@ -1012,7 +1116,17 @@ class MavlinkTelemetryRepository(
             }
 
             else -> cellSum
-        } ?: return null
+        }
+
+        if (resolved == null) {
+            // Neither source is live. Drop the output filter too, so the first frame after the
+            // gap re-seeds the EMA instead of dragging a pre-gap voltage across it. Returning
+            // null leaves state.voltage at its last value and, crucially, leaves
+            // voltageReceivedAtMs alone — which is what lets the failsafe's own staleness
+            // guard notice that nothing is arriving.
+            smoothedPackVoltage = null
+            return null
+        }
 
         // EMA on the resolved value, so a single sagged frame moves the output by only a
         // fraction of its error regardless of which source produced it.
@@ -1021,6 +1135,34 @@ class MavlinkTelemetryRepository(
                   else PACK_VOLTAGE_ALPHA * resolved + (1 - PACK_VOLTAGE_ALPHA) * prev
         smoothedPackVoltage = out
         return out
+    }
+
+    /**
+     * Drop every piece of learned/filtered voltage state, so the next vehicle is judged on its
+     * own evidence.
+     *
+     * Called on ANY loss of the link, not just a user-initiated disconnect. It used to live only
+     * in [closeConnection], which meant a dropped link, a USB unplug or a drone power cycle left
+     * [expectedCellCount] behind: reconnecting a 6S pack after a 12S one made every honest 6-cell
+     * frame look like a 6-of-12 partial sum, so resolvePackVoltage() rejected all of them and the
+     * pack voltage silently came from SYS_STATUS for the rest of the session. The stale
+     * [smoothedPackVoltage] also seeded the new vehicle's EMA with the old one's voltage.
+     *
+     * Deliberately still NOT tied to disarm — that is the case the original comment here was
+     * guarding against, and it is unchanged: a battery swap needs a power cycle, which drops the
+     * link and lands in this function anyway, whereas clearing on every disarm would throw the
+     * guard's evidence away between flights on one battery.
+     */
+    private fun resetVoltageFilters(reason: String) {
+        smoothedVoltage = null
+        smoothedVoltageAtMs = 0L
+        smoothedPackVoltage = null
+        battStatusVoltage = null
+        battStatusVoltageAtMs = 0L
+        battStatusCellCount = 0
+        battStatusIsPackTotal = false
+        expectedCellCount = 0
+        LogUtils.d("VoltageDbg", "Voltage filters reset ($reason)")
     }
 
     fun start() {
@@ -1057,6 +1199,10 @@ class MavlinkTelemetryRepository(
                         lastClimbAltM = null
                         lastClimbAtMs = 0L
                         climbEmaMps = null
+                        // Same reasoning for the battery filters: the next vehicle on this link
+                        // may be a different pack size, and the learned cell count is what
+                        // decides whether its frames are believed at all.
+                        resetVoltageFilters("stream inactive")
                         // Auto-reconnect disabled - user must manually reconnect via connection tab
                     }
                 }
@@ -1077,6 +1223,7 @@ class MavlinkTelemetryRepository(
                             lastClimbAltM = null
                             lastClimbAtMs = 0L
                             climbEmaMps = null
+                            resetVoltageFilters("heartbeat timeout")
                         }
                     }
                 }
@@ -1356,12 +1503,21 @@ class MavlinkTelemetryRepository(
         //   orientation 25 (PITCH_270, downward-facing) -> TerrainData   (distance to ground)
         //   orientation  0 (NONE, forward-facing)       -> ProximityData (forward obstacle distance)
         // Raw distances are centimetres; convert to metres. signalQuality raw 0 means unknown.
-        // NOTE: OBSTACLE_DISTANCE (330) UI is intentionally NOT built yet — this vehicle's PRX1 is
-        // configured PRX1_TYPE=4 ("RangeFinder"), which ArduPilot synthesizes FROM RNGFND2's single
-        // forward point distance by projecting it across a narrow sector arc, rather than a genuinely
-        // scanning radar. See the diagnostic-only collector below, which logs 330's raw sector array
-        // alongside this stream's forward reading so that assumption can be confirmed from a live
-        // capture before any per-sector UI is built.
+        //
+        // Both rangefinders are fed by the jiyi_radar.lua CAN driver on the FC, NOT by modified
+        // firmware, and its reporting conventions are not the obvious ones. Most importantly the
+        // forward sensor reports "nothing detected" as a SYNTHETIC IN-RANGE DISTANCE (it must, or
+        // RNGFND2 ages to NoData and drags PRX1 down with it), so a raw reading of ~19.4 m is an
+        // all-clear, not an obstacle. ObstacleWindow reproduces the driver's window arithmetic so
+        // ProximityData can tell the two apart; see the file comment in ProximityData.kt for the
+        // full protocol. The window needs PRX1_MIN/PRX1_MAX, which are pushed in from the
+        // connect-time parameter read (see [setProximityWindowParams]).
+        //
+        // NOTE: OBSTACLE_DISTANCE (330) UI is intentionally NOT built. The driver configures
+        // PRX1_TYPE=4 ("RangeFinder"), so ArduPilot synthesizes 330 FROM RNGFND2's single forward
+        // point distance by projecting it across a narrow sector arc — there are no genuine
+        // per-sector returns to draw. The diagnostic-only collector below logs 330's raw array
+        // alongside this stream's forward reading so that can be reconfirmed from a live capture.
         scope.launch {
             mavFrame
                 .filter { state.value.fcuDetected && it.systemId == fcuSystemId }
@@ -1388,17 +1544,21 @@ class MavlinkTelemetryRepository(
                                 currentDistanceM = currentM,
                                 minDistanceM = minM,
                                 maxDistanceM = maxM,
-                                signalQuality = quality
+                                signalQuality = quality,
+                                window = obstacleWindowOf(minM, maxM, prx1MinM, prx1MaxM)
                             )
                             _state.update { it.copy(proximityData = proximity) }
                             // Logged under the same "ObstacleDistanceDbg" tag as the OBSTACLE_DISTANCE
                             // (330) collector above so the two streams can be diffed directly in
-                            // logcat while confirming whether PRX1 (PRX1_TYPE=4) is genuinely
-                            // synthesized from this RNGFND2 reading.
+                            // logcat. The decoded verdict is logged alongside the raw value because
+                            // the interesting failure mode is the app calling a synthetic clear an
+                            // obstacle (or vice versa), which the raw number alone will not show.
                             LogUtils.d(
                                 "ObstacleDistanceDbg",
                                 "DISTANCE_SENSOR(fwd/RNGFND2) currentDistance=${currentM}m " +
-                                    "min=${minM}m max=${maxM}m quality=$quality"
+                                    "min=${minM}m max=${maxM}m quality=$quality " +
+                                    "clearAt=${proximity.window?.clearM} " +
+                                    "verdict=${if (proximity.isClear) "CLEAR" else "target@${proximity.forwardDistanceM}m"}"
                             )
                         }
                         else -> { /* other orientations are not used by the obstacle/terrain UI */ }
@@ -1454,11 +1614,19 @@ class MavlinkTelemetryRepository(
                 _state.update { current ->
                     val dropTerrain = current.terrainData?.let { linkDown || it.isStaleAt(now) } == true
                     val dropProximity = current.proximityData?.let { linkDown || it.isStaleAt(now) } == true
-                    when {
-                        dropTerrain && dropProximity -> current.copy(terrainData = null, proximityData = null)
-                        dropTerrain -> current.copy(terrainData = null)
-                        dropProximity -> current.copy(proximityData = null)
-                        else -> current
+                    // The driver announces each switch only on a transition, so a remembered
+                    // position goes stale the moment the link drops — the pilot can flip a switch
+                    // while we are not listening. Forget it rather than show a stale "terrain OFF".
+                    val dropSwitches = linkDown && current.radarSwitchState != RadarSwitchState()
+                    if (!dropTerrain && !dropProximity && !dropSwitches) {
+                        current
+                    } else {
+                        current.copy(
+                            terrainData = if (dropTerrain) null else current.terrainData,
+                            proximityData = if (dropProximity) null else current.proximityData,
+                            radarSwitchState =
+                                if (dropSwitches) RadarSwitchState() else current.radarSwitchState
+                        )
                     }
                 }
             }
@@ -1619,6 +1787,7 @@ class MavlinkTelemetryRepository(
 
                         if (allValid.isNotEmpty()) {
                             battStatusVoltage = sumV
+                            battStatusVoltageAtMs = System.currentTimeMillis()
                             battStatusCellCount = allValid.size
                             battStatusIsPackTotal = isPackTotal
                         }
@@ -2477,7 +2646,12 @@ class MavlinkTelemetryRepository(
                     // gives ~9 s time-constant — keeps the fallback stable without anchoring on
                     // brief motor-spinup dips the way a higher alpha (0.3) would).
                     val vBattSmoothed = if (vBattRaw != null) {
-                        val prev = smoothedVoltage
+                        // freshSysVoltage(), not the raw field: after a gap in SYS_STATUS the
+                        // pre-gap value is not a filter state worth continuing from, so the EMA
+                        // re-seeds on the first frame back instead of dragging an old voltage
+                        // across the hole. Read before the stamp below is updated.
+                        val prev = freshSysVoltage()
+                        smoothedVoltageAtMs = System.currentTimeMillis()
                         if (prev != null) {
                             (VOLTAGE_ALPHA * vBattRaw + (1 - VOLTAGE_ALPHA) * prev).also { smoothedVoltage = it }
                         } else {
@@ -2485,6 +2659,7 @@ class MavlinkTelemetryRepository(
                         }
                     } else {
                         smoothedVoltage = null
+                        smoothedVoltageAtMs = 0L
                         null
                     }
 
@@ -2618,6 +2793,20 @@ class MavlinkTelemetryRepository(
 
                 .collect { status ->
                     val message = status.text.toString()
+
+                    // ═══ JIYI RADAR ENABLE SWITCHES ═══
+                    // jiyi_radar.lua announces each radar's RC enable switch at startup and on
+                    // every change: "JIYI: obstacle ON" / "JIYI: terrain OFF". Captured into
+                    // TelemetryState so the radar widgets can say WHY they are showing nothing —
+                    // with RC9 low the terrain sensor reports "no usable return" by design, and a
+                    // gauge that just goes blank looks like a hardware fault. Parsed in addition
+                    // to (not instead of) the notification below, so the raw line still appears in
+                    // the notification panel alongside every other FC message.
+                    _state.update { current ->
+                        applyJiyiSwitchAnnouncement(message, current.radarSwitchState)
+                            ?.let { current.copy(radarSwitchState = it) }
+                            ?: current
+                    }
 
                     // Filter out fence-related STATUSTEXT messages when GCS geofence is disabled.
                     // ArduPilot sends messages like "approaching polygon fence", "fence breach",
@@ -4898,15 +5087,7 @@ class MavlinkTelemetryRepository(
             _autopilotCapabilities.value = null
             // Mark this as an intentional disconnect to prevent auto-reconnect
             intentionalDisconnect = true
-            // Reset voltage smoothing and the learned cell count. Cleared here rather than on
-            // disarm because a battery swap requires a power cycle, which drops the link —
-            // clearing on arm instead would throw away the guard's evidence every flight.
-            smoothedVoltage = null
-            smoothedPackVoltage = null
-            battStatusVoltage = null
-            battStatusCellCount = 0
-            battStatusIsPackTotal = false
-            expectedCellCount = 0
+            resetVoltageFilters("user disconnect")
             // Attempt to close the TCP connection gracefully
             connection.close()
         } catch (e: Exception) {

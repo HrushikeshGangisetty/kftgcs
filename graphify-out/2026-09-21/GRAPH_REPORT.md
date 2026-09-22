@@ -1,12 +1,12 @@
-# Graph Report - kftgcs  (2026-09-21)
+# Graph Report - kftgcs  (2026-09-20)
 
 ## Corpus Check
-- 230 files · ~932,787 words
+- 230 files · ~933,269 words
 - Verdict: corpus is large enough that graph structure adds value.
 - Unclassified: 60 file(s) not represented in the graph (top: .xml 20, .log 19, .bat 8)
 
 ## Summary
-- 2865 nodes · 5982 edges · 161 communities (120 shown, 28 thin omitted)
+- 2865 nodes · 5988 edges · 151 communities (112 shown, 26 thin omitted)
 - Extraction: 97% EXTRACTED · 3% INFERRED · 0% AMBIGUOUS · INFERRED: 178 edges (avg confidence: 0.88)
 - Token cost: 0 input · 0 output
 
@@ -19,10 +19,10 @@
 - SavedMissionStateDao
 - Backend WebSocket Telemetry Consumer
 - SharedViewModel
-- GridGenerator
+- PlanScreen
 - MavlinkTelemetryRepository
 - FieldType
-- FullParamListViewModel
+- LogUtils
 - ProximityOverlay.kt
 - Calibration Screen UI
 - UdpMavConnection
@@ -121,30 +121,21 @@
 - Forgot Password Page
 - SharedViewModel.kt
 - Shared View Model
-- KmlBoundaryParser
 - Sensor Settings Screen
 - Video Stream Settings
-- BatteryMonitorViewModel.kt
 - .sendCommandAck
-- PhoneLocationProvider
 - Shared View Model
 - DroneCameraFeedOverlay
 - Telemetry Overlay
 - Settings Screen
-- MissionTemplateRepository
 - CalibrationCommands
-- MissionTemplateViewModel
 - Rc Stick View
 - VideoRelayNotification.kt
 - VideoTrackingOverlay
-- MissionTemplateTypeConverters
 - Shared View Model
-- PlanScreen
 - Shared View Model
 - MissionTemplateEntity
-- GridParameters
 - Gradlew
-- LogUtils
 - Example Instrumented Test
 - Shared View Model
 - Example Unit Test
@@ -161,7 +152,6 @@
 - Security
 - Security
 - MotorTestScreen.kt
-- test_ws_quick.py
 - SelectFlyingMethodScreen.kt
 - PreflightFailsafeDialog
 
@@ -197,7 +187,7 @@
 - **CI Security Scan Pipeline** — github_workflows_security_dependencycheck, github_workflows_security_secretscanning, github_workflows_security_codeqlanalysis, github_workflows_security_androidlint [EXTRACTED 1.00]
 - **Critical/High Priority Backend Data-Integrity Fixes (A, B, C)** — docs_backend_websocket_spec_socketauthentication, docs_backend_websocket_spec_vehiclededuplication, docs_backend_websocket_spec_droneuidupdate [EXTRACTED 1.00]
 
-## Communities (161 total, 28 thin omitted)
+## Communities (151 total, 26 thin omitted)
 
 ### Community 0 - "SavedMissionStateDao"
 Cohesion: 0.12
@@ -211,9 +201,9 @@ Nodes (75): AsyncWebsocketConsumer, TelemetryConsumer - Fixed version with prope
 Cohesion: 0.03
 Nodes (5): kotlinx, SharedFlow, StateFlow, MissionCompletionData, SharedViewModel
 
-### Community 3 - "GridGenerator"
-Cohesion: 0.14
-Nodes (9): GridGenerator, LatLng, GridMissionConverter, LatLng, MissionItemInt, UByte, GridSurveyParams, GridSurveyResult (+1 more)
+### Community 3 - "PlanScreen"
+Cohesion: 0.07
+Nodes (27): GridGenerator, LatLng, GridMissionConverter, LatLng, MissionItemInt, UByte, GridSurveyParams, GridSurveyResult (+19 more)
 
 ### Community 4 - "MavlinkTelemetryRepository"
 Cohesion: 0.09
@@ -223,9 +213,9 @@ Nodes (9): ByteArray, kotlinx, SharedFlow, StateFlow, MavlinkTelemetryRepository
 Cohesion: 0.05
 Nodes (43): AuthResult, AUTHENTICATED, DENIED, FAILED, LEGACY_FIRMWARE, ChallengeCompleteException, KFTAuth, object@L92 (+35 more)
 
-### Community 6 - "FullParamListViewModel"
-Cohesion: 0.06
-Nodes (38): ArduPilotParamMetadataRepository, TypeToken, TypeToken, Context, TypeToken, BrakeWriteResult, BrakingSettingsState, BrakingSettingsViewModel (+30 more)
+### Community 6 - "LogUtils"
+Cohesion: 0.05
+Nodes (40): ArduPilotParamMetadataRepository, TypeToken, TypeToken, Context, TypeToken, BrakeWriteResult, BrakingSettingsState, BrakingSettingsViewModel (+32 more)
 
 ### Community 7 - "ProximityOverlay.kt"
 Cohesion: 0.09
@@ -284,8 +274,8 @@ Cohesion: 0.13
 Nodes (3): TextToSpeechManager, OnInitListener, TextToSpeech
 
 ### Community 21 - "ServoOutputViewModel"
-Cohesion: 0.10
-Nodes (21): ServoChannel, ServoFunction, VehicleState, ArmedWarningBanner(), CompactFunctionDropdown(), CompactPwmField(), HeaderCell(), Dp (+13 more)
+Cohesion: 0.11
+Nodes (20): ServoChannel, ServoFunction, VehicleState, ArmedWarningBanner(), CompactFunctionDropdown(), CompactPwmField(), HeaderCell(), Dp (+12 more)
 
 ### Community 22 - "Level Calibration Screen UI"
 Cohesion: 0.10
@@ -312,7 +302,7 @@ Cohesion: 0.08
 Nodes (21): EventSeverity, CRITICAL, ERROR, INFO, WARNING, EventType, ARM_DISARM, CONNECTION_LOSS (+13 more)
 
 ### Community 29 - "OfflineMessageDao"
-Cohesion: 0.13
+Cohesion: 0.14
 Nodes (5): Flow, OfflineMessageDao, OfflineMessageEntity, Flow, CertificatePinner
 
 ### Community 30 - "CrashAnalyzer"
@@ -352,8 +342,8 @@ Cohesion: 0.17
 Nodes (7): CalibrationResult, StateFlow, ObstacleSensorManager, Sensor, SensorEvent, SensorEventListener, SensorManager
 
 ### Community 39 - "SpraySettingsViewModel"
-Cohesion: 0.15
-Nodes (17): ConfirmSprayDialog(), EnumDropdown(), fmtSpray(), InfoCenterSpray(), androidx, NavController, SectionCard(), SprayFieldView() (+9 more)
+Cohesion: 0.08
+Nodes (27): BatteryMonitorState, BatteryMonitorViewModel, BattMonitorOption, findHwVerPresetFor(), findSensorPresetFor(), HwVerPreset, StateFlow, ViewModel (+19 more)
 
 ### Community 40 - "SessionManager"
 Cohesion: 0.24
@@ -428,8 +418,8 @@ Cohesion: 0.11
 Nodes (3): BatteryFsAction, Context, UInt
 
 ### Community 60 - "test_websocket_connection.py"
-Cohesion: 0.22
-Nodes (12): main(), on_close(), on_error(), on_message(), on_open(), Called when an error occurs, Called when WebSocket connection is closed, WebSocket Connection Test Script ================================ This script… (+4 more)
+Cohesion: 0.15
+Nodes (14): main(), on_close(), on_error(), on_message(), on_open(), Called when an error occurs, Called when WebSocket connection is closed, WebSocket Connection Test Script ================================ This script… (+6 more)
 
 ### Community 61 - "TrackingManager"
 Cohesion: 0.24
@@ -476,7 +466,7 @@ Cohesion: 0.15
 Nodes (12): UByte, CameraCapabilities, CameraInfo, TrackingMode, NONE, POINT, RECTANGLE, TrackingStatus (+4 more)
 
 ### Community 73 - "MissionTemplateDatabase"
-Cohesion: 0.19
+Cohesion: 0.21
 Nodes (5): Context, RoomDatabase, MissionTemplateDatabase, SyncWorker, CoroutineWorker
 
 ### Community 74 - "ObstacleDetectionViewModel"
@@ -512,7 +502,7 @@ Cohesion: 0.21
 Nodes (4): GimbalController, StateFlow, UByte, GimbalDeviceAttitudeStatus
 
 ### Community 82 - "EventEntity"
-Cohesion: 0.39
+Cohesion: 0.33
 Nodes (3): EventEntity, EventDao, Flow
 
 ### Community 83 - "Flight Log Exporter"
@@ -579,10 +569,6 @@ Nodes (22): BluetoothConnectionProvider, CoroutinesMavConnection, CoroutinesMavC
 Cohesion: 0.29
 Nodes (7): ArmingCheckSafetyDialog(), ArmingCheckState, HIDDEN, PROMPT_REBOOT, PROMPT_WRITE, WRITE_FAILED, WRITING
 
-### Community 106 - "KmlBoundaryParser"
-Cohesion: 0.36
-Nodes (5): KmlBoundaryParser, KmlParseResult, KmlPolygon, LatLng, XmlPullParser
-
 ### Community 107 - "Sensor Settings Screen"
 Cohesion: 0.39
 Nodes (7): androidx, NavHostController, roundToStep(), SensorSettingsScreen(), StepButton(), ThresholdControl(), ClosedFloatingPointRange
@@ -590,14 +576,6 @@ Nodes (7): androidx, NavHostController, roundToStep(), SensorSettingsScreen(), S
 ### Community 108 - "Video Stream Settings"
 Cohesion: 0.54
 Nodes (7): VideoStreamInfo, DetectedStreamCard(), Modifier, UsbDevice, PresetChip(), UsbDeviceCard(), VideoStreamSettings()
-
-### Community 109 - "BatteryMonitorViewModel.kt"
-Cohesion: 0.19
-Nodes (10): BatteryMonitorState, BatteryMonitorViewModel, BattMonitorOption, findHwVerPresetFor(), findSensorPresetFor(), HwVerPreset, StateFlow, ViewModel (+2 more)
-
-### Community 111 - "PhoneLocationProvider"
-Cohesion: 0.35
-Nodes (6): Context, LatLng, StateFlow, PhoneLocationProvider, rememberPhoneLocation(), FusedLocationProviderClient
 
 ### Community 112 - "Shared View Model"
 Cohesion: 0.29
@@ -615,17 +593,9 @@ Nodes (6): Cell(), EscRow(), fmt(), fmtPlain(), Modifier, TelemetryOverlay()
 Cohesion: 0.48
 Nodes (6): androidx, ImageVector, NavHostController, NumberedButton(), SettingsEntry, SettingsScreen()
 
-### Community 116 - "MissionTemplateRepository"
-Cohesion: 0.28
-Nodes (5): MissionTemplateRepository, Reachable, Result, StreamReachability, Unreachable
-
 ### Community 117 - "CalibrationCommands"
 Cohesion: 0.53
 Nodes (3): CalibrationCommands, CommandLong, UByte
-
-### Community 118 - "MissionTemplateViewModel"
-Cohesion: 0.23
-Nodes (7): AndroidViewModel, Flow, LatLng, MissionItemInt, StateFlow, MissionTemplateUiState, MissionTemplateViewModel
 
 ### Community 119 - "Rc Stick View"
 Cohesion: 0.67
@@ -635,29 +605,17 @@ Nodes (5): drawGimbal(), Modifier, Offset, norm(), RcStickView()
 Cohesion: 0.80
 Nodes (5): CameraInfoBadge(), GimbalInfoBadge(), Modifier, TrackingStatusBadge(), VideoTrackingOverlay()
 
-### Community 123 - "MissionTemplateTypeConverters"
-Cohesion: 0.26
-Nodes (6): LatLng, MissionItemInt, TypeToken, MissionTemplateTypeConverters, TypeToken, TypeToken
-
 ### Community 124 - "Shared View Model"
 Cohesion: 0.40
 Nodes (5): ClearMissionState, CLEARING, FAILED, IDLE, SUCCESS
-
-### Community 125 - "PlanScreen"
-Cohesion: 0.29
-Nodes (7): GridSourceSelectionDialog(), KmlPolygonSelectionDialog(), MissionChoiceDialog(), MissionTypeSelectionDialog(), SaveMissionDialog(), NavHostController, PlanScreen()
 
 ### Community 126 - "Shared View Model"
 Cohesion: 0.40
 Nodes (4): MissionType, GRID, NONE, WAYPOINT
 
 ### Community 127 - "MissionTemplateEntity"
-Cohesion: 0.18
-Nodes (9): Flow, MissionTemplateDao, MissionTemplateEntity, EnhancedMissionTemplateCard(), Modifier, PlotTemplatesScreen(), Modifier, TemplateListItem() (+1 more)
-
-### Community 128 - "GridParameters"
-Cohesion: 0.27
-Nodes (4): GridParameters, Flow, LatLng, MissionItemInt
+Cohesion: 0.05
+Nodes (31): Flow, MissionTemplateDao, GridParameters, MissionTemplateEntity, LatLng, MissionItemInt, TypeToken, MissionTemplateTypeConverters (+23 more)
 
 ### Community 129 - "Gradlew"
 Cohesion: 0.70
@@ -682,14 +640,14 @@ Nodes (4): formatVolts(), PreflightFailsafeDialog(), SummaryRow(), PreflightFail
 ## Knowledge Gaps
 - **271 isolated node(s):** `ErrorResponse`, `Error`, `AdminInfo`, `VehicleInfo`, `AUTHENTICATED` (+266 more)
   These have ≤1 connection - possible missing edges or undocumented components. (Counts symbols only; 632 node(s) total have ≤1 connection when file, concept and rationale nodes are included.)
-- **28 thin communities (<3 nodes) omitted from report** — run `graphify query` to explore isolated nodes.
+- **26 thin communities (<3 nodes) omitted from report** — run `graphify query` to explore isolated nodes.
 
 ## Suggested Questions
 _Questions this graph is uniquely positioned to answer:_
 
-- **Why does `SharedViewModel` connect `SharedViewModel` to `.handleAltitudeFailsafe`, `MavlinkTelemetryRepository`, `FullParamListViewModel`, `ProximityOverlay.kt`, `Calibration Screen UI`, `Shared View Model`, `Notification`, `Compass Calibration Screen UI`, `AnalyzeLogScreen.kt`, `RC Calibration Screen UI`, `Text-to-Speech Announcements`, `ServoOutputViewModel`, `Level Calibration Screen UI`, `ObstacleDetectionManager`, `OptionsViewModel`, `.setParameter`, `AppNavGraph.kt`, `SelectFlyingMethodScreen.kt`, `GcsMap`, `PreflightFailsafeDialog`, `SpraySettingsViewModel`, `SessionManager`, `LatLng`, `MotorTestViewModel`, `TelemetryState`, `AboutDroneViewModel`, `ObstacleDetectionIntegrationExample`, `Context`, `TrackingManager`, `Color.kt`, `ConnectionPage.kt`, `FenceAction`, `ObstacleDetectionViewModel`, `Barometer Calibration View Model`, `MainActivity.kt`, `Flow Sensor Calibration Screen`, `FlightModeViewModel`, `LevelSensorCalibrationScreen.kt`, `LogsScreen.kt`, `TopNavBar.kt`, `Spray Calibration Screen`, `SharedViewModel.kt`, `Shared View Model`, `Sensor Settings Screen`, `BatteryMonitorViewModel.kt`, `.sendCommandAck`, `Shared View Model`, `Settings Screen`, `.clearGeofenceFromFC`, `Shared View Model`, `PlanScreen`, `Shared View Model`?**
+- **Why does `SharedViewModel` connect `SharedViewModel` to `PlanScreen`, `.handleAltitudeFailsafe`, `MavlinkTelemetryRepository`, `LogUtils`, `ProximityOverlay.kt`, `Calibration Screen UI`, `Shared View Model`, `Notification`, `Compass Calibration Screen UI`, `AnalyzeLogScreen.kt`, `RC Calibration Screen UI`, `Text-to-Speech Announcements`, `ServoOutputViewModel`, `Level Calibration Screen UI`, `ObstacleDetectionManager`, `OptionsViewModel`, `.setParameter`, `AppNavGraph.kt`, `SelectFlyingMethodScreen.kt`, `GcsMap`, `PreflightFailsafeDialog`, `SpraySettingsViewModel`, `SessionManager`, `LatLng`, `MotorTestViewModel`, `TelemetryState`, `AboutDroneViewModel`, `ObstacleDetectionIntegrationExample`, `Context`, `TrackingManager`, `Color.kt`, `ConnectionPage.kt`, `FenceAction`, `ObstacleDetectionViewModel`, `Barometer Calibration View Model`, `MainActivity.kt`, `Flow Sensor Calibration Screen`, `FlightModeViewModel`, `LevelSensorCalibrationScreen.kt`, `LogsScreen.kt`, `TopNavBar.kt`, `Spray Calibration Screen`, `SharedViewModel.kt`, `Shared View Model`, `Sensor Settings Screen`, `.sendCommandAck`, `Shared View Model`, `Settings Screen`, `.clearGeofenceFromFC`, `Shared View Model`, `Shared View Model`?**
   _High betweenness centrality (0.363) - this node is a cross-community bridge._
-- **Why does `LogUtils` connect `LogUtils` to `FullParamListViewModel`, `UdpMavConnection`, `ServoOutputViewModel`, `OptionsViewModel`, `CrashAnalyzer`, `SpraySettingsViewModel`, `AnalyzeLogUiState`, `MotorTestViewModel`, `ScreenRecordService`, `TelemetryState`, `Mavlink Ftp Client`, `Log Replay Screen`, `TelemetryRepository.kt`, `Log Analysis View Model`, `FlightModeViewModel`, `SharedViewModel.kt`, `BatteryMonitorViewModel.kt`, `PhoneLocationProvider`, `MissionTemplateViewModel`, `PlanScreen`?**
+- **Why does `LogUtils` connect `LogUtils` to `TelemetryRepository.kt`, `PlanScreen`, `OptionsViewModel`, `FlightModeViewModel`, `SpraySettingsViewModel`, `SharedViewModel.kt`, `UdpMavConnection`, `AnalyzeLogUiState`, `MotorTestViewModel`, `ScreenRecordService`, `TelemetryState`, `Mavlink Ftp Client`, `Log Analysis View Model`, `Log Replay Screen`, `CrashAnalyzer`, `MissionTemplateEntity`?**
   _High betweenness centrality (0.092) - this node is a cross-community bridge._
 - **Why does `TelemetryState` connect `TelemetryState` to `TelemetryRepository.kt`, `TopNavBar.kt`, `SharedViewModel`, `GcsMap`, `.handleAltitudeFailsafe`, `MavlinkTelemetryRepository`, `.imagePointToGps`, `SharedViewModel.kt`, `Notification`, `DroneCameraFeedOverlay`, `AnalyzeLogScreen.kt`, `ObstacleDetectionManager`, `.clearGeofenceFromFC`, `TrackingManager`?**
   _High betweenness centrality (0.091) - this node is a cross-community bridge._

@@ -367,12 +367,13 @@ fun MainPage(
                     )
                 }
 
-                // Obstacle-avoidance / terrain overlay: toggle buttons + floating widgets.
+                // Obstacle-avoidance overlay: toggle buttons + floating radar widget. Terrain has
+                // no widget here; distance-to-ground is the "obs-alt" field on the bottom bar.
                 val radarThresholds by telemetryViewModel.radarThresholds.collectAsState()
                 ProximityMapOverlay(
-                    terrain = telemetryState.terrainData,
                     proximity = telemetryState.proximityData,
                     thresholds = radarThresholds,
+                    switches = telemetryState.radarSwitchState,
                     onClearMission = { showClearMissionConfirm = true },
                     clearMissionEnabled = clearMissionEnabled
                     // Label left at its short default: AppStrings.clearMission and
@@ -962,11 +963,17 @@ fun StatusPanel(
                 horizontalArrangement = Arrangement.SpaceBetween,
                 modifier = Modifier.fillMaxWidth()
             ) {
-                // Distance to ground from the downward terrain rangefinder (DISTANCE_SENSOR 132).
-                val obsAltStr = telemetryState.terrainData
-                    ?.takeIf { it.hasValidReading }
-                    ?.let { "%.1f m".format(it.currentDistanceM) }
-                    ?: "N/A"
+                // Distance to ground from the downward terrain radar (DISTANCE_SENSOR 132).
+                // A below-min return is a real measurement of very close ground, so it shows as a
+                // floor ("≤0.2 m") rather than N/A.
+                // "N/A" covers only no-usable-return and radar-offline.
+                val obsAltStr = telemetryState.terrainData?.let {
+                    when {
+                        it.isBelowMin -> "≤%.1f m".format(it.currentDistanceM)
+                        it.hasValidReading -> "%.1f m".format(it.currentDistanceM)
+                        else -> null
+                    }
+                } ?: "N/A"
                 Text(
                     "obs-alt: $obsAltStr",
                     color = Color.White,

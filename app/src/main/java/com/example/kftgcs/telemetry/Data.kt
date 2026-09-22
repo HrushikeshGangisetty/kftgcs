@@ -300,12 +300,18 @@ data class TelemetryState(
     val firmwareVersion: String? = null, // Formatted firmware version
     val boardVersion: Int? = null, // Hardware/board version
 
-    // Obstacle-avoidance / terrain telemetry relayed from the CAN hub as standard MAVLink messages.
-    // Both come from DISTANCE_SENSOR (132), split by orientation:
+    // Jiyi CAN radar telemetry, decoded on the FC by the jiyi_radar.lua driver and relayed as
+    // standard MAVLink. Both come from DISTANCE_SENSOR (132), split by orientation:
     //   terrainData   <- orientation 25 (PITCH_270, downward rangefinder -> distance to ground)
     //   proximityData <- orientation  0 (NONE, forward rangefinder -> obstacle distance)
+    // Null means the radar is OFFLINE (the driver stops feeding a sensor that has gone silent on
+    // the CAN bus), never "clear" — see the protocol notes in ProximityData.kt.
     val terrainData: TerrainData? = null,
     val proximityData: ProximityData? = null,
+    // Each radar's RC enable switch, from the driver's "JIYI: <radar> ON/OFF" STATUSTEXT lines.
+    // The terrain one in particular changes what a reading MEANS: RC9 low makes the driver report
+    // "no usable return" on purpose, which otherwise looks like a broken sensor.
+    val radarSwitchState: RadarSwitchState = RadarSwitchState(),
 
     // Spray telemetry for agricultural drones
     val sprayTelemetry: SprayTelemetry = SprayTelemetry()

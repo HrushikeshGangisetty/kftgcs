@@ -984,9 +984,9 @@
     "semantic_hash": "5fa420e8fb88fd81f03541f82171ab61"
   },
   "app/src/main/java/com/example/kftgcs/uimain/MainPage.kt": {
-    "mtime": 1789972225.0317423,
-    "seen": 1789972235.1079848,
-    "ast_hash": "71b43a1318d4c9344255c381dda05c03",
+    "mtime": 1789884346.6792445,
+    "seen": 1789884454.1206577,
+    "ast_hash": "d0e7e32ba648f36d6c173ad432044efb",
     "semantic_hash": ""
   },
   "app/src/main/java/com/example/kftgcs/uimain/NotificationPanel.kt": {
@@ -1008,9 +1008,9 @@
     "semantic_hash": ""
   },
   "app/src/main/java/com/example/kftgcs/uimain/ProximityOverlay.kt": {
-    "mtime": 1789972225.0317423,
-    "seen": 1789972235.1079848,
-    "ast_hash": "9481cf33e9400d4f7f8b006bd443ddfd",
+    "mtime": 1789884381.3915298,
+    "seen": 1789884454.1206577,
+    "ast_hash": "6320f466473021e2f1f60254e4f8051c",
     "semantic_hash": ""
   },
   "app/src/main/java/com/example/kftgcs/uimain/SecurityScreen.kt": {
