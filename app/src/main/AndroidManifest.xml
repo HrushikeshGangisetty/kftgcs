@@ -4,6 +4,11 @@
     <!-- Permissions required for Google Maps & location -->
     <uses-permission android:name="android.permission.INTERNET"/>
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE"/>
+    <!-- UDP MAVLink: without these, WifiManager.MulticastLock.acquire() throws SecurityException
+         and Android's Wi-Fi driver silently drops broadcast telemetry (e.g. SITL udpbcast,
+         companion computers sending to x.x.x.255). -->
+    <uses-permission android:name="android.permission.ACCESS_WIFI_STATE"/>
+    <uses-permission android:name="android.permission.CHANGE_WIFI_MULTICAST_STATE"/>
     <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION"/>
     <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION"/>
 

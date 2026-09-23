@@ -9,8 +9,11 @@ import android.hardware.usb.UsbDevice
  * not need to know whether the feed is:
  *
  * - an MK15 air unit + SIYI camera, reachable as an RTSP/HTTP network stream, or
- * - a Skydroid T12 controller, whose video comes out of a USB port as a UVC
- *   (USB Video Class) device — there is no network URI for this at all.
+ * - a Skydroid T12 controller, whose video does NOT use a separate USB video
+ *   interface at all. Confirmed against hardware (2026-09-22): the T12 exposes
+ *   exactly one USB-serial port (the same one MAVLink heartbeats already arrive
+ *   on), and video is H.264 muxed into a vendor AT-command protocol tunneled
+ *   over that serial link — see [T12SerialVideoSource] for the full writeup.
  *
  * Keeping this as a sealed type (rather than overloading [String] stream URIs
  * with magic prefixes) is what lets MK15 and T12 share the tracking overlay,
@@ -27,11 +30,9 @@ sealed interface VideoSource {
     data class Network(val uri: String) : VideoSource
 
     /**
-     * A Skydroid T12 (or any other UVC-class camera) attached over USB OTG.
-     * Captured directly via [com.example.kftgcs.videotracking.source.UsbUvcVideoSource]
-     * — no dependency on the vendor's Skydroid FPV app being installed or running,
-     * since that app only exposes its picture as a floating overlay window with no
-     * programmatic access (no SDK, intent, or shared Surface).
+     * A Skydroid T12 controller attached over USB OTG, its video read out via
+     * [T12SerialVideoSource] over the same USB-serial link used for MAVLink.
+     * No dependency on the vendor's Skydroid FPV app being installed or running.
      */
     data class Usb(val device: UsbDevice) : VideoSource
 

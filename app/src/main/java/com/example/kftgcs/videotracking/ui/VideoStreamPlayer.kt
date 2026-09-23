@@ -1,6 +1,7 @@
 package com.example.kftgcs.videotracking.ui
 
 import android.content.Context
+import android.view.Surface
 import androidx.annotation.OptIn
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
@@ -42,9 +43,9 @@ import timber.log.Timber
  * Video stream player composable for the drone camera feed.
  *
  * Source-agnostic entry point: dispatches to the network (MK15/RTSP, unchanged)
- * or USB-UVC (Skydroid T12) rendering path based on [source]. Both paths share
- * the same placeholder/error/PiP chrome in `DroneCameraFeedOverlay` — only how
- * pixels get onto the surface differs.
+ * or USB-serial (Skydroid T12) rendering path based on [source]. Both paths
+ * share the same placeholder/error/PiP chrome in `DroneCameraFeedOverlay` —
+ * only how pixels get onto the surface differs.
  */
 @OptIn(UnstableApi::class)
 @Composable
@@ -56,7 +57,7 @@ fun VideoStreamPlayer(
     onError: ((String) -> Unit)? = null
 ) {
     when (source) {
-        is VideoSource.Usb -> UsbUvcStreamPlayer(
+        is VideoSource.Usb -> T12SerialStreamPlayer(
             device = source.device,
             modifier = modifier,
             isConnected = isConnected,
@@ -572,18 +573,22 @@ private enum class VideoPlayerState {
 }
 
 /**
- * Skydroid T12 video player — a USB-attached UVC (USB Video Class) camera,
- * rendered into the same [android.view.TextureView] contract as the ExoPlayer
- * path above so it can drop into the same overlay/PiP/tracking chrome.
+ * Skydroid T12 video player. The T12 does **not** expose a separate USB video
+ * interface (confirmed against hardware — see [com.example.kftgcs.videotracking.source.T12SerialVideoSource]'s
+ * class doc for the full investigation): its video is H.264 tunneled over the
+ * same USB-serial link MAVLink telemetry already uses, via a vendor AT-command
+ * protocol. This renders that decoded feed into a plain [android.view.SurfaceView]
+ * — [android.media.MediaCodec] writes to its [android.view.Surface] directly,
+ * so there is no [android.view.TextureView]/SurfaceTexture step as with the
+ * ExoPlayer/RTSP path above.
  *
  * Unlike RTSP, there is no reconnect-by-URI here: losing the USB device means
- * losing the [android.hardware.usb.UsbDevice] handle too, so retry means asking
- * [com.example.kftgcs.videotracking.source.UsbUvcDeviceManager] to re-enumerate,
- * which is surfaced to the caller via [onError] rather than an internal retry
- * loop.
+ * losing the [android.hardware.usb.UsbDevice] handle too, so retry means
+ * re-selecting the device from Video Stream Settings, which is surfaced to the
+ * caller via [onError] rather than an internal retry loop.
  */
 @Composable
-private fun UsbUvcStreamPlayer(
+private fun T12SerialStreamPlayer(
     device: android.hardware.usb.UsbDevice,
     modifier: Modifier = Modifier,
     isConnected: Boolean = false,
@@ -603,21 +608,19 @@ private fun UsbUvcStreamPlayer(
         context.getSystemService(Context.USB_SERVICE) as android.hardware.usb.UsbManager
     }
     val source = remember(device) {
-        com.example.kftgcs.videotracking.source.UsbUvcVideoSource(context, usbManager, device)
+        com.example.kftgcs.videotracking.source.T12SerialVideoSource(usbManager, device)
     }
-    var pendingSurface by remember(device) {
-        mutableStateOf<android.graphics.SurfaceTexture?>(null)
-    }
+    var pendingSurface by remember(device) { mutableStateOf<Surface?>(null) }
     var permissionGranted by remember(device) { mutableStateOf(false) }
 
     // USB permission is asked for once per device attach, independent of the
-    // TextureView's own lifecycle (which can recreate its surface on layout
+    // SurfaceView's own lifecycle (which can recreate its surface on layout
     // changes without the device actually being re-plugged).
     LaunchedEffect(device) {
         playerState = VideoPlayerState.LOADING
         errorMessage = null
-        com.example.kftgcs.videotracking.source.UsbUvcDeviceManager
-            .requestPermission(context, usbManager, device)
+        com.example.kftgcs.videotracking.source.UsbSerialPermission
+            .request(context, usbManager, device)
             .collect { granted ->
                 if (granted) {
                     permissionGranted = true
@@ -632,17 +635,17 @@ private fun UsbUvcStreamPlayer(
     // Connect only once both the permission and the rendering surface are ready
     // — whichever arrives second triggers it.
     LaunchedEffect(permissionGranted, pendingSurface) {
-        val surfaceTexture = pendingSurface ?: return@LaunchedEffect
+        val surface = pendingSurface ?: return@LaunchedEffect
         if (!permissionGranted) return@LaunchedEffect
         source.connect(
-            surface = android.view.Surface(surfaceTexture),
+            surface = surface,
             onReady = {
                 playerState = VideoPlayerState.PLAYING
                 errorMessage = null
                 onPlayerReady?.invoke()
             },
             onError = { message ->
-                Timber.e("UsbUvcStreamPlayer: %s", message)
+                Timber.e("T12SerialStreamPlayer: %s", message)
                 errorMessage = message
                 playerState = VideoPlayerState.ERROR
                 onError?.invoke(message)
@@ -656,38 +659,26 @@ private fun UsbUvcStreamPlayer(
     ) {
         AndroidView(
             factory = { ctx ->
-                android.view.TextureView(ctx).apply {
+                android.view.SurfaceView(ctx).apply {
                     layoutParams = android.view.ViewGroup.LayoutParams(
                         android.view.ViewGroup.LayoutParams.MATCH_PARENT,
                         android.view.ViewGroup.LayoutParams.MATCH_PARENT
                     )
-                }
-            },
-            update = { view ->
-                view.surfaceTextureListener =
-                    object : android.view.TextureView.SurfaceTextureListener {
-                        override fun onSurfaceTextureAvailable(
-                            surfaceTexture: android.graphics.SurfaceTexture, width: Int, height: Int
-                        ) {
-                            pendingSurface = surfaceTexture
+                    holder.addCallback(object : android.view.SurfaceHolder.Callback {
+                        override fun surfaceCreated(holder: android.view.SurfaceHolder) {
+                            pendingSurface = holder.surface
                         }
 
-                        override fun onSurfaceTextureSizeChanged(
-                            surface: android.graphics.SurfaceTexture, width: Int, height: Int
+                        override fun surfaceChanged(
+                            holder: android.view.SurfaceHolder, format: Int, width: Int, height: Int
                         ) = Unit
 
-                        override fun onSurfaceTextureDestroyed(
-                            surface: android.graphics.SurfaceTexture
-                        ): Boolean {
+                        override fun surfaceDestroyed(holder: android.view.SurfaceHolder) {
                             pendingSurface = null
                             source.release()
-                            return true
                         }
-
-                        override fun onSurfaceTextureUpdated(
-                            surface: android.graphics.SurfaceTexture
-                        ) = Unit
-                    }
+                    })
+                }
             },
             modifier = Modifier.fillMaxSize()
         )

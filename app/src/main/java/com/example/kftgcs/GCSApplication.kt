@@ -11,6 +11,7 @@ import com.example.kftgcs.logging.CrashLogger
 import com.example.kftgcs.security.SecurePinManager
 import com.example.kftgcs.sync.SyncWorker
 import com.example.kftgcs.telemetry.WebSocketManager
+import com.example.kftgcs.telemetry.connections.WifiMulticast
 import com.google.android.gms.maps.MapsInitializer
 import timber.log.Timber
 import java.util.concurrent.TimeUnit
@@ -82,6 +83,9 @@ class GCSApplication : Application() {
 
         // Initialize offline queue support in WebSocketManager
         WebSocketManager.initWithContext(this)
+
+        // Hold the Wi-Fi multicast lock, or Android drops broadcast telemetry (see WifiMulticast).
+        WifiMulticast.acquire(this)
 
         // Schedule periodic background sync as a safety net.
         // Runs every 15 min when CONNECTED; ExistingPeriodicWorkPolicy.KEEP

@@ -516,6 +516,23 @@ fun UdpConnectionContent(viewModel: SharedViewModel, isConnecting: Boolean = fal
         }
     }
 
+    // The opposite case: a SIYI MK15 never transmits until the GCS has talked to it, so listen-only
+    // can never work there. Its datalink is on 192.168.144.12:19856 both ways, which is exactly what
+    // SIYI's manual has you enter in QGroundControl. A button because those numbers are not
+    // guessable and typing three fields by hand is where this goes wrong.
+    Spacer(modifier = Modifier.height(4.dp))
+    TextButton(
+        onClick = {
+            viewModel.onUdpLocalPortChange(MK15_PORT)
+            viewModel.onUdpRemoteHostChange(MK15_HOST)
+            viewModel.onUdpRemotePortChange(MK15_PORT)
+            scanSummary = null
+        },
+        modifier = Modifier.fillMaxWidth()
+    ) {
+        Text("Set up for SIYI MK15 ($MK15_HOST:$MK15_PORT)", color = Color(0xFF4FC3F7))
+    }
+
     if (scanning || scanSummary != null) {
         Spacer(modifier = Modifier.height(8.dp))
         Text(
@@ -575,6 +592,10 @@ fun UdpConnectionContent(viewModel: SharedViewModel, isConnecting: Boolean = fal
         textStyle = LocalTextStyle.current.copy(color = Color.White)
     )
 }
+
+/** SIYI MK15 datalink endpoint, from SIYI's own QGroundControl setup instructions. */
+private const val MK15_HOST = "192.168.144.12"
+private const val MK15_PORT = "19856"
 
 /**
  * True when the remote endpoint points back at our own listen socket (loopback on the same port).

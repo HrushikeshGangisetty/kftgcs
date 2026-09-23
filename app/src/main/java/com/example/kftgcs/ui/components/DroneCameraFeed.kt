@@ -80,7 +80,7 @@ fun DroneCameraFeedOverlay(
     var showStreamSettings by remember { mutableStateOf(false) }
     var showGimbalControls by remember { mutableStateOf(false) }
     var activeStreamUrl by remember { mutableStateOf(videoStreamUrl) }
-    // Skydroid T12 (USB UVC) source, when the user has picked one in stream
+    // Skydroid T12 (USB-serial video) source, when the user has picked one in stream
     // settings. Takes priority over any network URL once selected — picking a
     // USB device is an explicit action, unlike the MAVLink auto-detected stream.
     var activeUsbDevice by remember { mutableStateOf<android.hardware.usb.UsbDevice?>(null) }

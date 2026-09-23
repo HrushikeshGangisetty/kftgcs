@@ -38,6 +38,9 @@ class UsbSerialMavConnection(
         // indefinitely on a blocking bulk transfer. A 0-byte return just means "retry".
         private const val READ_TIMEOUT_MS = 200
         private const val WRITE_TIMEOUT_MS = 2000
+
+        /** Name registered in [UsbPortOwnership] while this connection holds the port. */
+        const val OWNER = "MAVLink telemetry (USB)"
     }
 
     private var port: UsbSerialPort? = null
@@ -47,6 +50,14 @@ class UsbSerialMavConnection(
     override fun connect() {
         // Ensure any previous connection is closed
         close()
+
+        // Refuse rather than force-claim a port something else in the app already has open (e.g.
+        // T12 video) — stealing the interface kills the other link and usually this one too.
+        UsbPortOwnership.claim(device, OWNER)?.let { holder ->
+            if (holder != OWNER) {
+                throw IOException("USB device ${device.deviceName} is already in use by $holder. Stop it first.")
+            }
+        }
 
         try {
             val driver = UsbSerialProber.getDefaultProber().probeDevice(device)
@@ -101,6 +112,7 @@ class UsbSerialMavConnection(
         }
         bufferedConnection = null
         port = null
+        UsbPortOwnership.release(device, OWNER)
     }
 
     @Throws(IOException::class)

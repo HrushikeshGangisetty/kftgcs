@@ -23,7 +23,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.kftgcs.videotracking.VideoStreamInfo
 import com.example.kftgcs.videotracking.VideoStreamType
-import com.example.kftgcs.videotracking.source.UsbUvcDeviceManager
+import com.hoho.android.usbserial.driver.UsbSerialProber
 
 /**
  * Video stream settings panel — allows the user to configure
@@ -45,13 +45,20 @@ fun VideoStreamSettings(
     var customUrl by remember { mutableStateOf(prefs.getString("custom_stream_url", "") ?: "") }
     var selectedTab by remember { mutableStateOf(if (detectedStreams.isNotEmpty()) 0 else 1) }
 
-    // Skydroid T12 (USB UVC) devices currently plugged in. Re-scanned each time
-    // the settings sheet opens rather than kept live — USB attach/detach while
-    // this sheet is open is rare enough not to warrant a BroadcastReceiver here.
+    // Skydroid T12 devices currently plugged in. The T12 does NOT expose a
+    // separate USB video interface — video is tunneled over the same
+    // USB-serial port MAVLink uses (see T12SerialVideoSource's class doc for
+    // how this was confirmed) — so it is found the same way MAVLink's own USB
+    // device list is: by USB-serial driver, not USB video class.
+    // Re-scanned each time the settings sheet opens rather than kept live — USB
+    // attach/detach while this sheet is open is rare enough not to warrant a
+    // BroadcastReceiver here.
     val usbManager = remember {
         context.getSystemService(Context.USB_SERVICE) as UsbManager
     }
-    val usbDevices = remember { UsbUvcDeviceManager.findAttachedUvcDevices(usbManager) }
+    val usbDevices = remember {
+        UsbSerialProber.getDefaultProber().findAllDrivers(usbManager).map { it.device }
+    }
 
     // On a phone in landscape (the usual GCS orientation) the screen is only
     // ~360dp tall, so the card must be capped and its body scrollable — otherwise
@@ -220,7 +227,9 @@ fun VideoStreamSettings(
                     }
 
                     2 -> {
-                        // Skydroid T12 — USB UVC device picker
+                        // Skydroid T12 — USB-serial device picker. Video is
+                        // tunneled over the same serial port as MAVLink, not a
+                        // separate USB video interface.
                         if (usbDevices.isEmpty()) {
                             Text(
                                 text = "No T12 detected on USB.\nPlug in the T12 via USB-OTG and " +
@@ -239,8 +248,9 @@ fun VideoStreamSettings(
                         }
                         Spacer(modifier = Modifier.height(6.dp))
                         Text(
-                            text = "T12 video is read directly from the USB port as a UVC " +
-                                "camera — the Skydroid FPV app does not need to be running.",
+                            text = "The T12 has a single USB-serial port. Video will not start " +
+                                "while telemetry is connected over that same USB device — use " +
+                                "UDP or Bluetooth for telemetry to run both.",
                             color = Color.Gray.copy(alpha = 0.7f),
                             fontSize = 9.sp
                         )

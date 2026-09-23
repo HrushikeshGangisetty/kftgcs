@@ -2,12 +2,11 @@ package com.example.kftgcs.telemetry.connections
 
 import java.net.DatagramPacket
 import java.net.DatagramSocket
+import java.net.Inet4Address
 import java.net.InetAddress
 import java.net.InetSocketAddress
+import java.net.NetworkInterface
 import java.net.SocketTimeoutException
-import java.util.concurrent.atomic.AtomicInteger
-import java.util.concurrent.atomic.AtomicLong
-import java.util.concurrent.atomic.AtomicReference
 
 /**
  * Process-wide record of what the last UDP connection attempt actually did.
@@ -15,25 +14,24 @@ import java.util.concurrent.atomic.AtomicReference
  * This exists because the failure the customer sees ("Connection timed out") carries no
  * information, and the app is installed directly on the RC where no logcat is available.
  * [LogUtils][com.example.kftgcs.utils.LogUtils] is gated on `BuildConfig.DEBUG`, so in a release
- * build the transport currently reports *nothing* to anyone.
+ * build the transport reports *nothing* to anyone.
  *
- * It deliberately lives outside [UdpMavConnection]: the UI tears the connection down
- * (`SharedViewModel.cancelConnection()` closes the socket and nulls `repo`) *before* it renders the
- * failure dialog, so any state held on the connection object would already be gone by the time we
- * want to show it.
+ * It deliberately lives outside the connection: the UI tears the connection down
+ * (`SharedViewModel.cancelConnection()`) *before* it renders the failure dialog, so any state held
+ * on the connection object would already be gone by the time we want to show it.
  *
- * The stages below are distinct on purpose — they separate the three failures that all look
- * identical today:
- *  1. **Bind failed** — the port could not be opened at all.
- *  2. **Bound, zero packets** — nothing is sending to this port (wrong port, or another app on the
- *     RC already owns it; note SO_REUSEADDR means our bind *succeeds* while datagrams go elsewhere).
- *  3. **Packets arriving, no MAVLink** — bytes are flowing but nothing parsed into a heartbeat,
- *     which is what `connected` actually waits for (see TelemetryRepository: `connected` flips on
- *     FCU heartbeat, not on StreamState.Active).
+ * The connection itself is mavlink-kotlin's `connection-udp`, which exposes no per-packet hooks, so
+ * what is recorded here is only what we can know from the outside: what was configured, whether the
+ * configured remote is even reachable from this device, whether the multicast lock is held, and
+ * whether any MAVLink frame ever parsed. That is enough to separate the failures that used to look
+ * identical:
+ *  1. **Remote not on any local subnet** — nothing sent there can arrive (measured on a SIYI MK15).
+ *  2. **Nothing arrived** — wrong port, or nothing is sending to it.
+ *  3. **Frames arrived, no FCU heartbeat** — the link is up but the autopilot is not answering.
  */
 object UdpDiagnostics {
 
-    /** Set when a bind is attempted, so we can tell "never tried" from "tried and failed". */
+    /** Set when a connection is attempted, so we can tell "never tried" from "tried and failed". */
     @Volatile
     var attempted: Boolean = false
         private set
@@ -47,22 +45,21 @@ object UdpDiagnostics {
         private set
 
     @Volatile
-    var bindError: String? = null
-        private set
-
-    @Volatile
     var bound: Boolean = false
         private set
 
-    private val packetsReceived = AtomicInteger(0)
-    private val bytesReceived = AtomicLong(0)
-    private val packetsSent = AtomicInteger(0)
-    private val sendErrors = AtomicInteger(0)
-    private val firstPeer = AtomicReference<String?>(null)
-    private val lastPeer = AtomicReference<String?>(null)
-
+    /** "held", or why the Wi-Fi multicast lock could not be taken (broadcast telemetry is lost). */
     @Volatile
-    var lastSendError: String? = null
+    var multicastLock: String = "-"
+
+    /** Null when listening only; else whether the pinned remote is on a subnet this device is on. */
+    @Volatile
+    var remoteOnLocalSubnet: Boolean? = null
+        private set
+
+    /** This device's own IPv4 addresses, e.g. "wlan0 10.141.214.23/24". */
+    @Volatile
+    var localAddresses: String = "-"
         private set
 
     /** Set by the repository once a MAVLink frame actually parses. */
@@ -73,15 +70,9 @@ object UdpDiagnostics {
         attempted = true
         this.localPort = localPort
         configuredRemote = remote
-        bindError = null
         bound = false
-        packetsReceived.set(0)
-        bytesReceived.set(0)
-        packetsSent.set(0)
-        sendErrors.set(0)
-        firstPeer.set(null)
-        lastPeer.set(null)
-        lastSendError = null
+        remoteOnLocalSubnet = null
+        localAddresses = "-"
         mavlinkFrameSeen = false
     }
 
@@ -89,26 +80,40 @@ object UdpDiagnostics {
         bound = true
     }
 
-    fun onBindFailed(message: String?) {
-        bound = false
-        bindError = message ?: "unknown"
+    /**
+     * Records whether [remote] shares a subnet with any interface on this device.
+     *
+     * Measured on a SIYI MK15 handheld: its documented datalink address 192.168.144.12 exists only
+     * on the ground unit's Ethernet/USB port, so from an app on the RC's own Android there is no
+     * route to it. Sending still "succeeds" (the kernel hands the datagram to the default route),
+     * so without this check the only symptom is a silent 10-second timeout.
+     */
+    fun onRemoteResolved(remote: InetAddress) {
+        val locals = mutableListOf<String>()
+        var sameSubnet = false
+        try {
+            for (nif in NetworkInterface.getNetworkInterfaces()) {
+                if (!nif.isUp || nif.isLoopback) continue
+                for (ia in nif.interfaceAddresses) {
+                    val addr = ia.address as? Inet4Address ?: continue
+                    locals += "${nif.name} ${addr.hostAddress}/${ia.networkPrefixLength}"
+                    if (remote is Inet4Address && sameSubnet(addr, remote, ia.networkPrefixLength.toInt())) {
+                        sameSubnet = true
+                    }
+                }
+            }
+        } catch (e: Exception) {
+            // Best effort — this is diagnostics, never a reason to fail a connection.
+        }
+        localAddresses = locals.joinToString(", ").ifEmpty { "-" }
+        remoteOnLocalSubnet = sameSubnet
     }
 
-    fun onPacket(from: InetAddress, port: Int, length: Int) {
-        packetsReceived.incrementAndGet()
-        bytesReceived.addAndGet(length.toLong())
-        val label = "${from.hostAddress}:$port"
-        firstPeer.compareAndSet(null, label)
-        lastPeer.set(label)
-    }
-
-    fun onSent() {
-        packetsSent.incrementAndGet()
-    }
-
-    fun onSendError(message: String?) {
-        sendErrors.incrementAndGet()
-        lastSendError = message
+    private fun sameSubnet(a: Inet4Address, b: Inet4Address, prefixLen: Int): Boolean {
+        if (prefixLen !in 1..32) return false
+        fun toInt(x: Inet4Address) = x.address.fold(0) { acc, byte -> (acc shl 8) or (byte.toInt() and 0xFF) }
+        val mask = (-1 shl (32 - prefixLen))
+        return (toInt(a) and mask) == (toInt(b) and mask)
     }
 
     /**
@@ -117,20 +122,22 @@ object UdpDiagnostics {
      */
     fun verdict(): String = when {
         !attempted -> "No UDP connection was attempted."
-        bindError != null ->
-            "Could not open local port $localPort ($bindError). Another app on this device is " +
-                "probably already using it — close the other ground station and try again."
-        packetsReceived.get() == 0 && configuredRemote != null ->
-            "Local port $localPort opened, but no data arrived in 10 seconds. Try clearing the " +
-                "Remote Host field so the app just listens — that is how QGroundControl and " +
-                "Mission Planner connect, and what the controller expects."
-        packetsReceived.get() == 0 ->
-            "Local port $localPort opened, but no data arrived in 10 seconds. Either nothing is " +
-                "sending telemetry to this port, or another app on this device is already holding " +
-                "it. Close any other ground station app, or use Scan to find the right port."
+        remoteOnLocalSubnet == false ->
+            "$configuredRemote is not on any network this device is connected to " +
+                "($localAddresses), so nothing sent there can arrive. On a SIYI MK15 the " +
+                "192.168.144.x datalink exists only on the ground unit's Ethernet/USB port — an " +
+                "app running on the controller itself cannot reach it. Use the controller's " +
+                "Bluetooth or USB datalink mode instead, or run this app on a device plugged into " +
+                "that Ethernet port."
+        configuredRemote != null ->
+            "Nothing came back from $configuredRemote in 10 seconds. Check that address and port " +
+                "against the controller's manual (SIYI MK15: 192.168.144.12:19856). If the " +
+                "controller sends telemetry unprompted (most RC routers do), clear the Remote Host " +
+                "field and just listen."
         !mavlinkFrameSeen ->
-            "Data is arriving on port $localPort from ${lastPeer.get()}, but none of it is valid " +
-                "MAVLink. The port is probably carrying a different protocol (e.g. video)."
+            "Local port $localPort opened, but no telemetry arrived in 10 seconds. Either nothing " +
+                "is sending to this port, or another app on this device is already holding it. " +
+                "Close any other ground station app, or use Scan to find the right port."
         else ->
             "MAVLink frames were received, but no flight-controller heartbeat. The link is up but " +
                 "the autopilot is not responding."
@@ -145,15 +152,17 @@ object UdpDiagnostics {
      */
     fun details(): String = buildString {
         appendLine("UDP diagnostics")
-        appendLine("MODE       : ${if (configuredRemote == null) "LISTEN-ONLY" else "SEEDED -> $configuredRemote"}")
+        appendLine("MODE       : ${if (configuredRemote == null) "LISTEN-ONLY" else "TARGET -> $configuredRemote"}")
         appendLine("local port : $localPort")
         appendLine("remote     : ${configuredRemote ?: "(listen only)"}")
-        appendLine("bound      : ${if (bound) "yes" else "NO — ${bindError ?: "not attempted"}"}")
-        appendLine("packets in : ${packetsReceived.get()} (${bytesReceived.get()} bytes)")
-        appendLine("first peer : ${firstPeer.get() ?: "-"}")
-        appendLine("last peer  : ${lastPeer.get() ?: "-"}")
-        appendLine("packets out: ${packetsSent.get()}")
-        appendLine("send errors: ${sendErrors.get()}${lastSendError?.let { " ($it)" } ?: ""}")
+        appendLine("opened     : ${if (bound) "yes" else "no"}")
+        appendLine("mcast lock : $multicastLock")
+        appendLine("local addrs: $localAddresses")
+        appendLine("remote rout: " + when (remoteOnLocalSubnet) {
+            null -> "n/a (listen only)"
+            true -> "on a local subnet"
+            false -> "NOT on any local subnet - unreachable from here"
+        })
         append("mavlink    : ${if (mavlinkFrameSeen) "parsed OK" else "none parsed"}")
     }
 
@@ -180,7 +189,7 @@ data class UdpScanResult(
 object UdpPortScanner {
 
     /** Ports worth trying: ArduPilot/QGC defaults plus the common router split-port pairs. */
-    val CANDIDATE_PORTS = listOf(14550, 14551, 14552, 14553, 14555, 5760, 5762)
+    val CANDIDATE_PORTS = listOf(14550, 14551, 14552, 14553, 14555, 19856, 5760, 5762)
 
     /**
      * Binds each candidate for [perPortMillis] and reports what arrived. Ports that cannot be bound

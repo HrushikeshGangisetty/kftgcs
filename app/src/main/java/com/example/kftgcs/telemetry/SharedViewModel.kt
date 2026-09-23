@@ -3946,8 +3946,7 @@ class SharedViewModel : ViewModel() {
                             UdpConnectionProvider(
                                 localPortInt,
                                 host,
-                                hostPort,
-                                GCSApplication.getInstance()?.applicationContext
+                                hostPort
                             )
                         } else {
                             LogUtils.e("SharedVM", "Invalid UDP local port.")

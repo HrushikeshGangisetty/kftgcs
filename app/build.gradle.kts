@@ -162,6 +162,9 @@ dependencies {
     // TCP connection client
     implementation("com.divpundir.mavlink:connection-tcp:1.2.8")
 
+    // UDP connection (server = bind and wait, like Mission Planner / QGroundControl)
+    implementation("com.divpundir.mavlink:connection-udp:1.2.8")
+
 
     // Coroutines adapter (recommended for Android)
     implementation("com.divpundir.mavlink:adapter-coroutines:1.2.8")
@@ -220,9 +223,8 @@ dependencies {
     implementation(libs.androidx.media3.exoplayer.rtsp)
     implementation(libs.androidx.media3.ui)
 
-    // UVC (USB Video Class) capture — Skydroid T12 controller video feed over USB OTG.
-    // The T12's Skydroid FPV app only exposes its video as a floating overlay window
-    // (no SDK/intent/shared-Surface API), so KFT talks to the USB video endpoint
-    // directly as a standard UVC webcam rather than depending on that app.
-    implementation(libs.uvccamera)
+    // Skydroid T12 video: no separate dependency needed. Confirmed (2026-09-22)
+    // that the T12 does not expose USB Video Class — its video is decoded via
+    // Android's built-in MediaCodec after being demuxed from the existing
+    // usb-serial-for-android link (see T12SerialVideoSource.kt).
 }

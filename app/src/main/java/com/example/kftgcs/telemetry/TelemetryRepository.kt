@@ -1169,7 +1169,12 @@ class MavlinkTelemetryRepository(
         val scope = AppScope
 
         suspend fun reconnect(scope: kotlinx.coroutines.CoroutineScope) {
-            while (scope.isActive) {
+            // Stop on an intentional disconnect. These coroutines live in AppScope and outlive the
+            // repository, so a loop that keeps retrying would hold the transport open after the user
+            // cancelled. With the UDP server connection that matters: it binds the local port on
+            // every attempt, so an abandoned loop keeps the port and the next connection attempt
+            // fails with "Address already in use".
+            while (scope.isActive && !intentionalDisconnect) {
                 try {
                     if (connection.tryConnect(scope)) {
                         return // Exit on successful connection
