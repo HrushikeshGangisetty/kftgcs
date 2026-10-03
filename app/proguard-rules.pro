@@ -86,7 +86,6 @@
 # reflection in MissionTemplateTypeConverters.
 # ============================================
 -keep class com.divpundir.mavlink.** { *; }
--keep class io.dronefleet.mavlink.** { *; }
 
 # MAVLink connection transports (TCP/UDP/Bluetooth/USB). These are instantiated
 # only through the MavConnectionProvider interface, and BufferedMavConnection is

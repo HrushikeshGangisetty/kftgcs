@@ -77,6 +77,9 @@ fun PreflightFailsafeDialog(
                 // not set FENCE_ACTION or FENCE_MARGIN.
                 SummaryRow("Fence Action", summary.fenceAction)
                 SummaryRow("Max Range", summary.fenceRadius)
+                SummaryRow("GCS Range Action At", summary.rangeActionDistance)
+                SummaryRow("Max Altitude", summary.maxAltitude)
+                SummaryRow("Onboard Fence", summary.onboardFence)
                 SummaryRow("Fence Margin", summary.fenceMargin)
             }
         },

@@ -136,6 +136,8 @@ class UnifiedFlightTracker(
         val msg = notification.message.lowercase()
         val eventType = when {
             msg.contains("tank empty") -> EventType.TANK_EMPTY
+            msg.contains("motor high current") -> EventType.MOTOR_HIGH_CURRENT
+            msg.contains("motor high temp") -> EventType.MOTOR_HIGH_TEMP
             msg.contains("voltage") || msg.contains("battery") -> EventType.LOW_VOLTAGE
             else -> EventType.NOTIFICATION
         }

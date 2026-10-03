@@ -25,6 +25,7 @@ import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Person
 import androidx.compose.material.icons.filled.Analytics
 import androidx.compose.material.icons.filled.Radar
+import androidx.compose.material.icons.filled.Bolt
 import androidx.compose.material3.IconButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
@@ -162,6 +163,10 @@ fun SettingsScreen(
                 // Sensor Settings (proximity-radar thresholds)
                 add(SettingsEntry(Icons.Filled.Radar, "Sensor Settings") {
                     navController.navigate("sensor_settings")
+                })
+
+                add(SettingsEntry(Icons.Filled.Bolt, "Motor Health") {
+                    navController.navigate("motor_health")
                 })
 
                 // Analyze Log — visible only on an active USB connection

@@ -14,6 +14,8 @@ object UserSettingsManager {
     private const val KEY_RADAR_CAUTION_M = "radar_caution_m"
     private const val KEY_RADAR_CRITICAL_M = "radar_critical_m"
     private const val KEY_RADAR_THRESHOLDS_OVERRIDDEN = "radar_thresholds_overridden"
+    private const val KEY_MOTOR_HIGH_CURRENT_A = "motor_high_current_a"
+    private const val KEY_MOTOR_HIGH_TEMP_C = "motor_high_temp_c"
 
     // Defaults
     val DEFAULT_TEXT_COLOR = Color.White
@@ -88,6 +90,22 @@ object UserSettingsManager {
     /** Clear the override so the next vehicle connection re-seeds the thresholds. */
     fun clearRadarThresholdsOverride(context: Context) {
         prefs(context).edit().putBoolean(KEY_RADAR_THRESHOLDS_OVERRIDDEN, false).apply()
+    }
+
+    // ── Motor High Current (per-ESC current alert, amps; 0 = off) ─────────────
+    fun loadMotorHighCurrentLimitA(context: Context): Float =
+        prefs(context).getFloat(KEY_MOTOR_HIGH_CURRENT_A, 0f)
+
+    fun saveMotorHighCurrentLimitA(context: Context, amps: Float) {
+        prefs(context).edit().putFloat(KEY_MOTOR_HIGH_CURRENT_A, amps).apply()
+    }
+
+    // ── Motor High Temperature (per-ESC temperature alert, °C; 0 = off) ───────
+    fun loadMotorHighTempLimitC(context: Context): Float =
+        prefs(context).getFloat(KEY_MOTOR_HIGH_TEMP_C, 0f)
+
+    fun saveMotorHighTempLimitC(context: Context, celsius: Float) {
+        prefs(context).edit().putFloat(KEY_MOTOR_HIGH_TEMP_C, celsius).apply()
     }
 }
 

@@ -41,3 +41,6 @@ out/
 BACKEND_DB_AIVEN.py
 BACKEND_SETTINGS_AIVEN.py
 MIGRATION_AWS_TO_AIVEN.md
+
+# graphify dated snapshots (regenerated; keep only the latest output)
+graphify-out/20*/

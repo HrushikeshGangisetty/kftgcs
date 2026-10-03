@@ -12,9 +12,9 @@
     "semantic_hash": ""
   },
   "app/build.gradle.kts": {
-    "mtime": 1790147472.697335,
-    "seen": 1790148829.003122,
-    "ast_hash": "fab8d1365f38ead126bd54aa0ae72a88",
+    "mtime": 1790659873.4389827,
+    "seen": 1790841995.7126756,
+    "ast_hash": "9f773197825a93764136a5977e020b71",
     "semantic_hash": ""
   },
   "app/src/androidTest/java/com/example/kftgcs/ExampleInstrumentedTest.kt": {
@@ -234,10 +234,10 @@
     "semantic_hash": "6f181b5232296b19101884077a37fc80"
   },
   "app/src/main/java/com/example/kftgcs/database/tlog/EventEntity.kt": {
-    "mtime": 1781107117.4756389,
-    "seen": 1789573354.355936,
-    "ast_hash": "c4cbb693554a8426005fe47f6f61844f",
-    "semantic_hash": "c4cbb693554a8426005fe47f6f61844f"
+    "mtime": 1790841918.5211792,
+    "seen": 1790841995.7126756,
+    "ast_hash": "36f5383563e5070e572460e7a072ec12",
+    "semantic_hash": ""
   },
   "app/src/main/java/com/example/kftgcs/database/tlog/FlightDao.kt": {
     "mtime": 1773753795.6689415,
@@ -317,12 +317,6 @@
     "ast_hash": "7d32421b6e7e3b4f4b0e85dbb455b7a4",
     "semantic_hash": "7d32421b6e7e3b4f4b0e85dbb455b7a4"
   },
-  "app/src/main/java/com/example/kftgcs/integration/ObstacleDetectionIntegration.kt": {
-    "mtime": 1773753795.6847277,
-    "seen": 1789573354.355936,
-    "ast_hash": "625254e7689949021a27f689a0c56f67",
-    "semantic_hash": "625254e7689949021a27f689a0c56f67"
-  },
   "app/src/main/java/com/example/kftgcs/integration/TlogIntegration.kt": {
     "mtime": 1773753795.6847277,
     "seen": 1789573354.355936,
@@ -389,12 +383,6 @@
     "ast_hash": "b8e15eab6938b2f5c5b953d88e4e0421",
     "semantic_hash": "b8e15eab6938b2f5c5b953d88e4e0421"
   },
-  "app/src/main/java/com/example/kftgcs/manager/CalibrationCommands.kt": {
-    "mtime": 1773753795.6847277,
-    "seen": 1789573354.355936,
-    "ast_hash": "3c375fa6b4723e58719036fc3dc24c07",
-    "semantic_hash": "3c375fa6b4723e58719036fc3dc24c07"
-  },
   "app/src/main/java/com/example/kftgcs/manager/FlightManager.kt": {
     "mtime": 1782919692.0061195,
     "seen": 1789573354.355936,
@@ -402,16 +390,16 @@
     "semantic_hash": "7f8be0c1cdc96bcf3f36dd19aae7d7f0"
   },
   "app/src/main/java/com/example/kftgcs/manager/UnifiedFlightTracker.kt": {
-    "mtime": 1784872383.794196,
-    "seen": 1789573354.355936,
-    "ast_hash": "7550cc1132a373d32cc42687432e7e6b",
-    "semantic_hash": "7550cc1132a373d32cc42687432e7e6b"
+    "mtime": 1790841920.378188,
+    "seen": 1790841995.7196665,
+    "ast_hash": "6ba6d31646259c3a1b753bdfb48aac83",
+    "semantic_hash": ""
   },
   "app/src/main/java/com/example/kftgcs/navigation/AppNavGraph.kt": {
-    "mtime": 1785341983.5224044,
-    "seen": 1789573354.355936,
-    "ast_hash": "3c6690c87ab7512c88ac1378554144ea",
-    "semantic_hash": "3c6690c87ab7512c88ac1378554144ea"
+    "mtime": 1790319623.909908,
+    "seen": 1790319627.48622,
+    "ast_hash": "3d27e8cfeae3391494002916f80b82ef",
+    "semantic_hash": ""
   },
   "app/src/main/java/com/example/kftgcs/obstacle/MissionStateRepository.kt": {
     "mtime": 1773753795.6847277,
@@ -436,12 +424,6 @@
     "seen": 1789573354.355936,
     "ast_hash": "d8417164143a497ec99ae08794befbe0",
     "semantic_hash": "d8417164143a497ec99ae08794befbe0"
-  },
-  "app/src/main/java/com/example/kftgcs/obstacle/ObstacleDetectorImpl.kt": {
-    "mtime": 1773753795.6847277,
-    "seen": 1789573354.355936,
-    "ast_hash": "ef3144834e5e7c2dbde81ac3222a4ca4",
-    "semantic_hash": "ef3144834e5e7c2dbde81ac3222a4ca4"
   },
   "app/src/main/java/com/example/kftgcs/obstacle/ObstacleSensorManager.kt": {
     "mtime": 1773753795.6847277,
@@ -474,16 +456,16 @@
     "semantic_hash": "02f16d1d3c15e18c583d4ccff4dc9391"
   },
   "app/src/main/java/com/example/kftgcs/parammanagement/BatteryMonitorScreen.kt": {
-    "mtime": 1777451059.8619761,
-    "seen": 1789573354.355936,
-    "ast_hash": "cf5fdc160c653bba375ffa80559f3dec",
-    "semantic_hash": "cf5fdc160c653bba375ffa80559f3dec"
+    "mtime": 1790587471.3162584,
+    "seen": 1790587482.3929377,
+    "ast_hash": "cd5b9a4fbb7bfc578033f0da991991de",
+    "semantic_hash": ""
   },
   "app/src/main/java/com/example/kftgcs/parammanagement/BatteryMonitorViewModel.kt": {
-    "mtime": 1777459552.8460002,
-    "seen": 1789573354.355936,
-    "ast_hash": "e4d3744b738f4c564c469176d04620a5",
-    "semantic_hash": "e4d3744b738f4c564c469176d04620a5"
+    "mtime": 1790587441.4222066,
+    "seen": 1790587482.3929377,
+    "ast_hash": "a2e302ff4fc2a1de3c7d9d7e84a880c2",
+    "semantic_hash": ""
   },
   "app/src/main/java/com/example/kftgcs/parammanagement/BrakingSettingsViewModel.kt": {
     "mtime": 1789789573.1222167,
@@ -648,9 +630,9 @@
     "semantic_hash": "9d13ad15d39311536e30577f3d5e2520"
   },
   "app/src/main/java/com/example/kftgcs/telemetry/Data.kt": {
-    "mtime": 1789884152.9459746,
-    "seen": 1789884454.1125808,
-    "ast_hash": "76c4168a044127094fbe96b61ed6623c",
+    "mtime": 1790587424.4732618,
+    "seen": 1790587482.395373,
+    "ast_hash": "8f4e97ca68a0ad94d7363b7a6bf4a88d",
     "semantic_hash": ""
   },
   "app/src/main/java/com/example/kftgcs/telemetry/DisconnectionRTLHandler.kt": {
@@ -658,12 +640,6 @@
     "seen": 1789573354.355936,
     "ast_hash": "af7f2eecec72dc0c1dde3a9378802676",
     "semantic_hash": "af7f2eecec72dc0c1dde3a9378802676"
-  },
-  "app/src/main/java/com/example/kftgcs/telemetry/DisconnectionRTLMonitor.kt": {
-    "mtime": 1781064158.3551328,
-    "seen": 1789573354.355936,
-    "ast_hash": "570866d4b991b12a5297f01415078921",
-    "semantic_hash": "570866d4b991b12a5297f01415078921"
   },
   "app/src/main/java/com/example/kftgcs/telemetry/MavlinkFtpClient.kt": {
     "mtime": 1782918437.9328475,
@@ -684,9 +660,9 @@
     "semantic_hash": ""
   },
   "app/src/main/java/com/example/kftgcs/telemetry/SharedViewModel.kt": {
-    "mtime": 1790148769.7064962,
-    "seen": 1790148829.0108578,
-    "ast_hash": "1656a46413def0d0fb50195dea94e14e",
+    "mtime": 1790842222.1442127,
+    "seen": 1790842256.317817,
+    "ast_hash": "2664e619a10e19fa11a7d98cde43f688",
     "semantic_hash": ""
   },
   "app/src/main/java/com/example/kftgcs/telemetry/SprayTelemetryUtils.kt": {
@@ -696,9 +672,9 @@
     "semantic_hash": "75b44909c88905dab2737b3532c01a5e"
   },
   "app/src/main/java/com/example/kftgcs/telemetry/TelemetryRepository.kt": {
-    "mtime": 1790147576.9296074,
-    "seen": 1790148829.0108578,
-    "ast_hash": "e6b33cead0332f9aba00de22b335d746",
+    "mtime": 1790841930.9111886,
+    "seen": 1790841995.723081,
+    "ast_hash": "77239e6b02e8bac58d5e6bb3da28905b",
     "semantic_hash": ""
   },
   "app/src/main/java/com/example/kftgcs/telemetry/WebSocketManager.kt": {
@@ -905,24 +881,6 @@
     "ast_hash": "cd768f60f6f1cf16c17ac8d7002c447e",
     "semantic_hash": "cd768f60f6f1cf16c17ac8d7002c447e"
   },
-  "app/src/main/java/com/example/kftgcs/ui/theme/Color.kt": {
-    "mtime": 1773753795.7005465,
-    "seen": 1789573354.355936,
-    "ast_hash": "68ee68fa3cc01d6795fa0f0a1559de36",
-    "semantic_hash": "68ee68fa3cc01d6795fa0f0a1559de36"
-  },
-  "app/src/main/java/com/example/kftgcs/ui/theme/Theme.kt": {
-    "mtime": 1773753795.7005465,
-    "seen": 1789573354.355936,
-    "ast_hash": "8ccb093dc521d98cd90c42a0dadf3ba7",
-    "semantic_hash": "8ccb093dc521d98cd90c42a0dadf3ba7"
-  },
-  "app/src/main/java/com/example/kftgcs/ui/theme/Type.kt": {
-    "mtime": 1773753795.7005465,
-    "seen": 1789573354.355936,
-    "ast_hash": "c1488cfc23a0daf53129492b71ee8806",
-    "semantic_hash": "c1488cfc23a0daf53129492b71ee8806"
-  },
   "app/src/main/java/com/example/kftgcs/uiconnection/ConnectionPage.kt": {
     "mtime": 1790145132.159065,
     "seen": 1790145149.8521316,
@@ -952,12 +910,6 @@
     "seen": 1789573354.355936,
     "ast_hash": "27b87f10d72ef6af025abd58d10edf58",
     "semantic_hash": "27b87f10d72ef6af025abd58d10edf58"
-  },
-  "app/src/main/java/com/example/kftgcs/uimain/DronePose.kt": {
-    "mtime": 1773753795.7005465,
-    "seen": 1789573354.355936,
-    "ast_hash": "e84ddf6c80b52f27cc7cb6c2d08f2267",
-    "semantic_hash": "e84ddf6c80b52f27cc7cb6c2d08f2267"
   },
   "app/src/main/java/com/example/kftgcs/uimain/FlowSensorCalibrationScreen.kt": {
     "mtime": 1773753795.7005465,
@@ -1020,10 +972,10 @@
     "semantic_hash": "717903d192c2494381440be0b80885ad"
   },
   "app/src/main/java/com/example/kftgcs/uimain/SettingsScreen.kt": {
-    "mtime": 1785917826.3912926,
-    "seen": 1789573354.355936,
-    "ast_hash": "11ba5aafb8095cda3ba5f40b6884f30a",
-    "semantic_hash": "11ba5aafb8095cda3ba5f40b6884f30a"
+    "mtime": 1790319635.15484,
+    "seen": 1790587482.40092,
+    "ast_hash": "f045543e2d6d9b72a4e1f8ba38656f98",
+    "semantic_hash": ""
   },
   "app/src/main/java/com/example/kftgcs/uimain/SprayCalibrationScreen.kt": {
     "mtime": 1787979654.1219542,
@@ -1056,10 +1008,10 @@
     "semantic_hash": "33dd33936d3c3d0b693e6c914c6e39e6"
   },
   "app/src/main/java/com/example/kftgcs/usersettings/UserSettingsManager.kt": {
-    "mtime": 1783578058.928082,
-    "seen": 1789573354.355936,
-    "ast_hash": "50b350160f39ef6f407cebaa468df70c",
-    "semantic_hash": "50b350160f39ef6f407cebaa468df70c"
+    "mtime": 1790841917.094191,
+    "seen": 1790841995.7266026,
+    "ast_hash": "94198ca22ec2392946c2ba2706dbc6f8",
+    "semantic_hash": ""
   },
   "app/src/main/java/com/example/kftgcs/usersettings/UserSettingsScreen.kt": {
     "mtime": 1781060304.8365889,
@@ -1072,12 +1024,6 @@
     "seen": 1789573354.355936,
     "ast_hash": "b37f49a028452c3a38dd767e92deb321",
     "semantic_hash": "b37f49a028452c3a38dd767e92deb321"
-  },
-  "app/src/main/java/com/example/kftgcs/util/TimeFormatter.kt": {
-    "mtime": 1773753795.7005465,
-    "seen": 1789573354.355936,
-    "ast_hash": "2e8f50268ea2a353262a67bf3c4f9279",
-    "semantic_hash": "2e8f50268ea2a353262a67bf3c4f9279"
   },
   "app/src/main/java/com/example/kftgcs/utils/GeofenceUtils.kt": {
     "mtime": 1775042418.0760462,
@@ -1114,42 +1060,6 @@
     "seen": 1789573354.355936,
     "ast_hash": "cb102b495083949e89f54a4a38e14c7d",
     "semantic_hash": "cb102b495083949e89f54a4a38e14c7d"
-  },
-  "app/src/main/java/com/example/kftgcs/videorelay/VideoForwarder.kt": {
-    "mtime": 1773753795.7005465,
-    "seen": 1789573354.355936,
-    "ast_hash": "61d9d5beba96fb604d379fef205fe0f6",
-    "semantic_hash": "61d9d5beba96fb604d379fef205fe0f6"
-  },
-  "app/src/main/java/com/example/kftgcs/videorelay/VideoRelayConfig.kt": {
-    "mtime": 1773753795.7005465,
-    "seen": 1789573354.355936,
-    "ast_hash": "a6c5b1195edd6a351c2ef87359f5e72f",
-    "semantic_hash": "a6c5b1195edd6a351c2ef87359f5e72f"
-  },
-  "app/src/main/java/com/example/kftgcs/videorelay/VideoRelayControlPanel.kt": {
-    "mtime": 1773753795.7162116,
-    "seen": 1789573354.355936,
-    "ast_hash": "c9ec388b95a66069c17c3dd5dff4a781",
-    "semantic_hash": "c9ec388b95a66069c17c3dd5dff4a781"
-  },
-  "app/src/main/java/com/example/kftgcs/videorelay/VideoRelayManager.kt": {
-    "mtime": 1773753795.717148,
-    "seen": 1789573354.355936,
-    "ast_hash": "138ba131ceb8ab16c19c4068b4683ca9",
-    "semantic_hash": "138ba131ceb8ab16c19c4068b4683ca9"
-  },
-  "app/src/main/java/com/example/kftgcs/videorelay/VideoRelayNotification.kt": {
-    "mtime": 1773753795.717148,
-    "seen": 1789573354.355936,
-    "ast_hash": "94a5027a80a3b152fc714d6f67ae45fa",
-    "semantic_hash": "94a5027a80a3b152fc714d6f67ae45fa"
-  },
-  "app/src/main/java/com/example/kftgcs/videorelay/VideoRelayService.kt": {
-    "mtime": 1773753795.717148,
-    "seen": 1789573354.355936,
-    "ast_hash": "1c749ae5205758d9ff9ef862a74a15db",
-    "semantic_hash": "1c749ae5205758d9ff9ef862a74a15db"
   },
   "app/src/main/java/com/example/kftgcs/videotracking/CameraProtocolManager.kt": {
     "mtime": 1773753795.718355,
@@ -1259,41 +1169,11 @@
     "ast_hash": "f136d72d5bd7374508f93682d45d8924",
     "semantic_hash": "f136d72d5bd7374508f93682d45d8924"
   },
-  "consumers.py": {
-    "mtime": 1775212422.8620613,
-    "seen": 1789573354.355936,
-    "ast_hash": "aee8d949ef7d95231ae0f9a5591d221c",
-    "semantic_hash": "aee8d949ef7d95231ae0f9a5591d221c"
-  },
   "gradlew": {
     "mtime": 1773753795.781041,
     "seen": 1789573354.355936,
     "ast_hash": "c6ea21dea2d500b277296894708cf792",
     "semantic_hash": "c6ea21dea2d500b277296894708cf792"
-  },
-  "models.py": {
-    "mtime": 1775212408.7788963,
-    "seen": 1789573354.355936,
-    "ast_hash": "a7ef3906bdcad5f5aeaa4ea876ae6814",
-    "semantic_hash": "a7ef3906bdcad5f5aeaa4ea876ae6814"
-  },
-  "pilot_views.py": {
-    "mtime": 1775193819.706705,
-    "seen": 1789573354.355936,
-    "ast_hash": "ab3a6c573bc05c7d27321b559c594978",
-    "semantic_hash": "ab3a6c573bc05c7d27321b559c594978"
-  },
-  "pilot_views_updated.py": {
-    "mtime": 1774955697.200677,
-    "seen": 1789573354.355936,
-    "ast_hash": "b79a423d3665392812e3aed66eb9e40b",
-    "semantic_hash": "b79a423d3665392812e3aed66eb9e40b"
-  },
-  "routing.py": {
-    "mtime": 1775192601.4004097,
-    "seen": 1789573354.355936,
-    "ast_hash": "ea052a5b8a380a965563631dae61e4ef",
-    "semantic_hash": "ea052a5b8a380a965563631dae61e4ef"
   },
   "settings.gradle.kts": {
     "mtime": 1782748940.2659402,
@@ -1307,59 +1187,11 @@
     "ast_hash": "807dd714d1f57f5681be8ecb1d9e5568",
     "semantic_hash": "807dd714d1f57f5681be8ecb1d9e5568"
   },
-  "test_backend.ps1": {
-    "mtime": 1773753795.7831838,
-    "seen": 1789573354.355936,
-    "ast_hash": "81051bcc2cf1bedf378224b0a93e2877",
-    "semantic_hash": "81051bcc2cf1bedf378224b0a93e2877"
-  },
-  "test_websocket_connection.py": {
-    "mtime": 1775195730.9177363,
-    "seen": 1789573354.355936,
-    "ast_hash": "67ddabc7b6237bdcd9c93b736daecdae",
-    "semantic_hash": "67ddabc7b6237bdcd9c93b736daecdae"
-  },
-  "test_websocket_session_ack.py": {
-    "mtime": 1773753795.7831838,
-    "seen": 1789573354.355936,
-    "ast_hash": "81051bcc2cf1bedf378224b0a93e2877",
-    "semantic_hash": "81051bcc2cf1bedf378224b0a93e2877"
-  },
-  "test_ws_quick.py": {
-    "mtime": 1775195739.2961261,
-    "seen": 1789573354.355936,
-    "ast_hash": "cc3693a88814e245837c92822d45ea96",
-    "semantic_hash": "cc3693a88814e245837c92822d45ea96"
-  },
-  "urls.py": {
-    "mtime": 1775192268.7450323,
-    "seen": 1789573354.355936,
-    "ast_hash": "509b5814edad615d022491dadc328681",
-    "semantic_hash": "509b5814edad615d022491dadc328681"
-  },
-  "views.py": {
-    "mtime": 1775193808.8817282,
-    "seen": 1789573354.355936,
-    "ast_hash": "f0ab3a8e0af4721cffe1630214634730",
-    "semantic_hash": "f0ab3a8e0af4721cffe1630214634730"
-  },
   ".github/workflows/security.yml": {
     "mtime": 1773753795.4955828,
     "seen": 1789573354.355936,
     "ast_hash": "e2d8d12089105c9d1c86cdc8d1af4dc8",
     "semantic_hash": "e2d8d12089105c9d1c86cdc8d1af4dc8"
-  },
-  "BLUETOOTH_PROGUARD_FIX.md": {
-    "mtime": 1773753795.5096364,
-    "seen": 1789573354.355936,
-    "ast_hash": "f875fe9850fe3ec4cc92f653f055b927",
-    "semantic_hash": "f875fe9850fe3ec4cc92f653f055b927"
-  },
-  "QUICK_BLUETOOTH_FIX.txt": {
-    "mtime": 1773753795.5096364,
-    "seen": 1789573354.355936,
-    "ast_hash": "4e57d527376dc208b149ff0d6fbb523f",
-    "semantic_hash": "4e57d527376dc208b149ff0d6fbb523f"
   },
   "docs/backend_websocket_spec.md": {
     "mtime": 1784872334.4341855,
@@ -1414,18 +1246,6 @@
     "seen": 1789573354.355936,
     "ast_hash": "843ad092d63ece98aefe0b32b0022624",
     "semantic_hash": "843ad092d63ece98aefe0b32b0022624"
-  },
-  "FIX_NO_MAIN_ACTIVITY.md": {
-    "mtime": 1776075335.675543,
-    "seen": 1789574512.277891,
-    "ast_hash": "81051bcc2cf1bedf378224b0a93e2877",
-    "semantic_hash": ""
-  },
-  "QUICK_FIX_GUIDE.txt": {
-    "mtime": 1773753795.5096364,
-    "seen": 1789574512.277891,
-    "ast_hash": "81051bcc2cf1bedf378224b0a93e2877",
-    "semantic_hash": ""
   },
   "app/src/main/res/mipmap-hdpi/ic_launcher.webp": {
     "mtime": 1773753795.764196,
@@ -1653,6 +1473,24 @@
     "mtime": 1790148679.0750725,
     "seen": 1790148829.0154567,
     "ast_hash": "37e2838910d90e9bc67874b4a720094f",
+    "semantic_hash": ""
+  },
+  "app/src/main/java/com/example/kftgcs/uimain/MotorHealthScreen.kt": {
+    "mtime": 1790842251.1127863,
+    "seen": 1790842256.3209367,
+    "ast_hash": "54aa6ecce4fef684022887f7ce597662",
+    "semantic_hash": ""
+  },
+  "app/src/main/java/com/example/kftgcs/telemetry/HobbywingEsc.kt": {
+    "mtime": 1790842193.0597627,
+    "seen": 1790842256.317817,
+    "ast_hash": "f782f2eeed038851b1dd134d67f079e6",
+    "semantic_hash": ""
+  },
+  "app/src/test/java/com/example/kftgcs/telemetry/HobbywingEscTest.kt": {
+    "mtime": 1790842200.3285143,
+    "seen": 1790842256.324791,
+    "ast_hash": "3674299fa33862856ea442867006c38e",
     "semantic_hash": ""
   }
 }

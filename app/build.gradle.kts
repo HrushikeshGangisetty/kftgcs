@@ -23,7 +23,7 @@ android {
         applicationId = "com.kft.gcs"
         minSdk = 26
         targetSdk = 36
-        versionCode = 33
+        versionCode = 35
         versionName = "1.3.4"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
@@ -112,19 +112,14 @@ dependencies {
     implementation("androidx.core:core-splashscreen:1.0.1")
     implementation(libs.androidx.lifecycle.runtime.ktx)
     implementation(libs.androidx.activity.compose)
-
-    // Fragment (required for ActivityResult APIs - version must be >= 1.3.0)
-    implementation("androidx.fragment:fragment-ktx:1.6.2")
+    implementation("androidx.fragment:fragment:1.8.5") // lint: an older transitive fragment trips InvalidFragmentVersionForActivityResult
 
     // Compose BOM (manages versions automatically)
     implementation(platform(libs.androidx.compose.bom))
     implementation("com.google.android.gms:play-services-maps:19.2.0")
 
-    // Core Maps SDK (version will be managed by the BOM)
-//    implementation("com.google.android.gms:play-services-maps")
-    implementation("com.google.maps.android:maps-compose:4.4.2") // You had 4.4.2, which is good.
-
-    // Maps Utils (for clustering, GeoJSON, KML, heatmaps, etc.)
+    implementation("com.google.maps.android:maps-compose:4.4.2")
+    // SphericalUtil (polygon area, distances) — GridUtils, GcsMap, MainPage
     implementation("com.google.maps.android:android-maps-utils:3.8.2")
 
     // Compose UI
@@ -153,7 +148,6 @@ dependencies {
 }
 dependencies {
     implementation(libs.androidx.runtime.livedata)
-//    implementation(libs.firebase.auth)
 
     // MAVLink message definitions (standard dialects like common.xml)
     implementation("com.divpundir.mavlink:definitions:1.2.8")
@@ -187,17 +181,6 @@ dependencies {
     implementation("androidx.lifecycle:lifecycle-viewmodel-compose:2.7.0")
     implementation("androidx.lifecycle:lifecycle-livedata-ktx:2.7.0")
 
-    // MAVLink Java library (example, adjust if you use a different one)
-    implementation("io.dronefleet.mavlink:mavlink:1.0.7")
-
-    // Accompanist System UI Controller for status bar control
-    implementation("com.google.accompanist:accompanist-systemuicontroller:0.34.0")
-
-//    implementation(platform("com.google.firebase:firebase-bom:33.13.0"))
-//    implementation ("androidx.navigation:navigation-compose:2.7.6")
-//    implementation ("androidx.lifecycle:lifecycle-runtime-ktx:2.6.2")
-//    implementation ("com.google.firebase:firebase-auth-ktx:22.3.1")
-    implementation ("com.google.android.gms:play-services-auth:20.7.0")
 
     // Google Play Services Location for phone GPS in RC mode
     implementation("com.google.android.gms:play-services-location:21.0.1")

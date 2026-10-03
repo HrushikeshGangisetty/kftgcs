@@ -12,6 +12,9 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.divpundir.mavlink.adapters.coroutines.trySendUnsignedV2
 import com.divpundir.mavlink.api.wrap
+import com.divpundir.mavlink.definitions.common.CanFilterModify
+import com.divpundir.mavlink.definitions.common.CanFilterOp
+import com.divpundir.mavlink.definitions.common.CanFrame
 import com.divpundir.mavlink.definitions.common.MavCmd
 import com.divpundir.mavlink.definitions.common.MavResult
 import com.divpundir.mavlink.definitions.common.MissionItemInt
@@ -54,6 +57,8 @@ import com.example.kftgcs.grid.GridUtils
 import com.example.kftgcs.videotracking.CameraTrackingState
 import com.example.kftgcs.videotracking.TrackingManager
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import java.util.Locale
 import com.example.kftgcs.api.ApiService
@@ -181,8 +186,12 @@ data class PreflightFailsafeSummary(
     val fenceAction: String,
     /** Home-centred fence radius (FENCE_RADIUS), pre-formatted, e.g. "300 m". */
     val fenceRadius: String,
+    /** GCS action distance, after applying the confirmed FENCE_MARGIN. */
+    val rangeActionDistance: String,
     /** Fence margin (FENCE_MARGIN), pre-formatted, e.g. "2.0 m". */
-    val fenceMargin: String
+    val fenceMargin: String,
+    val maxAltitude: String,
+    val onboardFence: String
 )
 
 class SharedViewModel : ViewModel() {
@@ -200,6 +209,178 @@ class SharedViewModel : ViewModel() {
     private val _radarThresholds = MutableStateFlow(loadRadarThresholdsFromPrefs())
     val radarThresholds: StateFlow<com.example.kftgcs.telemetry.RadarThresholds> =
         _radarThresholds.asStateFlow()
+
+    // Motor High Current alert limit (amps, per ESC; 0 = off). Set from the Settings dialog,
+    // checked against ESC_TELEMETRY_x_TO_y in TelemetryRepository.
+    private val _motorHighCurrentLimitA = MutableStateFlow(
+        GCSApplication.getInstance()?.let { UserSettingsManager.loadMotorHighCurrentLimitA(it) } ?: 0f
+    )
+    val motorHighCurrentLimitA: StateFlow<Float> = _motorHighCurrentLimitA.asStateFlow()
+
+    fun setMotorHighCurrentLimitA(amps: Float) {
+        GCSApplication.getInstance()?.let { UserSettingsManager.saveMotorHighCurrentLimitA(it, amps) }
+        _motorHighCurrentLimitA.value = amps
+    }
+
+    // Motor High Temperature alert limit (°C, per ESC; 0 = off). Same path as the current limit.
+    private val _motorHighTempLimitC = MutableStateFlow(
+        GCSApplication.getInstance()?.let { UserSettingsManager.loadMotorHighTempLimitC(it) } ?: 0f
+    )
+    val motorHighTempLimitC: StateFlow<Float> = _motorHighTempLimitC.asStateFlow()
+
+    fun setMotorHighTempLimitC(celsius: Float) {
+        GCSApplication.getInstance()?.let { UserSettingsManager.saveMotorHighTempLimitC(it, celsius) }
+        _motorHighTempLimitC.value = celsius
+    }
+
+    // ── Hobbywing ESC ID setup (Motor Health screen) ──
+    // The DroneCAN GUI Tool's Hobbywing panel, done over MAVLink CAN forwarding: see HobbywingEsc.kt.
+    // Discovered ESCs: DroneCAN node ID → throttle (motor) ID.
+    private val _hobbywingEscs = MutableStateFlow<Map<Int, Int>>(emptyMap())
+    val hobbywingEscs: StateFlow<Map<Int, Int>> = _hobbywingEscs.asStateFlow()
+
+    private val _escIdStatus = MutableStateFlow("")
+    val escIdStatus: StateFlow<String> = _escIdStatus.asStateFlow()
+
+    private var escScanJob: Job? = null
+    private var escScanBus = 0
+    private var escCanTransferId = 0
+
+    private suspend fun sendEscCanFrame(r: MavlinkTelemetryRepository, frame: HwCanFrame) {
+        try {
+            r.connection.trySendUnsignedV2(
+                r.gcsSystemId, r.gcsComponentId,
+                CanFrame(
+                    targetSystem = r.fcuSystemId,
+                    targetComponent = r.fcuComponentId,
+                    bus = escScanBus.toUByte(),
+                    len = frame.data.size.toUByte(),
+                    id = frame.id,
+                    data = frame.data + List(8 - frame.data.size) { 0u.toUByte() }
+                )
+            )
+        } catch (e: Exception) {
+            LogUtils.e("EscId", "CAN_FRAME send failed", e)
+        }
+    }
+
+    /**
+     * Scans CAN [bus] (0 = CAN1, 1 = CAN2) for Hobbywing ESCs until [stopEscIdScan]. Call only
+     * once the FC is detected. Paused while armed: forwarding adds link load and nothing may
+     * be changed in flight anyway.
+     */
+    fun startEscIdScan(bus: Int) {
+        stopEscIdScan()
+        val r = repo ?: return
+        escScanBus = bus
+        _hobbywingEscs.value = emptyMap()
+        _escIdStatus.value = ""
+        escScanJob = viewModelScope.launch {
+            launch {
+                r.mavFrame
+                    .filter { it.systemId == r.fcuSystemId }
+                    .map { it.message }
+                    .filterIsInstance<CanFrame>()
+                    .collect { f ->
+                        val reply = hwParseReply(f.id, f.data, f.len.toInt()) ?: return@collect
+                        when (reply.typeId) {
+                            HW_GET_ESC_ID -> _hobbywingEscs.update { it + (reply.srcNode to reply.payload[1]) }
+                            HW_SET_ID -> {
+                                // The old node entry is stale now; the next GetEscID answer re-adds it.
+                                _hobbywingEscs.update { it - reply.srcNode }
+                                _escIdStatus.value = "ESC saved: node ID ${reply.payload.getOrNull(0)}, " +
+                                    "motor ID ${reply.payload.getOrNull(1)}"
+                            }
+                            // Any other response is the ESC confirming the request in flight.
+                            else -> _escIdStatus.value = "ESC node ${reply.srcNode}: $escPendingWhat saved."
+                        }
+                    }
+            }
+            try {
+                while (isActive) {
+                    if (r.state.value.fcuDetected && !r.state.value.armed) {
+                        // The FC stops forwarding ~5 s after the last CAN_FORWARD, so repeat it.
+                        r.sendCommand(MavCmd.CAN_FORWARD, param1 = bus + 1f)
+                        // Only forward the data types we use - ESC status traffic would
+                        // otherwise flood the telemetry link.
+                        try {
+                            r.connection.trySendUnsignedV2(
+                                r.gcsSystemId, r.gcsComponentId,
+                                CanFilterModify(
+                                    targetSystem = r.fcuSystemId,
+                                    targetComponent = r.fcuComponentId,
+                                    bus = bus.toUByte(),
+                                    operation = CanFilterOp.CAN_FILTER_REPLACE.wrap(),
+                                    numIds = HW_FORWARDED_IDS.size.toUByte(),
+                                    ids = List(16) { (HW_FORWARDED_IDS.getOrNull(it) ?: 0).toUShort() }
+                                )
+                            )
+                        } catch (e: Exception) {
+                            LogUtils.e("EscId", "CAN_FILTER_MODIFY send failed", e)
+                        }
+                        sendEscCanFrame(r, hwGetEscIdFrame(escCanTransferId++))
+                    }
+                    delay(1000)
+                }
+            } finally {
+                withContext(NonCancellable) { r.sendCommand(MavCmd.CAN_FORWARD, param1 = 0f) }
+            }
+        }
+    }
+
+    fun stopEscIdScan() {
+        escScanJob?.cancel()
+        escScanJob = null
+    }
+
+    /** Hobbywing SetID: gives the ESC currently at [nodeId] a new node ID and motor (throttle) ID. */
+    fun setHobbywingEscId(nodeId: Int, newNodeId: Int, throttleId: Int) =
+        sendHobbywingEscRequest(nodeId, HW_SET_ID, listOf(newNodeId, throttleId), "IDs")
+
+    /** Rotation direction: [ccw] false = clockwise. */
+    fun setHobbywingEscDirection(nodeId: Int, ccw: Boolean) =
+        sendHobbywingEscRequest(nodeId, HW_SET_DIRECTION, listOf(if (ccw) 1 else 0), "direction")
+
+    /** Throttle source: CAN (digital) or PWM. */
+    fun setHobbywingEscThrottleSource(nodeId: Int, pwm: Boolean) =
+        sendHobbywingEscRequest(nodeId, HW_SET_THROTTLE_SOURCE, listOf(if (pwm) 1 else 0), "throttle source")
+
+    /** [baudCode] is SetBaud's enum: 0 = 1M, 1 = 500k, 2 = 250k, 3 = 200k, 4 = 100k, 5 = 50k. */
+    fun setHobbywingEscBaud(nodeId: Int, baudCode: Int) =
+        sendHobbywingEscRequest(nodeId, HW_SET_BAUD, listOf(baudCode), "baud rate")
+
+    /**
+     * Report rate of status message [msgNumber] (1-3 = data types 20050-20052). [rateCode] is
+     * SetReportingFrequency's enum: 1 = 500 Hz, 2 = 250, 3 = 200, 4 = 100, 5 = 50, 6 = 20,
+     * 7 = 10, 8 = 1, 9 = off.
+     */
+    fun setHobbywingEscMsgRate(nodeId: Int, msgNumber: Int, rateCode: Int) {
+        val msgId = 20049 + msgNumber
+        sendHobbywingEscRequest(
+            nodeId, HW_SET_REPORTING_FREQUENCY,
+            listOf(1 /* OPTION_WRITE */, msgId and 0xFF, msgId shr 8, rateCode),
+            "message $msgNumber rate"
+        )
+    }
+
+    // What the last request was changing, for the status line when the ESC confirms it.
+    private var escPendingWhat = ""
+
+    private fun sendHobbywingEscRequest(nodeId: Int, serviceId: Int, payload: List<Int>, what: String) {
+        val r = repo ?: return
+        if (r.state.value.armed) {
+            _escIdStatus.value = "Disarm before changing ESC settings."
+            return
+        }
+        escPendingWhat = what
+        val pending = "Setting ESC node $nodeId $what…"
+        _escIdStatus.value = pending
+        viewModelScope.launch {
+            sendEscCanFrame(r, hwServiceFrame(serviceId, nodeId, payload, escCanTransferId++))
+            delay(2000)
+            if (_escIdStatus.value == pending) _escIdStatus.value = "No reply from ESC node $nodeId."
+        }
+    }
 
     // Battery failsafe tracking
     private var lastVoltageAlertLevel1Time = 0L
@@ -287,6 +468,8 @@ class SharedViewModel : ViewModel() {
     // DGCA's requirement is that the boundary is not crossed. Layer 1 is what delivers that,
     // because it is the only one of the three that acts BEFORE the vehicle is committed.
 
+    private var altitudeLimitActionJob: Job? = null
+    private var maxRangeActionJob: Job? = null
     private var altitudeLimitActionTriggered = false // One-shot per arm cycle, like the voltage action
     private var lastAltitudeWarnTime = 0L
     private var lastAltitudeLimitTime = 0L
@@ -316,8 +499,8 @@ class SharedViewModel : ViewModel() {
      * is to stop the aircraft BEFORE the line so the line is never crossed.
      *
      * The requirement changed. The ceiling must now act at the configured altitude and a small
-     * breach is acceptable, which is the same call taken for the max-range fence (see
-     * [MAX_RANGE_ACTION_MARGIN_M]). With the wall off, the only GCS actor is layer 2 at
+     * breach is acceptable. Max range has its own margin-adjusted action boundary.
+     * With the wall off, the only GCS altitude actor is layer 2 at
      * [ALTITUDE_BREACH_MARGIN_M] = 0, i.e. the ceiling itself, and the FC's own FENCE_ALT_MAX
      * now sits at the same altitude rather than 1 m under it.
      *
@@ -341,9 +524,8 @@ class SharedViewModel : ViewModel() {
      *     ceiling − FC offset     →  the FC's own fence: the operator's FENCE_ACTION
      *     ceiling                 →  GCS layer 2: last-resort FENCE_ACTION
      *
-     * It is derived from [FC_ALT_FENCE_SAFETY_OFFSET_M] rather than set independently because
-     * of what happens when the two cross. The FC fence is now armed at connect
-     * ([armFcAltitudeFence]) and evaluated at 400Hz, so it is genuinely the first thing the
+     * It is derived from [FC_ALT_FENCE_SAFETY_OFFSET_M] so the optional predictive wall
+     * stays below an onboard fence enabled by the operator. The onboard fence is the first thing the
      * vehicle meets. With the old flat 0.5 m the wall sat at 47.5 m while the FC fence sat at
      * 47.0 m on a 48 m ceiling — the FC would fire its FENCE_ACTION (usually RTL) half a metre
      * BEFORE the wall's soft stop, and every approach to the ceiling would become a flight
@@ -549,23 +731,6 @@ class SharedViewModel : ViewModel() {
      * operator's action anyway. Proceeding late beats not proceeding.
      */
     private val ALTITUDE_BRAKE_SETTLE_TIMEOUT_MS = 3000L
-    /**
-     * Headroom kept between RTL_ALT and the ceiling, in metres.
-     *
-     * RTL_ALT must sit far enough below the ceiling that RTL's climb stage cannot carry the
-     * vehicle through it, with room for ArduPilot's own altitude tolerance on the way.
-     *
-     * Visible to [MavlinkTelemetryRepository] so the fence-upload path
-     * (clampRtlAltBelowFenceCeiling) applies the same headroom rather than defining a
-     * second, silently divergent one.
-     */
-    val RTL_ALT_BELOW_CEILING_M = 10f
-    /**
-     * Floor for a written RTL_ALT, in metres. ArduPilot treats RTL_ALT=0 as "return at the
-     * current altitude", so a low ceiling must not drive the value to or below zero.
-     */
-    val RTL_ALT_MIN_M = 10f
-
     // ═══ Max range failsafe (GCS-enforced, limit read from FENCE_RADIUS) ═══
     //
     // Enforced here rather than by the FC's home-centred cylinder. The FC fence proved
@@ -586,29 +751,13 @@ class SharedViewModel : ViewModel() {
      * Warn this far inside the projected stopping point so the pilot can turn back first.
      *
      * This lead matters more than it used to. The action no longer fires early enough to
-     * guarantee the vehicle stops inside the radius (see [MAX_RANGE_ACTION_MARGIN_M]), so at
+     * guarantee the vehicle stops inside the radius with FENCE_MARGIN alone, so at
      * cruise the PILOT is the only thing that can slow the aircraft before the line. The warn
      * point is therefore measured from the speed-aware stopping distance, not from the fixed
      * action point — it moves outward as the drone speeds up, which is when the warning has
      * to come earlier in wall-clock terms to be worth anything.
      */
     private val MAX_RANGE_WARN_LEAD_M = 25f
-    /**
-     * How far inside the radius the range action fires, in metres.
-     *
-     * Deliberately tiny: the operator's requirement is that RTL is commanded ON the limit, not
-     * a speed-dependent distance short of it. 1.5 m covers GPS jitter and one evaluation
-     * interval, so a 1000 m fence triggers at 998.5 m.
-     *
-     * KNOWN TRADE-OFF, chosen explicitly. This margin does NOT cover the stopping distance, so
-     * the vehicle WILL cross the radius whenever it arrives at the line with speed on — by
-     * roughly v·1.4 + v²/4 metres, i.e. ~4 m at 2 m/s, ~10 m at 4 m/s, ~27 m at 8 m/s. The
-     * previous design sized this margin to the stopping distance (12 m floor, 60 m cap) so the
-     * line was never crossed at all, at the cost of triggering 12 m early at hover — which is
-     * the behaviour this replaced. If the overshoot at cruise ever needs to go away, the fix is
-     * a brake layer ahead of the line (as the altitude ceiling has), not a bigger margin here.
-     */
-    private val MAX_RANGE_ACTION_MARGIN_M = 1.5f
     /** Smallest stopping-distance estimate used for the WARNING lead (near-hover case). */
     private val MAX_RANGE_MIN_STOPPING_M = 12f
     /** Upper clamp so a bogus groundspeed can't push the warning absurdly far inside. */
@@ -632,12 +781,11 @@ class SharedViewModel : ViewModel() {
      */
     private val MAX_RANGE_DECEL_MPS2 = 2.0f
     /**
-     * How far back inside the RADIUS the drone must return before the range action re-arms.
+     * How far back inside the range ACTION boundary the drone must return before re-arming.
      *
-     * Measured from the radius, not from the action threshold, for the same reason as the
-     * altitude ceiling (see [ALTITUDE_REARM_BELOW_CEILING_M]): the threshold slides inward
-     * with groundspeed, so a band hung off it moved with speed and could sit outside where
-     * a pilot actually loitered after cancelling, leaving the latch stuck.
+     * The action boundary is radius minus FENCE_MARGIN and does not vary with speed.
+     * Recovery must be inside that boundary so a large margin cannot re-arm the latch
+     * while the vehicle is still in the action band.
      */
     private val MAX_RANGE_REARM_INSIDE_RADIUS_M = 40f
     /**
@@ -646,22 +794,7 @@ class SharedViewModel : ViewModel() {
      * outward, so the latch cannot clear and instantly re-fire.
      */
     private val MAX_RANGE_REARM_MAX_SPEED_MPS = 2.0f
-    /**
-     * Hard backstop: within this distance of the radius (or beyond it), the action fires
-     * again even if the one-shot is already consumed. Same reasoning the altitude ceiling
-     * uses for [ALTITUDE_BREACH_MARGIN_M] — the latch may spare a pilot who is managing the
-     * situation inside the envelope, never one about to cross the line.
-     *
-     * 0, i.e. the radius itself. It was 3 m, which was inside the old 12-60 m action margin
-     * and so sat comfortably outside the trigger. With the action now at radius - 1.5 m a 3 m
-     * backstop would sit INSIDE the trigger point, making `atBackstop` true on the very first
-     * frame that fires and rendering the "past the trigger but still inside the line, let the
-     * pilot fly" branch unreachable. Putting it on the radius restores the intended layering:
-     *
-     *     radius - 1.5 m  →  action fires once (one-shot)
-     *     radius - 1.5 .. radius  →  latch respected, TTS only
-     *     radius and beyond  →  backstop, action re-commanded every 5 s
-     */
+    // Re-command an unhandled range breach at the radius, rate limited to five seconds.
     private val MAX_RANGE_BACKSTOP_MARGIN_M = 0f
 
     /**
@@ -673,11 +806,7 @@ class SharedViewModel : ViewModel() {
     private val POSITION_STALE_WARN_INTERVAL_MS = 5000L
     private var lastPositionStaleWarnTime = 0L
 
-    // NOTE: the Max Range failsafe's GCS-side state (one-shot latch, warn/limit timers,
-    // speed-aware margin constants) lived here. The 300m limit is now enforced by the FC's
-    // home-centred cylinder fence (FENCE_RADIUS + FENCE_TYPE bit 1), armed on connect by
-    // syncFenceParametersOnConnect, so that the breach action follows the operator's
-    // FENCE_ACTION instead of a hardcoded GCS-side RTL.
+    // GCS limit monitors use confirmed FC limits/actions. Onboard fence settings are read only.
 
     init {
         // Setup emergency RTL callback for crash handler
@@ -735,6 +864,8 @@ class SharedViewModel : ViewModel() {
                     latchedCellCount = null
                     repository?.setVoltageFailsafeActive(false)
 
+                    altitudeLimitActionJob?.cancel()
+                    maxRangeActionJob?.cancel()
                     altitudeLimitActionTriggered = false
                     lastAltitudeWarnTime = 0L
                     lastAltitudeLimitTime = 0L
@@ -1206,10 +1337,10 @@ class SharedViewModel : ViewModel() {
         val context = GCSApplication.getInstance() ?: return
         if (!isAltitudeFailsafeEnabled(context)) return
 
-        val ceiling = getMaxAltitude(context)
-        if (ceiling <= 0f) return   // 0 / negative means "no ceiling configured"
+        val ceiling = getMaxAltitude()
+        if (!LimitFailsafePolicy.validLimit(ceiling) || !altitude.isFinite()) return   // 0 / negative means "no ceiling configured"
 
-        val action = getMaxAltitudeAction(context)
+        val action = _fenceAction.value?.pilotLabel ?: "Unknown"
         val now = System.currentTimeMillis()
 
         // How old is the altitude we are about to judge? Under a saturated telemetry link
@@ -1217,7 +1348,7 @@ class SharedViewModel : ViewModel() {
         // in the gap. Both the hard gate and the projection below depend on this.
         val positionAgeMs = state.positionReceivedAtMs?.let { now - it } ?: Long.MAX_VALUE
 
-        if (positionAgeMs > POSITION_STALE_HARD_MS) {
+        if (!LimitFailsafePolicy.freshPosition(state.positionReceivedAtMs, now, POSITION_STALE_HARD_MS)) {
             // Too old to act on. Say so rather than either trusting it or failing silently.
             if (now - lastPositionStaleWarnTime >= POSITION_STALE_WARN_INTERVAL_MS) {
                 lastPositionStaleWarnTime = now
@@ -1268,7 +1399,7 @@ class SharedViewModel : ViewModel() {
         // The band is measured from the CEILING, and re-arming also requires the vehicle to
         // have stopped climbing, so a momentary dip during a continuous climb does not clear
         // the latch and immediately re-fire the action.
-        val rearmAltitude = ceiling - ALTITUDE_REARM_BELOW_CEILING_M
+        val rearmAltitude = LimitFailsafePolicy.rearmThreshold(ceiling, ALTITUDE_REARM_BELOW_CEILING_M)
         val climbingHard = climbRaw > ALTITUDE_REARM_MAX_CLIMB_MPS
         if (altitudeLimitActionTriggered && altitude < rearmAltitude && !climbingHard) {
             altitudeLimitActionTriggered = false
@@ -1280,31 +1411,8 @@ class SharedViewModel : ViewModel() {
             LogUtils.i("AltitudeFailsafe", "✓ Recovered to ${altitude}m (below ${rearmAltitude}m, climb=${climbRaw}m/s) — altitude action re-armed")
         }
 
-        // ═══ LAYER 1b: the pilot asked for an ACTION at the limit, not a hold ═══
-        //
-        // "Action at Limit" (max_altitude_action) has always offered Hover / RTL / Land, but
-        // it was only ever consulted at the breach line AND only when FENCE_ACTION could not
-        // be read — and layer 1 exists precisely to stop the vehicle ever reaching that line.
-        // So on a healthy vehicle, selecting RTL did nothing whatsoever: the drone stopped a
-        // couple of metres short, control was handed back, and no action ever ran. The
-        // dropdown was dead.
-        //
-        // HOVER preserves exactly that hand-back behaviour and remains the default, so normal
-        // work near the ceiling is untouched. Anything else escalates once the wall has the
-        // climb ARRESTED: the limit has been reached, the vehicle is stopped and stable, and
-        // the pilot has said they want the breach action anyway.
-        //
-        // WHICH action is still the vehicle's own FENCE_ACTION (see [runAltitudeLimitAction]);
-        // the dropdown decides whether to escalate, not what the escalation is.
-        // [warnIfLimitActionMismatch] flags a disagreement between the two on connect, so it
-        // is discovered on the ground rather than in the air.
-        //
-        // Placed AFTER the re-arm check above so a pilot who descends and climbs again gets
-        // the action a second time, and gated on the one-shot so it fires once per approach
-        // instead of on every frame the wall is holding. Setting that one-shot also makes
-        // [handleAltitudeWall] stand down (its "LAYER 2 HAS THE VEHICLE" guard), so the wall
-        // cannot re-engage BRAKE on top of the RTL this starts.
-        if (wallHolding && !action.equals("HOVER", ignoreCase = true) &&
+        // The optional wall may escalate a non-hold FC action once it arrests the climb.
+        if (wallHolding && _fenceAction.value != FenceAction.BRAKE && _fenceAction.value != FenceAction.REPORT_ONLY &&
             !altitudeLimitActionTriggered
         ) {
             runAltitudeLimitAction(
@@ -1318,7 +1426,7 @@ class SharedViewModel : ViewModel() {
             return
         }
 
-        if (altitude >= breachThreshold) {
+        if (LimitFailsafePolicy.reached(altitude.toDouble(), ceiling)) {
 
             // ═══ THE WALL IS HANDLING IT ═══
             // The vehicle is over the breach line but BRAKE has it stopped. That is the
@@ -1379,7 +1487,7 @@ class SharedViewModel : ViewModel() {
             // reports the mode), but re-running the BRAKE pre-step CANCELS the in-progress
             // RTL, waits for the climb to settle, then re-commands RTL — every 5s, forever.
             // And the vehicle cannot break the cycle itself: with RTL_ALT synced to
-            // ceiling−[RTL_ALT_BELOW_CEILING_M], a drone stopped near the ceiling is ABOVE
+            // the ceiling, a drone stopped near the ceiling is ABOVE
             // RTL_ALT, so RTL cruises home level instead of descending and altitude never
             // falls to the ceiling−[ALTITUDE_REARM_BELOW_CEILING_M] re-arm point. The pilot
             // has to take Loiter and fly it down by hand. Hence: a recovery that is holding
@@ -1455,11 +1563,8 @@ class SharedViewModel : ViewModel() {
      * LAND when a mode change is refused, the one-shot and the re-fire suppression are all
      * load-bearing, and a second copy of them would drift.
      *
-     * WHICH MODE is always the vehicle's own FENCE_ACTION when it could be read, falling
-     * back to [optionsAction] only when it could not — DGCA requires the drone to act on
-     * the parameters actually set on it. The Options dropdown decides WHETHER to escalate,
-     * not what the escalation is; [warnIfLimitActionMismatch] tells the pilot on the ground
-     * when the two disagree, so a surprise never arrives in the air.
+     * The mode and fallback sequence come from confirmed FENCE_ACTION. An unknown action
+     * never substitutes a cached Options choice or a default mode.
      *
      * @param breached true if the ceiling was crossed, false if the wall held at the limit.
      *   Only changes the wording — saying "breached" for a vehicle the wall stopped two
@@ -1474,6 +1579,8 @@ class SharedViewModel : ViewModel() {
         isRefire: Boolean,
         now: Long
     ) {
+        if (altitudeLimitActionJob?.isActive == true) return
+        val confirmedAction = _fenceAction.value ?: return
         val reachedWord = if (breached) "breached" else "reached"
         val headlineWord = if (breached) "BREACH" else "LIMIT"
         // ═══ TRIGGER ═══
@@ -1515,43 +1622,25 @@ class SharedViewModel : ViewModel() {
         }
         showFailsafePopup("Max Altitude")
 
-        viewModelScope.launch {
+        altitudeLimitActionJob = viewModelScope.launch {
             // ═══ ARREST THE CLIMB FIRST ═══
             // RTL does not stop a climb. ArduCopter's RTL begins with RTL_Climb: if
             // the vehicle is below RTL_ALT it climbs UP to RTL_ALT before heading
             // home — i.e. the configured breach action drives the drone further
-            // through the very ceiling it is meant to protect. syncRtlAltOnConnect
-            // keeps RTL_ALT under the ceiling so the climb stage is a no-op, but a
-            // vehicle we failed to write (or one an operator re-configured
-            // mid-session) must still not sail through.
+            // through the ceiling. RTL_ALT stays operator-owned; connection/refresh
+            // warn about a conflicting RTL altitude without rewriting it.
             //
             // So: BRAKE first to kill vertical motion, then hand over to the
             // operator's FENCE_ACTION. DGCA's "acts on the parameters actually set"
             // still holds — RTL still happens, it just no longer happens while
             // pointing the wrong way. Skipped when the action is itself a stop
             // (BRAKE) or a descent (LAND), neither of which climbs.
-            val fenceAction = _fenceAction.value
-            val targetMode = when (fenceAction) {
-                FenceAction.RTL, FenceAction.SMART_RTL, FenceAction.SMART_RTL_LAND -> MavMode.RTL
-                FenceAction.ALWAYS_LAND -> MavMode.LAND
-                FenceAction.BRAKE -> MavMode.BRAKE
-                // REPORT_ONLY: the operator asked for no automatic intervention.
-                FenceAction.REPORT_ONLY -> null
-                null -> when (optionsAction.uppercase()) {
-                    "RTL" -> MavMode.RTL
-                    "LAND" -> MavMode.LAND
-                    else -> MavMode.BRAKE
-                }
-            }
-            val targetModeName = when (targetMode) {
-                MavMode.RTL -> "RTL"
-                MavMode.LAND -> "LAND"
-                MavMode.BRAKE -> "BRAKE"
-                else -> "REPORT ONLY"
-            }
+            val fenceAction = confirmedAction
+            val targetMode = LimitFailsafePolicy.actionModes(fenceAction).firstOrNull()
+            val targetModeName = fenceAction.pilotLabel
 
             // Only RTL climbs. BRAKE is already the arrest, and LAND descends.
-            val actionClimbs = targetMode == MavMode.RTL
+            val actionClimbs = targetMode == MavMode.RTL || targetMode == MavMode.SMART_RTL
             val alreadyBraking =
                 _telemetryState.value.mode?.contains("Brake", ignoreCase = true) == true
             // The arrest is for a vehicle that is still going UP. Braking one that
@@ -1571,23 +1660,21 @@ class SharedViewModel : ViewModel() {
                 }
                 if (needsArrest) {
                     LogUtils.i("AltitudeFailsafe", "🛑 Arresting climb with BRAKE before $targetModeName (RTL climbs to RTL_ALT and would breach the ceiling)")
-                    if (executeFailsafeModeChange("AltitudeFailsafe", MavMode.BRAKE, "BRAKE")) {
+                    if (repo?.changeMode(MavMode.BRAKE) == true) {
                         // Let the brake actually bite before handing over. RTL's climb
                         // stage is skipped once the vehicle is at/above RTL_ALT, and a
                         // still-rising vehicle handed straight to RTL would resume the
                         // climb this step exists to stop.
                         awaitClimbArrested()
                     } else {
-                        // executeFailsafeModeChange has already escalated to LAND and
-                        // told the pilot. Do not then command RTL on top of a LAND that
-                        // is bringing the vehicle down.
-                        LogUtils.e("AltitudeFailsafe", "✗ Could not arrest the climb — skipping $targetModeName, vehicle is on the LAND fallback")
+                        // A successful LAND fallback must never be countermanded by RTL.
+                        executeFenceLimitAction("AltitudeFailsafe", FenceAction.ALWAYS_LAND)
                         return@launch
                     }
                 }
 
-                LogUtils.i("AltitudeFailsafe", "Acting on FENCE_ACTION=${fenceAction?.pilotLabel ?: "unset, using Options '$optionsAction'"} → $targetModeName")
-                executeFailsafeModeChange("AltitudeFailsafe", targetMode, targetModeName)
+                LogUtils.i("AltitudeFailsafe", "Acting on FENCE_ACTION=${fenceAction.pilotLabel} → $targetModeName")
+                executeFenceLimitAction("AltitudeFailsafe", fenceAction)
             }
 
             try {
@@ -1899,28 +1986,31 @@ class SharedViewModel : ViewModel() {
      * only the *enforcement* is ours. See the constants block for why the FC's own cylinder
      * fence is not relied on.
      *
-     * The trigger sits [MAX_RANGE_ACTION_MARGIN_M] (1.5 m) inside the radius — RTL is
-     * commanded ON the limit, by operator requirement, not a speed-dependent distance short of
-     * it. The consequence is that a drone arriving with speed on will cross the line by its
-     * stopping distance (see [maxRangeStoppingDistance]); that is accepted, and the warning
-     * zone ahead of it is sized from that same stopping distance plus [MAX_RANGE_WARN_LEAD_M]
-     * so the pilot has room to slow down before the limit themselves.
+     * The configured action is commanded on the first fresh fix at or beyond
+     * FENCE_RADIUS - FENCE_MARGIN. Speed affects the warning lead only. An invalid or
+     * unread margin retains protection at the actual radius, with no invented buffer.
      *
      * One-shot per breach so a pilot who deliberately takes back control is not fought on
-     * every frame; it re-arms once they return [MAX_RANGE_REARM_INSIDE_RADIUS_M] inside the
-     * RADIUS with the vehicle slowed, so a second excursion is protected like the first.
+     * every frame; it re-arms once they return inside the ACTION boundary with the vehicle
+     * slowed, so a second excursion is protected like the first.
      * Independently of the latch, reaching [MAX_RANGE_BACKSTOP_MARGIN_M] of the radius
      * always re-commands the action: the fence must not be crossed.
      */
     private fun handleMaxRangeFailsafe(state: TelemetryState) {
         // Limit comes from the vehicle. No parameter, no enforcement — we must not invent a
         // radius the operator never set.
-        val radius = _fenceRadiusMeters.value?.takeIf { it > 0f } ?: return
+        val radius = _fenceRadiusMeters.value?.takeIf { LimitFailsafePolicy.validLimit(it) } ?: return
+        val actionThreshold = LimitFailsafePolicy.rangeActionThreshold(radius, _fenceMargin.value) ?: return
+        val actionMargin = radius - actionThreshold
+        val confirmedAction = _fenceAction.value ?: return
 
         val lat = state.latitude ?: return
         val lon = state.longitude ?: return
         val homeLat = state.homeLatitude ?: return
         val homeLon = state.homeLongitude ?: return
+        if (!lat.isFinite() || !lon.isFinite() || !homeLat.isFinite() || !homeLon.isFinite() ||
+            lat !in -90.0..90.0 || homeLat !in -90.0..90.0 ||
+            lon !in -180.0..180.0 || homeLon !in -180.0..180.0) return
 
         val distance = GeofenceUtils.haversineDistance(LatLng(homeLat, homeLon), LatLng(lat, lon))
         val now = System.currentTimeMillis()
@@ -1928,7 +2018,7 @@ class SharedViewModel : ViewModel() {
         // Same staleness reasoning as the altitude ceiling: a fix this old cannot tell us
         // where the drone is relative to the boundary, so decline rather than guess.
         val positionAgeMs = state.positionReceivedAtMs?.let { now - it } ?: Long.MAX_VALUE
-        if (positionAgeMs > POSITION_STALE_HARD_MS) {
+        if (!LimitFailsafePolicy.freshPosition(state.positionReceivedAtMs, now, POSITION_STALE_HARD_MS)) {
             if (now - lastPositionStaleWarnTime >= POSITION_STALE_WARN_INTERVAL_MS) {
                 lastPositionStaleWarnTime = now
                 LogUtils.w("MaxRangeFailsafe", "Position fix ${positionAgeMs}ms stale — max range failsafe cannot evaluate (dist=${distance}m)")
@@ -1937,23 +2027,17 @@ class SharedViewModel : ViewModel() {
             return
         }
 
-        // The action point is fixed on the limit; the WARNING point is the speed-aware one.
-        // They used to be the same number, which is what made RTL fire 12 m early at hover.
+        // The FC's configured margin sets the action point; speed affects warnings only.
         val stoppingDistance = maxRangeStoppingDistance(state.groundspeed, positionAgeMs)
-        val actionThreshold = radius - MAX_RANGE_ACTION_MARGIN_M
-        val warnThreshold = radius - stoppingDistance - MAX_RANGE_WARN_LEAD_M
+        val warnThreshold = actionThreshold - stoppingDistance - MAX_RANGE_WARN_LEAD_M
 
         // ═══ RECOVERED: re-arm the one-shot ═══
         // Before the action branch, not as an else-if. (actionThreshold no longer moves with
         // groundspeed, which was the original reason, but the ordering still matters: the
         // re-arm band and the action band must both get a look on the same frame.)
         //
-        // Measured from the RADIUS, not from actionThreshold, and additionally requiring the
-        // vehicle to have slowed down — see [MAX_RANGE_REARM_INSIDE_RADIUS_M]. A band hung
-        // off the speed-aware threshold moved with groundspeed and could sit outside where
-        // the pilot actually pulled back to, leaving the latch set so that the next run at
-        // the fence hit the "action already taken" branch and crossed with TTS only.
-        val rearmDistance = radius - MAX_RANGE_REARM_INSIDE_RADIUS_M
+        // Must recover inside the margin-adjusted action point before another excursion.
+        val rearmDistance = LimitFailsafePolicy.rearmThreshold(actionThreshold, MAX_RANGE_REARM_INSIDE_RADIUS_M)
         val stillRunning = (state.groundspeed ?: 0f).let { it.isFinite() && it > MAX_RANGE_REARM_MAX_SPEED_MPS }
         if (maxRangeActionTriggered && distance < rearmDistance && !stillRunning) {
             maxRangeActionTriggered = false
@@ -1970,7 +2054,7 @@ class SharedViewModel : ViewModel() {
         // breached, and a recovery that has let the drone reach the line is not working.
         val atBackstop = distance >= radius - MAX_RANGE_BACKSTOP_MARGIN_M
 
-        if (distance >= actionThreshold) {
+        if (LimitFailsafePolicy.reached(distance, actionThreshold)) {
 
             // Never cancel a higher-priority recovery already in progress. Suppress the
             // action WITHOUT consuming the one-shot, and keep warning the pilot.
@@ -1994,33 +2078,20 @@ class SharedViewModel : ViewModel() {
             val backstopRefire = maxRangeActionTriggered && atBackstop &&
                 now - lastMaxRangeLimitTime >= MAX_RANGE_LIMIT_INTERVAL_MS
 
-            if (!maxRangeActionTriggered || backstopRefire) {
+            if ((!maxRangeActionTriggered || backstopRefire) && maxRangeActionJob?.isActive != true) {
                 maxRangeActionTriggered = true
                 lastMaxRangeLimitTime = now
 
                 // Action from the vehicle's FENCE_ACTION, matching the altitude ceiling.
-                val fenceAction = _fenceAction.value
-                val targetMode = when (fenceAction) {
-                    FenceAction.RTL, FenceAction.SMART_RTL, FenceAction.SMART_RTL_LAND -> MavMode.RTL
-                    FenceAction.ALWAYS_LAND -> MavMode.LAND
-                    FenceAction.BRAKE -> MavMode.BRAKE
-                    FenceAction.REPORT_ONLY -> null
-                    // No parameter read: RTL is the safe default for a distance breach —
-                    // braking in place leaves the drone stranded at the edge of range.
-                    null -> MavMode.RTL
-                }
-                val targetModeName = when (targetMode) {
-                    MavMode.RTL -> "RTL"
-                    MavMode.LAND -> "LAND"
-                    MavMode.BRAKE -> "BRAKE"
-                    else -> "REPORT ONLY"
-                }
-                val announced = fenceAction?.pilotLabel ?: "RTL"
+                val fenceAction = confirmedAction
+                val targetMode = LimitFailsafePolicy.actionModes(fenceAction).firstOrNull()
+                val targetModeName = fenceAction.pilotLabel
+                val announced = fenceAction.pilotLabel
 
                 if (backstopRefire) {
                     LogUtils.w("MaxRangeFailsafe", "MAX RANGE BACKSTOP: ${distance}m is at/over the ${radius}m limit and the one-shot was already consumed — RE-COMMANDING $announced, mode=${state.mode}")
                 } else {
-                    LogUtils.i("MaxRangeFailsafe", "MAX RANGE: ${distance}m >= threshold ${actionThreshold}m (FENCE_RADIUS ${radius}m, ${MAX_RANGE_ACTION_MARGIN_M}m margin; projected overshoot ${stoppingDistance}m at ${state.groundspeed}m/s) — triggering $announced, mode=${state.mode}")
+                    LogUtils.i("MaxRangeFailsafe", "MAX RANGE: ${distance}m >= threshold ${actionThreshold}m (FENCE_RADIUS ${radius}m, applied FENCE_MARGIN ${actionMargin}m; projected overshoot ${stoppingDistance}m at ${state.groundspeed}m/s) — triggering $announced, mode=${state.mode}")
                 }
 
                 ttsManager?.speak("Max range reached. Activating $announced.")
@@ -2030,24 +2101,24 @@ class SharedViewModel : ViewModel() {
                 if (!backstopRefire) {
                     addNotification(
                         Notification(
-                            message = "⛔ MAX RANGE: ${String.format(Locale.US, "%.0f", distance)}m of ${String.format(Locale.US, "%.0f", radius)}m limit — activating $announced",
+                            message = "⛔ MAX RANGE: ${String.format(Locale.US, "%.1f", distance)}m reached ${String.format(Locale.US, "%.1f", actionThreshold)}m action point (radius ${String.format(Locale.US, "%.1f", radius)}m, margin ${String.format(Locale.US, "%.1f", actionMargin)}m) — activating $announced",
                             type = NotificationType.ERROR
                         )
                     )
                 }
                 showFailsafePopup("Max Range")
 
-                viewModelScope.launch {
+                maxRangeActionJob = viewModelScope.launch {
                     if (targetMode == null) {
                         LogUtils.i("MaxRangeFailsafe", "FENCE_ACTION=Report Only — alerting the pilot, taking no mode action")
                     } else {
-                        executeFailsafeModeChange("MaxRangeFailsafe", targetMode, targetModeName)
+                        executeFenceLimitAction("MaxRangeFailsafe", fenceAction)
                     }
                     try {
                         WebSocketManager.getInstance().sendMissionEvent(
                             eventType = "MAX_RANGE",
                             eventStatus = "CRITICAL",
-                            description = "Range ${String.format(Locale.US, "%.1f", distance)}m reached limit ${String.format(Locale.US, "%.1f", radius)}m - $targetModeName activated"
+                            description = "Range ${String.format(Locale.US, "%.1f", distance)}m reached action point ${String.format(Locale.US, "%.1f", actionThreshold)}m (radius ${String.format(Locale.US, "%.1f", radius)}m, margin ${String.format(Locale.US, "%.1f", actionMargin)}m) - $targetModeName activated"
                         )
                     } catch (e: Exception) {
                         LogUtils.e("MaxRangeFailsafe", "Failed to send max range event", e)
@@ -2075,6 +2146,21 @@ class SharedViewModel : ViewModel() {
         }
     }
 
+    /** Follow Copter's configured fallback order, only advancing when a mode is refused. */
+    private suspend fun executeFenceLimitAction(tag: String, action: FenceAction) {
+        for (mode in LimitFailsafePolicy.actionModes(action)) {
+            if (!_telemetryState.value.connected || !_telemetryState.value.armed) return
+            if (repo?.changeMode(mode) == true) return
+            LogUtils.w(tag, "Fence action mode $mode refused; trying configured fallback")
+        }
+        if (action != FenceAction.REPORT_ONLY) {
+            addNotification(Notification(
+                message = "⚠️ Could not activate ${action.pilotLabel} or its fallback. Take control.",
+                type = NotificationType.ERROR
+            ))
+        }
+    }
+
     /**
      * How far the drone will keep travelling outward after RTL is commanded, in metres.
      *
@@ -2086,13 +2172,9 @@ class SharedViewModel : ViewModel() {
      * clamped to [[MAX_RANGE_MIN_STOPPING_M], [MAX_RANGE_MAX_STOPPING_M]]. At 8 m/s that is
      * 8·1.4 + 64/4 = 11.2 + 16 ≈ 27 m.
      *
-     * This used to BE the action margin: the trigger sat this far inside the radius so the
-     * vehicle stopped on the line instead of past it. That is no longer what it is for. The
-     * operator's requirement is that RTL is commanded on the limit itself, so the trigger is
-     * now the fixed [MAX_RANGE_ACTION_MARGIN_M] and this number is what the drone is expected
-     * to OVERSHOOT by — it sizes the warning lead (so the pilot is told early enough to slow
-     * down themselves, they being the only brake left) and it is logged on every trigger so a
-     * breach distance can be checked against what was predicted.
+     * This estimate sizes the approach warning only. The action point is independently
+     * set to FENCE_RADIUS minus the confirmed FENCE_MARGIN. The stopping distance can
+     * exceed that margin, so commanding an action there does not guarantee containment.
      *
      * positionAgeMs adds the distance already flown since the fix being judged was measured,
      * so the estimate grows when the link degrades rather than silently under-budgeting.
@@ -2734,17 +2816,8 @@ class SharedViewModel : ViewModel() {
         return prefs.getBoolean("max_altitude_enabled", true)
     }
 
-    /** Configured altitude ceiling in metres AGL — mirrors the FC's FENCE_ALT_MAX. */
-    private fun getMaxAltitude(context: Context): Float {
-        val prefs = context.getSharedPreferences("failsafe_options", Context.MODE_PRIVATE)
-        return prefs.getFloat("max_altitude", DEFAULT_MAX_ALTITUDE_M)
-    }
-
-    /** What the GCS does when the ceiling is reached: HOVER (BRAKE) / RTL / LAND. */
-    private fun getMaxAltitudeAction(context: Context): String {
-        val prefs = context.getSharedPreferences("failsafe_options", Context.MODE_PRIVATE)
-        return prefs.getString("max_altitude_action", "HOVER") ?: "HOVER"
-    }
+    /** Confirmed altitude ceiling in metres above home, from this vehicle. */
+    private fun getMaxAltitude(): Float = _fcAltitudeMax.value ?: 0f
 
     /**
      * The altitude ceiling other components should respect (geofence upload, mission
@@ -2753,7 +2826,7 @@ class SharedViewModel : ViewModel() {
     fun getAltitudeCeiling(): Float? {
         val context = GCSApplication.getInstance() ?: return null
         if (!isAltitudeFailsafeEnabled(context)) return null
-        return getMaxAltitude(context).takeIf { it > 0f }
+        return getMaxAltitude().takeIf { it > 0f }
     }
 
     /**
@@ -2778,7 +2851,7 @@ class SharedViewModel : ViewModel() {
      *
      * Kept as a named constant rather than deleted: every conversion between "the pilot's
      * ceiling" and "FENCE_ALT_MAX" still goes through it (getFcAltitudeFenceMax,
-     * pushAltitudeCeilingToFc, adoptAltitudeCeilingFromFc, OptionsViewModel.loadFromDrone), so
+     * applyAltitudeCeilingToFc, adoptAltitudeCeilingFromFc, OptionsViewModel.loadFromDrone), so
      * restoring a bias is a one-line change and those round trips stay symmetrical.
      */
     val FC_ALT_FENCE_SAFETY_OFFSET_M = 0.0f
@@ -3608,11 +3681,13 @@ class SharedViewModel : ViewModel() {
      */
     suspend fun readParameter(paramId: String, timeoutMs: Long = 3000L): Float? {
         val repository = repo
-        if (repository == null) {
+        val generation = failsafeConnectionGeneration
+        if (repository == null || !isConnected.value) {
             LogUtils.e("OptionsVM", "Cannot read $paramId — not connected to drone")
             return null
         }
         return paramOpMutex.withLock {
+            if (!isConnected.value || generation != failsafeConnectionGeneration) return@withLock null
             try {
                 val request = com.divpundir.mavlink.definitions.common.ParamRequestRead(
                     targetSystem = repository.fcuSystemId,
@@ -3655,7 +3730,7 @@ class SharedViewModel : ViewModel() {
                 } else {
                     LogUtils.e("OptionsVM", "⏱ Timeout reading $paramId after ${timeoutMs}ms")
                 }
-                reply?.paramValue
+                reply?.paramValue?.takeIf { it.isFinite() && repo === repository && isConnected.value && generation == failsafeConnectionGeneration }
             } catch (e: kotlinx.coroutines.CancellationException) {
                 throw e
             } catch (e: Exception) {
@@ -3682,7 +3757,10 @@ class SharedViewModel : ViewModel() {
      */
     suspend fun setParameter(paramId: String, value: Float, timeoutMs: Long = 3000L): com.divpundir.mavlink.definitions.common.ParamValue? {
         val repository = repo ?: return null
+        val generation = failsafeConnectionGeneration
+        if (!isConnected.value) return null
         return paramOpMutex.withLock {
+            if (!isConnected.value || generation != failsafeConnectionGeneration) return@withLock null
             try {
                 LogUtils.d("RCCalVM", "📤 Setting parameter: $paramId = $value")
 
@@ -3733,7 +3811,7 @@ class SharedViewModel : ViewModel() {
                         if (matched == null && mismatched != null) {
                             LogUtils.w("RCCalVM", "⚠ $paramId: wrote $value but FC reports ${mismatched.paramValue}")
                         }
-                        matched ?: mismatched
+                        (matched ?: mismatched)?.takeIf { isConnected.value && generation == failsafeConnectionGeneration && repo === repository }
                     } finally {
                         resender.cancel()
                         replies.cancel()
@@ -4913,13 +4991,8 @@ class SharedViewModel : ViewModel() {
             // the GCS never writes them (see configureFenceParameters).
             val config = FenceConfiguration(
                 zones = listOf(FenceZone.Polygon(points = polygon, isInclusion = true)),
-                // The FC's alt fence is biased slightly BELOW the pilot's ceiling, because
-                // ArduPilot arrests the climb after detecting the breach and coasts past the
-                // limit. See getFcAltitudeFenceMax().
-                altitudeMax = getFcAltitudeFenceMax()
-                    ?: (DEFAULT_MAX_ALTITUDE_M - FC_ALT_FENCE_SAFETY_OFFSET_M),
-                // The range limit is enforced GCS-side (handleMaxRangeFailsafe), so the
-                // upload does not touch FENCE_RADIUS or the FENCE_TYPE circle bit.
+                // Polygon upload does not edit altitude, range, action, margin or RTL settings.
+
             )
 
             val uploadResult = repo?.uploadGeofence(config) ?: false
@@ -7671,6 +7744,11 @@ class SharedViewModel : ViewModel() {
     private val _fenceRadiusMeters = MutableStateFlow<Float?>(null)
     val fenceRadiusMeters: StateFlow<Float?> = _fenceRadiusMeters.asStateFlow()
 
+    private val _fcAltitudeMax = MutableStateFlow<Float?>(null)
+    val fcAltitudeMax: StateFlow<Float?> = _fcAltitudeMax.asStateFlow()
+    private val _fenceEnable = MutableStateFlow<Int?>(null)
+    val fenceEnable: StateFlow<Int?> = _fenceEnable.asStateFlow()
+
     /** FENCE_TYPE bitmask as read from the FC. */
     private val _fenceTypeBits = MutableStateFlow<Int?>(null)
     val fenceTypeBits: StateFlow<Int?> = _fenceTypeBits.asStateFlow()
@@ -7686,7 +7764,7 @@ class SharedViewModel : ViewModel() {
      * UI happens to be collecting.
      */
     val rangeFenceArmed: StateFlow<Boolean> = _fenceRadiusMeters
-        .map { it != null && it > 0f }
+        .map { LimitFailsafePolicy.validLimit(it) }
         .stateIn(viewModelScope, SharingStarted.Eagerly, false)
 
     // Current fence configuration uploaded to FC
@@ -7739,10 +7817,11 @@ class SharedViewModel : ViewModel() {
                 ttsManager?.announceConnectionStatus(connected)
                 LogUtils.d("SharedVM", "Connection status changed: ${if (connected) "Connected" else "Disconnected"}")
 
+                failsafeConnectionGeneration++
                 if (connected && repo != null) {
                     // Start fence monitoring when connected (repo will be available)
                     startFenceStatusMonitoring()
-                    // Auto-sync failsafe options to drone on connect
+                    // Read failsafe options from the drone on connect
                     syncFailsafeOptionsOnConnect()
                     // Check ARMING_CHECK safety param for targeted accounts
                     checkArmingCheckOnConnect()
@@ -7762,6 +7841,14 @@ class SharedViewModel : ViewModel() {
                     // lost, and the next connection may be a different airframe entirely —
                     // reporting the previous drone's fence action in the pre-arm popup, or
                     // drawing its range ring, would be worse than reporting nothing.
+                    altitudeLimitActionJob?.cancel()
+                    maxRangeActionJob?.cancel()
+                    connectSyncJob?.cancel()
+                    connectSyncJob = null
+                    _fcAltitudeMax.value = null
+                    _fenceEnable.value = null
+                    altitudeLimitActionTriggered = false
+                    maxRangeActionTriggered = false
                     _fenceAction.value = null
                     _fenceMargin.value = null
                     _fenceRadiusMeters.value = null
@@ -7786,6 +7873,8 @@ class SharedViewModel : ViewModel() {
     // The connect-time failsafe/fence sync, and the coroutine that raises the pre-arm popup.
     // The popup waits on the sync so it reports what was actually read from this vehicle.
     private var connectSyncJob: Job? = null
+    private var failsafeConnectionGeneration = 0L
+    val failsafeSessionId: Long get() = failsafeConnectionGeneration
     private var preflightPopupJob: Job? = null
 
     /**
@@ -7812,7 +7901,7 @@ class SharedViewModel : ViewModel() {
      *
      * Voltage thresholds and the battery failsafe actions (BATT_FS_LOW_ACT / BATT_FS_CRT_ACT)
      * are READ from the FC and cached — never written here; the FC is the source of truth. The
-     * only thing this may push is the altitude fence, when the pilot has explicitly set a ceiling.
+     * connection path never writes altitude/fence/RTL parameters or deletes stored fence geometry.
      */
     private fun syncFailsafeOptionsOnConnect() {
         // One sync at a time. A connection flap used to start a second sync while the first was
@@ -7823,7 +7912,7 @@ class SharedViewModel : ViewModel() {
                 val context = GCSApplication.getInstance() ?: return@launch
                 val prefs = context.getSharedPreferences("failsafe_options", Context.MODE_PRIVATE)
 
-                LogUtils.i("OptionsSync", "Syncing failsafe options with drone on connect...")
+                LogUtils.i("OptionsSync", "Reading failsafe options from drone on connect...")
 
                 // Small delay to let the connection and the parameter link stabilize before
                 // the first reads.
@@ -7846,24 +7935,10 @@ class SharedViewModel : ViewModel() {
                 // GCS enforces. Same principle as the voltage thresholds below: connecting
                 // to a vehicle must not change what that vehicle is configured to do. The
                 // pilot's Options value reaches the FC only when they press Update.
-                adoptAltitudeCeilingFromFc(prefs)
+                adoptAltitudeCeilingFromFc()
 
-                // ═══ RTL_ALT, kept under the ceiling ═══
-                // Must run AFTER the ceiling sync: on a first connect that seeds the ceiling
-                // from the FC, the prefs value this reads is only correct once that has run.
-                syncRtlAltOnConnect(prefs)
-
-                // ═══ Fence parameters (FENCE_ACTION / MARGIN / RADIUS / TYPE) ═══
-                // Reads what the operator has actually configured, and arms the
-                // home-centred range cylinder. Runs here so it shares the same
-                // post-mutex, link-settled window as the ceiling sync.
-                syncFenceParametersOnConnect()
-
-                // ═══ Hand the altitude ceiling to the FC ═══
-                // Must run AFTER syncFenceParametersOnConnect (which caches FENCE_TYPE) and
-                // AFTER adoptAltitudeCeilingFromFc (which reads FENCE_ALT_MAX), so the fence
-                // goes live already pointing at the limit the vehicle is configured with.
-                armFcAltitudeFence()
+                // Read fence settings without reconfiguring the vehicle or clearing its polygons.
+                refreshFenceParameters()
 
                 // ═══ Voltage thresholds: THE FC IS THE SOURCE OF TRUTH ═══
                 // On connect the GCS only READS BATT_LOW_VOLT / BATT_CRT_VOLT and caches
@@ -7887,7 +7962,7 @@ class SharedViewModel : ViewModel() {
                 failures.addAll(readFailsafeActionsFromFc(prefs))
 
                 if (failures.isEmpty()) {
-                    LogUtils.i("OptionsSync", "All failsafe options synced to drone ✓")
+                    LogUtils.i("OptionsSync", "Failsafe options read from drone ✓")
                 } else {
                     LogUtils.w("OptionsSync", "Failed to sync: ${failures.joinToString()}")
                 }
@@ -8002,536 +8077,87 @@ class SharedViewModel : ViewModel() {
         return failures
     }
 
-    /**
-     * Adopt the altitude ceiling FROM the flight controller's FENCE_ALT_MAX on connect.
-     *
-     * THE FC IS THE SOURCE OF TRUTH for the ceiling, exactly as it already is for
-     * BATT_LOW_VOLT / BATT_CRT_VOLT (see [readFailsafeVoltagesFromFc]). Whatever
-     * FENCE_ALT_MAX reads back is the ceiling the GCS enforces, displays, and derives
-     * RTL_ALT from.
-     *
-     * This used to PUSH instead: if a "max_altitude" pref existed it was written down to the
-     * FC on every connect, and the FC was only read on a first-ever connect. That meant a
-     * ceiling set once on one drone followed the tablet onto the next drone and silently
-     * overwrote its configured limit. Reading instead means connecting to a vehicle never
-     * changes what that vehicle is configured to do.
-     *
-     * The pilot's Options value is still authoritative when they press Update — that path
-     * goes through [pushAltitudeCeilingToFc], which is the ONLY writer of FENCE_ALT_MAX.
-     *
-     * NOTE: deliberately does NOT touch FENCE_ENABLE or FENCE_TYPE; [armFcAltitudeFence]
-     * owns those.
-     */
-    private suspend fun adoptAltitudeCeilingFromFc(prefs: android.content.SharedPreferences) {
-        try {
-            if (!prefs.getBoolean("max_altitude_enabled", true)) {
-                LogUtils.i("OptionsSync", "Altitude ceiling failsafe disabled — skipping FENCE_ALT_MAX read")
-                return
-            }
-
-            val fcValue = readParameter("FENCE_ALT_MAX", timeoutMs = 4000L)
-            if (fcValue != null && fcValue > 0f) {
-                // FENCE_ALT_MAX carries the safety offset (see getFcAltitudeFenceMax), so add
-                // it back to recover the ceiling the pilot actually means. Without this the
-                // displayed/enforced ceiling would sit a metre low, and would creep down again
-                // on every reconnect.
-                val ceiling = fcValue + FC_ALT_FENCE_SAFETY_OFFSET_M
-                prefs.edit().putFloat("max_altitude", ceiling).apply()
-                LogUtils.i("OptionsSync", "✓ Altitude ceiling adopted from FC: FENCE_ALT_MAX = ${fcValue}m → ceiling ${ceiling}m")
-            } else {
-                // Leave whatever is cached rather than inventing a ceiling: a stale pref from
-                // this same airframe is a better guess than a default, and the GCS layers need
-                // *some* limit to enforce. Said out loud — the pilot cannot see this otherwise.
-                val fallback = prefs.getFloat("max_altitude", DEFAULT_MAX_ALTITUDE_M)
-                LogUtils.e("OptionsSync", "✗ Could not read FENCE_ALT_MAX — enforcing the cached ceiling ${fallback}m instead")
-                addNotification(
-                    Notification(
-                        message = "⚠️ Could not read the altitude ceiling (FENCE_ALT_MAX) from the drone — using ${String.format(Locale.US, "%.0f", fallback)} m",
-                        type = NotificationType.WARNING
-                    )
-                )
-            }
-        } catch (e: kotlinx.coroutines.CancellationException) {
-            throw e
-        } catch (e: Exception) {
-            LogUtils.e("OptionsSync", "Error adopting the altitude ceiling from the FC", e)
-        }
-    }
-
-    /**
-     * Write the pilot's altitude ceiling DOWN to the FC's FENCE_ALT_MAX.
-     *
-     * The only writer of FENCE_ALT_MAX, reached from Options → Update via
-     * [applyAltitudeCeilingToFc]. Connect-time sync reads instead — see
-     * [adoptAltitudeCeilingFromFc] for why.
-     */
-    private suspend fun pushAltitudeCeilingToFc(prefs: android.content.SharedPreferences): Boolean {
-        try {
-            if (!prefs.getBoolean("max_altitude_enabled", true)) {
-                LogUtils.i("OptionsSync", "Altitude ceiling failsafe disabled — not writing FENCE_ALT_MAX")
-                return true
-            }
-
-            val ceiling = prefs.getFloat("max_altitude", DEFAULT_MAX_ALTITUDE_M)
-            if (ceiling <= 0f) return true
-            // Biased below the pilot's ceiling so ArduPilot's climb-arrest overshoot lands
-            // under it rather than over. See getFcAltitudeFenceMax().
-            val fcLimit = (ceiling - FC_ALT_FENCE_SAFETY_OFFSET_M).coerceAtLeast(1f)
-            val ack = setParameter("FENCE_ALT_MAX", fcLimit, timeoutMs = 5000L)
-            if (paramAckMatches(ack, fcLimit)) {
-                LogUtils.i("OptionsSync", "✓ FENCE_ALT_MAX = $fcLimit m (ceiling ${ceiling}m less ${FC_ALT_FENCE_SAFETY_OFFSET_M}m overshoot allowance)")
-                return true
-            }
-            LogUtils.e("OptionsSync", "✗ Failed to set FENCE_ALT_MAX (FC reports ${ack?.paramValue})")
-            addNotification(
-                Notification(
-                    message = "⚠️ Could not write the altitude ceiling to the drone",
-                    type = NotificationType.WARNING
-                )
-            )
-            return false
-        } catch (e: kotlinx.coroutines.CancellationException) {
-            throw e
-        } catch (e: Exception) {
-            LogUtils.e("OptionsSync", "Error pushing the altitude ceiling to the FC", e)
-            return false
-        }
-    }
-
-    /**
-     * Keep the FC's RTL_ALT below the altitude ceiling.
-     *
-     * ArduCopter's RTL begins with a climb stage: below RTL_ALT it climbs UP to RTL_ALT
-     * before returning home. With the stock RTL_ALT (1500 cm) on a vehicle whose ceiling is
-     * lower, an RTL triggered AT the ceiling — including the one our own altitude failsafe
-     * commands — drives the drone straight through it. That is the overshoot this sync
-     * exists to remove; [handleAltitudeFailsafe] brakes first as the in-flight backstop for
-     * vehicles this write could not reach.
-     *
-     * Units: RTL_ALT is CENTIMETRES. RTL_ALT=0 means "return at the current altitude", which
-     * is why the written value is floored rather than allowed to reach zero.
-     *
-     * Only ever lowered, never raised: an operator who deliberately set a conservative
-     * RTL_ALT keeps it, on the same read-modify-write principle as FENCE_RADIUS.
-     */
-    private suspend fun syncRtlAltOnConnect(prefs: android.content.SharedPreferences) {
-        try {
-            if (!prefs.getBoolean("max_altitude_enabled", true)) {
-                LogUtils.i("OptionsSync", "Altitude ceiling failsafe disabled — skipping RTL_ALT sync")
-                return
-            }
-
-            val ceiling = prefs.getFloat("max_altitude", DEFAULT_MAX_ALTITUDE_M)
-            if (ceiling <= 0f) return
-
-            // The ceiling is AGL, and so is RTL_ALT — both measured from home.
-            val desiredM = (ceiling - RTL_ALT_BELOW_CEILING_M).coerceAtLeast(RTL_ALT_MIN_M)
-
-            if (desiredM >= ceiling) {
-                // Only reachable with a ceiling at or under the floor, where no RTL altitude
-                // can be both legal and sane. Say so — RTL is not a safe breach action here.
-                LogUtils.e("OptionsSync", "✗ Ceiling ${ceiling}m is too low for a safe RTL_ALT (floor ${RTL_ALT_MIN_M}m) — RTL will breach it")
-                addNotification(
-                    Notification(
-                        message = "⚠️ Altitude ceiling ${String.format(Locale.US, "%.0f", ceiling)}m is too low for RTL. Set the breach action to Loiter or Land.",
-                        type = NotificationType.WARNING
-                    )
-                )
-                return
-            }
-
-            val currentCm = readParameter("RTL_ALT", timeoutMs = 4000L)
-            if (currentCm == null) {
-                LogUtils.w("OptionsSync", "Could not read RTL_ALT — cannot confirm RTL stays under the ${ceiling}m ceiling")
-                return
-            }
-
-            val currentM = currentCm / 100f
-            if (currentM <= desiredM) {
-                LogUtils.i("OptionsSync", "RTL_ALT = ${currentM}m already clears the ${ceiling}m ceiling — left as configured")
-                return
-            }
-
-            val desiredCm = desiredM * 100f
-            if (setParameter("RTL_ALT", desiredCm) != null) {
-                LogUtils.i("OptionsSync", "✓ RTL_ALT lowered ${currentM}m → ${desiredM}m (${RTL_ALT_BELOW_CEILING_M}m under the ${ceiling}m ceiling)")
-                // Said out loud, not just logged. An operator who set RTL_ALT deliberately in
-                // the parameter list and then finds the drone returning lower has every
-                // reason to conclude "the RTL altitude isn't being taken" — which is exactly
-                // the report this came from. It IS being overridden, on purpose, and the
-                // override is only visible if we say so.
-                addNotification(
-                    Notification(
-                        message = "RTL altitude lowered to ${String.format(Locale.US, "%.0f", desiredM)}m " +
-                            "so an RTL stays under the ${String.format(Locale.US, "%.0f", ceiling)}m ceiling " +
-                            "(was ${String.format(Locale.US, "%.0f", currentM)}m)",
-                        type = NotificationType.INFO
-                    )
-                )
-            } else {
-                LogUtils.e("OptionsSync", "✗ Failed to set RTL_ALT — RTL may climb through the ${ceiling}m ceiling")
-                addNotification(
-                    Notification(
-                        message = "⚠️ Could not lower RTL_ALT below the altitude ceiling — an RTL may exceed it",
-                        type = NotificationType.WARNING
-                    )
-                )
-            }
-        } catch (e: kotlinx.coroutines.CancellationException) {
-            throw e
-        } catch (e: Exception) {
-            LogUtils.e("OptionsSync", "Error syncing RTL_ALT", e)
-        }
-    }
-
-    /**
-     * Read the vehicle's fence configuration, and arm the home-centred range cylinder.
-     *
-     * FENCE_ACTION and FENCE_MARGIN are READ ONLY — never written, on any path. DGCA
-     * requires the drone to act on the parameters actually set on it, so whatever the
-     * operator configured is what happens on a breach; the GCS's job is to report it
-     * faithfully (breach announcement, pre-arm summary) rather than to impose a default.
-     * Previously every fence upload stamped FENCE_ACTION=4 and FENCE_MARGIN=3 onto the FC,
-     * silently reverting the operator's settings.
-     *
-     * FENCE_RADIUS / FENCE_TYPE are different: the 300m range limit is a product requirement,
-     * so we arm it here. Both writes are conservative — the radius is only written when the
-     * FC's value is missing or LARGER than our limit (never widening a stricter setting an
-     * operator chose), and FENCE_TYPE is read-modify-written so the circle bit is ORed in
-     * without disturbing the altitude or polygon bits.
-     */
-    private suspend fun syncFenceParametersOnConnect() {
-        try {
-            val repository = repo ?: return
-
-            // --- Operator-owned: read and cache only ---
-            val action = repository.readFenceParameter("FENCE_ACTION")
-            _fenceAction.value = FenceAction.fromParam(action)
-            if (action != null && _fenceAction.value == null) {
-                LogUtils.w("FenceSync", "FENCE_ACTION=$action is not a recognised ArduPilot action")
-            }
-            LogUtils.i("FenceSync", "FENCE_ACTION = $action (${_fenceAction.value?.pilotLabel ?: "unknown"}) — operator-owned, not modified")
-
-            // The altitude limit's escalation reads FENCE_ACTION, so check here — while the
-            // value is fresh and the vehicle is still on the ground — that it matches what
-            // the pilot selected in Options.
-            warnIfLimitActionMismatch()
-
-            _fenceMargin.value = repository.readFenceParameter("FENCE_MARGIN")
-            LogUtils.i("FenceSync", "FENCE_MARGIN = ${_fenceMargin.value} m — operator-owned, not modified")
-
-            // --- Range cylinder radius: operator-owned, read only ---
-            // The GCS used to clamp this to MAX_RANGE_METERS, which silently reverted any
-            // radius a pilot deliberately configured. Same DGCA reasoning as FENCE_ACTION:
-            // the drone flies the limit that is actually set on it, and the GCS reports it.
-            _fenceRadiusMeters.value = repository.readFenceParameter("FENCE_RADIUS")
-            LogUtils.i("FenceSync", "FENCE_RADIUS = ${_fenceRadiusMeters.value} m — operator-owned, not modified")
-
-            // FENCE_TYPE: read only, for display.
-            //
-            // The GCS no longer arms the FC's home-centred cylinder. Doing so proved
-            // unreliable: AC_Fence::update() rebuilds its live _enabled_fences mask only when
-            // FENCE_ENABLE *changes value*, so a FENCE_TYPE written to an already-enabled
-            // fence updated the parameter — and everything the pilot could see — while the
-            // circle fence was never actually evaluated. The drone flew past 1000m in Loiter
-            // with no breach. Rather than depend on a 0→1 bounce landing correctly on every
-            // vehicle, the range limit is enforced GCS-side by handleMaxRangeFailsafe, the
-            // same way the altitude ceiling is. The limit and the action still come from the
-            // vehicle's own FENCE_RADIUS / FENCE_ACTION.
-            _fenceTypeBits.value = repository.readFenceParameter("FENCE_TYPE")?.toInt()
-            LogUtils.i("FenceSync", "FENCE_TYPE = ${_fenceTypeBits.value} — operator-owned, not modified")
-
-            // The GCS enforces the range limit, so what matters is that we know the radius,
-            // not that the FC has its cylinder armed. Say so plainly if we could not read it:
-            // without FENCE_RADIUS there is no limit to enforce and the pilot must know.
-            if (_fenceRadiusMeters.value == null || _fenceRadiusMeters.value!! <= 0f) {
-                LogUtils.e("FenceSync", "Max range NOT enforced: FENCE_RADIUS unreadable or zero")
-                addNotification(
-                    Notification(
-                        message = "⚠️ Max range not enforced — could not read FENCE_RADIUS from the drone",
-                        type = NotificationType.WARNING
-                    )
-                )
-            } else {
-                LogUtils.i("FenceSync", "Max range enforced by GCS at ${_fenceRadiusMeters.value}m (FENCE_RADIUS), action ${_fenceAction.value?.pilotLabel ?: "RTL (default)"}")
-            }
-
-            // --- Clear any polygon left on the FC from a previous session ---
-            //
-            // The FC reports fence health for ALL fence types through a single SYS_STATUS
-            // bit, so we cannot tell a cylinder breach from a polygon breach. Previously the
-            // breach path was ignored entirely unless the GCS polygon toggle was on, which
-            // masked stale polygons; now that the cylinder is always armed that gate is
-            // always open, and a leftover polygon reports a breach the moment the drone
-            // powers up outside it — announced as "FC activated RTL" while the drone sits
-            // well inside the range fence.
-            //
-            // If the GCS is not flying a polygon this session, the FC must not be holding
-            // one either. FENCE_TOTAL is the vertex count; >0 with our toggle off is stale.
-            if (!_geofenceEnabled.value) {
-                val fenceTotal = repository.readFenceParameter("FENCE_TOTAL")?.toInt() ?: 0
-                if (fenceTotal > 0) {
-                    LogUtils.w("FenceSync", "Stale polygon on FC (FENCE_TOTAL=$fenceTotal) with geofence off — clearing")
-                    // Items only — must NOT disable the fence, or the range cylinder goes with it.
-                    if (repository.clearFenceItemsOnly()) {
-                        LogUtils.i("FenceSync", "✓ Stale polygon cleared")
-                    } else {
-                        LogUtils.e("FenceSync", "✗ Could not clear stale polygon — breach reports may be spurious")
-                    }
-                }
-            }
-        } catch (e: kotlinx.coroutines.CancellationException) {
-            throw e
-        } catch (e: Exception) {
-            LogUtils.e("FenceSync", "Error syncing fence parameters", e)
-        }
-    }
-
-    /**
-     * Warn, on the ground, when "Action at Limit" and the vehicle's FENCE_ACTION disagree.
-     *
-     * FENCE_ACTION is what actually runs at the limit ([runAltitudeLimitAction]); the Options
-     * dropdown only decides WHETHER to escalate. So a pilot who selects RTL on a vehicle
-     * whose FENCE_ACTION is Brake gets a braked hold, not a return home — and connect time is
-     * the only cheap place to discover that. Finding out mid-flight, or in front of someone
-     * being shown the behaviour, is the failure this exists to prevent.
-     *
-     * Reports only; it never writes FENCE_ACTION. That parameter stays the operator's.
-     */
-    private fun warnIfLimitActionMismatch() {
-        val context = GCSApplication.getInstance() ?: return
-        if (!isAltitudeFailsafeEnabled(context)) return
-
-        val selected = getMaxAltitudeAction(context)
-        // Hover asks for no escalation at all, so nothing can disagree with it.
-        if (selected.equals("HOVER", ignoreCase = true)) return
-
-        val fenceAction = _fenceAction.value
-        if (fenceAction == null) {
-            // Nothing to compare against. The dropdown becomes the fallback, which IS the
-            // documented behaviour — say so rather than implying the two agree.
-            LogUtils.w("FenceSync", "'Action at Limit' is $selected but FENCE_ACTION could not be read — the dropdown will be used as the fallback")
-            return
-        }
-
-        val agrees = when (selected.uppercase(Locale.US)) {
-            "RTL" -> fenceAction == FenceAction.RTL ||
-                fenceAction == FenceAction.SMART_RTL ||
-                fenceAction == FenceAction.SMART_RTL_LAND
-            "LAND" -> fenceAction == FenceAction.ALWAYS_LAND
-            else -> true
-        }
-
-        if (agrees) {
-            LogUtils.i("FenceSync", "'Action at Limit' $selected agrees with FENCE_ACTION=${fenceAction.pilotLabel}")
-            return
-        }
-
-        LogUtils.w("FenceSync", "⚠️ 'Action at Limit' is $selected but the drone's FENCE_ACTION is ${fenceAction.pilotLabel} — the drone will ${fenceAction.pilotLabel} at the limit")
-        addNotification(
-            Notification(
-                message = "⚠️ Action at Limit is set to $selected, but this drone's FENCE_ACTION is " +
-                    "${fenceAction.pilotLabel}. At the altitude limit it will ${fenceAction.pilotLabel}, " +
-                    "not $selected. Change FENCE_ACTION on the drone to match.",
+    /** Adopt the current vehicle's exact FENCE_ALT_MAX; connection never writes it. */
+    private suspend fun adoptAltitudeCeilingFromFc() {
+        val value = readParameter("FENCE_ALT_MAX", timeoutMs = 4000L)
+        if (!isConnected.value) return
+        recordAltitudeCeilingFromFc(value)
+        if (_fcAltitudeMax.value == null) {
+            addNotification(Notification(
+                message = "⚠️ Could not read FENCE_ALT_MAX. GCS altitude monitoring is unavailable; refresh Options.",
                 type = NotificationType.WARNING
-            )
-        )
-    }
-
-    /**
-     * Hand enforcement of the altitude ceiling to the flight controller.
-     *
-     * Until now the ceiling was enforced GCS-side only ([handleAltitudeWall] /
-     * [handleAltitudeFailsafe]) and FENCE_ALT_MAX was written as a "second layer" that was
-     * never actually armed: the GCS only ever set FENCE_ENABLE=1 inside the geofence-polygon
-     * upload, so on any flight without a polygon the FC ignored FENCE_ALT_MAX completely.
-     * That left a ~5Hz link as the sole thing holding the limit, which is how a 48 m ceiling
-     * produced a 52 m peak - the GCS could not see and react fast enough.
-     *
-     * The FC evaluates its fences at 400Hz with no link in the path, so it is the only layer
-     * that can actually hold the line. The GCS wall stays in front of it as the predictive
-     * layer (it stops the climb BEFORE the limit rather than recovering after), and the FC
-     * fence sits underneath, biased [FC_ALT_FENCE_SAFETY_OFFSET_M] lower still.
-     *
-     * Three things this is careful about:
-     *
-     *  1. THE POLYGON BIT. Enabling a fence whose FENCE_TYPE claims an inclusion polygon
-     *     while the FC holds no polygon can be refused by ArduPilot's fence pre-arm check.
-     *     So when FENCE_TOTAL says there is no polygon loaded, bit 2 is cleared. The geofence
-     *     upload ORs it straight back in (configureFenceParameters) when a real fence is sent.
-     *  2. THE ENABLE BOUNCE. AC_Fence rebuilds its live _enabled_fences mask only when
-     *     FENCE_ENABLE *changes value*. A FENCE_TYPE written to an already-enabled fence
-     *     updates the parameter - and everything the pilot can see - while the new bit is
-     *     never evaluated. So a type change on an enabled fence is followed by a 1-0-1 bounce.
-     *  3. ARMED VEHICLES. Never reconfigure a fence on an aircraft that is flying. If this
-     *     runs on a reconnect mid-flight it reports and leaves the fence exactly as it is.
-     *
-     * FENCE_ACTION and FENCE_MARGIN remain untouched, as everywhere else: what the FC does on
-     * the breach is still the operator's parameter, which is what DGCA requires.
-     */
-    private suspend fun armFcAltitudeFence() {
-        val repository = repo ?: return
-        try {
-            val context = GCSApplication.getInstance() ?: return
-
-            if (!isAltitudeFailsafeEnabled(context)) {
-                // Deliberately does NOT set FENCE_ENABLE=0. Switching a safety fence off is
-                // not something a GCS settings toggle should do behind the pilot's back; the
-                // toggle governs the GCS layers, and the FC keeps whatever it was configured
-                // with. Said out loud in the log so the behaviour is not a surprise.
-                LogUtils.i("FenceSync", "Altitude ceiling failsafe disabled - leaving FENCE_ENABLE/FENCE_TYPE as configured on the FC")
-                return
-            }
-
-            val fcLimit = getFcAltitudeFenceMax()
-            if (fcLimit == null) {
-                LogUtils.w("FenceSync", "No altitude ceiling configured - not arming the FC altitude fence")
-                return
-            }
-
-            if (_telemetryState.value.armed) {
-                LogUtils.w("FenceSync", "Vehicle is ARMED - not reconfiguring the fence in flight (FENCE_TYPE=${_fenceTypeBits.value})")
-                return
-            }
-
-            // FENCE_TYPE was just read by syncFenceParametersOnConnect; re-read only if that
-            // failed. Acting on a guess here would either disable a fence the operator wanted
-            // or enable one against a bitmask we invented.
-            val currentType = _fenceTypeBits.value
-                ?: repository.readFenceParameter("FENCE_TYPE")?.toInt()
-            if (currentType == null) {
-                LogUtils.e("FenceSync", "✗ Could not read FENCE_TYPE - altitude ceiling stays GCS-only")
-                addNotification(
-                    Notification(
-                        message = "⚠️ Could not read FENCE_TYPE - the drone is not enforcing the altitude ceiling itself",
-                        type = NotificationType.WARNING
-                    )
-                )
-                return
-            }
-
-            val currentEnable = repository.readFenceParameter("FENCE_ENABLE")?.toInt()
-            if (currentEnable == null) {
-                LogUtils.e("FenceSync", "✗ Could not read FENCE_ENABLE - altitude ceiling stays GCS-only")
-                addNotification(
-                    Notification(
-                        message = "⚠️ Could not read FENCE_ENABLE - the drone is not enforcing the altitude ceiling itself",
-                        type = NotificationType.WARNING
-                    )
-                )
-                return
-            }
-
-            // FENCE_TOTAL is the stored polygon vertex count - the same signal
-            // syncFenceParametersOnConnect uses to spot a stale polygon.
-            val fenceTotal = repository.readFenceParameter("FENCE_TOTAL")?.toInt() ?: 0
-            val polygonLoaded = fenceTotal > 0 || _geofenceEnabled.value
-
-            var desiredType = currentType or FENCE_TYPE_ALT_MAX
-            if (!polygonLoaded) {
-                desiredType = desiredType and FENCE_TYPE_POLYGON.inv()
-            }
-            // Same reasoning one bit over: an armed home cylinder with no radius behind it is
-            // a fence ArduPilot cannot evaluate, and a pre-arm refusal the pilot would have to
-            // debug in the field. The circle bit is only ever left set, never added here — if
-            // the operator has a radius configured, arming the cylinder is their call and the
-            // GCS just stops undoing it.
-            val radius = _fenceRadiusMeters.value
-            if (radius == null || radius <= 0f) {
-                if (desiredType and FENCE_TYPE_CIRCLE != 0) {
-                    LogUtils.w("FenceSync", "FENCE_RADIUS is ${radius ?: "unreadable"} — clearing the circle bit so the fence can still arm")
-                }
-                desiredType = desiredType and FENCE_TYPE_CIRCLE.inv()
-            }
-
-            val typeChanged = desiredType != currentType
-            if (typeChanged) {
-                if (!repository.setFenceParameter("FENCE_TYPE", desiredType.toFloat())) {
-                    LogUtils.e("FenceSync", "✗ Failed to write FENCE_TYPE=$desiredType - altitude ceiling stays GCS-only")
-                    addNotification(
-                        Notification(
-                            message = "⚠️ Could not set FENCE_TYPE - the drone is not enforcing the altitude ceiling itself",
-                            type = NotificationType.WARNING
-                        )
-                    )
-                    return
-                }
-                _fenceTypeBits.value = desiredType
-                val polyNote = if (!polygonLoaded) ", polygon bit off: no polygon loaded" else ""
-                LogUtils.i("FenceSync", "✓ FENCE_TYPE $currentType -> $desiredType (alt bit on$polyNote)")
-                delay(200)
-            }
-
-            // See (2) above: a type change only becomes live across an enable transition.
-            if (currentEnable != 0 && typeChanged) {
-                LogUtils.i("FenceSync", "Bouncing FENCE_ENABLE so the new FENCE_TYPE is actually evaluated")
-                repository.setFenceParameter("FENCE_ENABLE", 0f)
-                delay(300)
-            }
-
-            if (currentEnable != 1 || typeChanged) {
-                if (!repository.setFenceParameter("FENCE_ENABLE", 1f)) {
-                    LogUtils.e("FenceSync", "✗ Failed to write FENCE_ENABLE=1 - altitude ceiling stays GCS-only")
-                    addNotification(
-                        Notification(
-                            message = "⚠️ Could not enable the drone's fence - the altitude ceiling is enforced by the tablet only",
-                            type = NotificationType.WARNING
-                        )
-                    )
-                    return
-                }
-                delay(200)
-            }
-
-            // Read back rather than trust the ack: this is the parameter the whole ceiling
-            // now rests on, and "we sent it" is not the same as "it took".
-            val readBack = repository.readFenceParameter("FENCE_ENABLE")?.toInt()
-            if (readBack == 1) {
-                LogUtils.i("FenceSync", "✓ FC altitude fence ARMED: FENCE_ENABLE=1, FENCE_TYPE=$desiredType, FENCE_ALT_MAX=${fcLimit}m")
-            } else {
-                LogUtils.e("FenceSync", "✗ FENCE_ENABLE reads back as $readBack - the FC is NOT enforcing the altitude ceiling")
-                addNotification(
-                    Notification(
-                        message = "⚠️ The drone did not accept the fence - the altitude ceiling is enforced by the tablet only",
-                        type = NotificationType.WARNING
-                    )
-                )
-            }
-        } catch (e: kotlinx.coroutines.CancellationException) {
-            throw e
-        } catch (e: Exception) {
-            LogUtils.e("FenceSync", "Error arming the FC altitude fence", e)
+            ))
         }
     }
 
     /**
-     * Push the pilot's altitude ceiling to the FC right now, outside the connect sequence.
-     *
-     * Called when the ceiling is changed in Options. That path used to write FENCE_ALT_MAX and
-     * nothing else, which left RTL_ALT stranded at whatever the connect-time sync had agreed
-     * with the OLD ceiling: drop the ceiling from 120 m to 48 m mid-session and RTL_ALT stayed
-     * at 110 m, so the breach action - an RTL - began by climbing 60 m through the very limit
-     * it was recovering from. That is the "RTL alt isn't being taken as per set params"
-     * report. All three writes now move together.
-     *
-     * @return whether FENCE_ALT_MAX itself was confirmed by the FC, so the Options screen can say
-     *   so instead of reporting "synced" when the ceiling never reached the vehicle. The RTL_ALT
-     *   and fence-arming steps report their own failures as notifications.
+     * Refresh operator-owned fence parameters. Connection and Settings refresh use this
+     * same read-only path; no enable/type/action/radius/RTL or polygon writes are made.
      */
-    suspend fun applyAltitudeCeilingToFc(): Boolean {
-        val context = GCSApplication.getInstance() ?: return false
-        val prefs = context.getSharedPreferences("failsafe_options", Context.MODE_PRIVATE)
-        try {
-            val ceilingWritten = pushAltitudeCeilingToFc(prefs)
-            syncRtlAltOnConnect(prefs)
-            armFcAltitudeFence()
-            return ceilingWritten
-        } catch (e: kotlinx.coroutines.CancellationException) {
-            throw e
-        } catch (e: Exception) {
-            LogUtils.e("OptionsSync", "Failed to apply the altitude ceiling to the FC", e)
-            return false
+    suspend fun refreshFenceParameters(): List<String> {
+        val generation = failsafeConnectionGeneration
+        val failures = mutableListOf<String>()
+        suspend fun read(name: String): Float? {
+            val value = readParameter(name, timeoutMs = 4000L)
+            if (value == null || !value.isFinite()) failures.add(name)
+            return value?.takeIf { it.isFinite() }
         }
+        val actionValue = read("FENCE_ACTION")
+        val action = FenceAction.fromParam(actionValue)
+        if (actionValue != null && action == null) failures.add("FENCE_ACTION")
+        val margin = read("FENCE_MARGIN")
+        val radius = read("FENCE_RADIUS")?.takeIf { LimitFailsafePolicy.validLimit(it) }
+        if (radius == null && "FENCE_RADIUS" !in failures) failures.add("FENCE_RADIUS")
+        if (radius != null && !LimitFailsafePolicy.validRangeMargin(radius, margin) && "FENCE_MARGIN" !in failures) {
+            failures.add("FENCE_MARGIN")
+        }
+        val type = read("FENCE_TYPE")?.takeIf { it >= 0f && it == it.toInt().toFloat() }?.toInt()
+        val enable = read("FENCE_ENABLE")?.takeIf { it == 0f || it == 1f }?.toInt()
+        val rtlAlt = read("RTL_ALT")
+        if (generation != failsafeConnectionGeneration || !isConnected.value) return listOf("connection changed")
+        _fenceAction.value = action
+        _fenceMargin.value = margin
+        _fenceRadiusMeters.value = radius
+        _fenceTypeBits.value = type
+        _fenceEnable.value = enable
+        if (type == null && "FENCE_TYPE" !in failures) failures.add("FENCE_TYPE")
+        if (enable == null && "FENCE_ENABLE" !in failures) failures.add("FENCE_ENABLE")
+        if (failures.isNotEmpty()) {
+            addNotification(Notification(
+                message = "⚠️ Could not confirm fence settings: ${failures.joinToString()}. " +
+                    "GCS limit actions require a valid limit and FENCE_ACTION." +
+                    (if ("FENCE_MARGIN" in failures) " Invalid or unread FENCE_MARGIN: range action uses the full FENCE_RADIUS." else ""),
+                type = NotificationType.WARNING
+            ))
+        }
+        val ceiling = _fcAltitudeMax.value
+        if (ceiling != null && rtlAlt != null && rtlAlt / 100f > ceiling) {
+            addNotification(Notification(
+                message = "⚠️ RTL_ALT (${rtlAlt / 100f} m) is above FENCE_ALT_MAX ($ceiling m). " +
+                    "Review the drone's RTL configuration; parameters were left unchanged.",
+                type = NotificationType.WARNING
+            ))
+        }
+        return failures
+    }
+
+    /** Publish a confirmed FC altitude; never enforce a previous vehicle's cached ceiling. */
+    fun recordAltitudeCeilingFromFc(value: Float?) {
+        if (!isConnected.value) return
+        _fcAltitudeMax.value = value?.takeIf { LimitFailsafePolicy.validLimit(it) }
+        _fcAltitudeMax.value?.let { ceiling ->
+            GCSApplication.getInstance()?.getSharedPreferences("failsafe_options", Context.MODE_PRIVATE)
+                ?.edit()?.putFloat("max_altitude", ceiling)?.apply()
+        }
+    }
+
+    /** Explicit altitude edit changes only FENCE_ALT_MAX. */
+    suspend fun applyAltitudeCeilingToFc(ceiling: Float): Boolean {
+        if (!LimitFailsafePolicy.validLimit(ceiling)) return false
+        val ack = setParameter("FENCE_ALT_MAX", ceiling, timeoutMs = 5000L)
+        if (!paramAckMatches(ack, ceiling)) return false
+        recordAltitudeCeilingFromFc(ceiling)
+        return true
     }
 
     /**
@@ -8627,14 +8253,23 @@ class SharedViewModel : ViewModel() {
         tankEmptyAction = describeTankEmptyAction(context),
         batteryFailsafeAction = BatteryFsAction.label(getLowVoltLevel2Action(context)),
         lowVoltLevel1Action = BatteryFsAction.label(getLowVoltLevel1Action(context)),
-        // Straight from the vehicle's FENCE_* parameters (see syncFenceParametersOnConnect).
+        // Straight from the vehicle's FENCE_* parameters (see refreshFenceParameters).
         // "Unknown" rather than a plausible-looking default: a pilot must not acknowledge a
         // fence action we merely assumed.
         fenceAction = _fenceAction.value?.pilotLabel ?: "Unknown",
         fenceRadius = _fenceRadiusMeters.value
             ?.let { String.format(Locale.US, "%.0f m", it) } ?: "Unknown",
+        rangeActionDistance = LimitFailsafePolicy.rangeActionThreshold(_fenceRadiusMeters.value, _fenceMargin.value)
+            ?.let { threshold ->
+                String.format(Locale.US, "%.1f m", threshold) +
+                    (if (LimitFailsafePolicy.validRangeMargin(_fenceRadiusMeters.value, _fenceMargin.value)) ""
+                    else " (margin unavailable/invalid; using radius)")
+            } ?: "Unknown",
         fenceMargin = _fenceMargin.value
-            ?.let { String.format(Locale.US, "%.1f m", it) } ?: "Unknown"
+            ?.let { String.format(Locale.US, "%.1f m", it) } ?: "Unknown",
+        maxAltitude = _fcAltitudeMax.value
+            ?.let { String.format(Locale.US, "%.1f m above home", it) } ?: "Unknown",
+        onboardFence = "Enable: ${_fenceEnable.value ?: "Unknown"}, type: ${_fenceTypeBits.value ?: "Unknown"}"
     )
 
     /**

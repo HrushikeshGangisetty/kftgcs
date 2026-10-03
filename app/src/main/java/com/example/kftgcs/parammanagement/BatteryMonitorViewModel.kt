@@ -142,12 +142,53 @@ data class BatteryMonitorState(
     val measuredVoltageLive: Float? = null,    // Battery Voltage Calced
     val measuredCurrentLive: Float? = null,    // Current Calced
 
+    val consumedMahLive: Int? = null,          // FC's mAh counter since boot
+
     // User-entered measurements for calibration (Volts)
     val measuredVoltageInput: String = "",
+
+    // Current calibration by the charger method (no clamp meter needed)
+    val loggedMahInput: String = "",           // mAh the FC counted for the flight
+    val chargedMahInput: String = "",          // mAh the charger put back in
 
     val errorMessage: String? = null,
     val successMessage: String? = null
 ) {
+    /**
+     * Charger-method BATT_AMP_PERVLT:
+     *   newAmpPerVolt = (chargedMah / loggedMah) × currentAmpPerVolt
+     * Consumed mAh is current integrated over time, so a wrong current scale shows up as
+     * the same ratio between what the FC counted and what the charger replaced.
+     * Null unless the flight was big enough to calibrate on and the ratio is plausible —
+     * a typo here would silently wreck every mAh/% reading afterwards.
+     */
+    val calculatedAmpPerVolt: Float?
+        get() {
+            val logged = loggedMahInput.toFloatOrNull() ?: return null
+            val charged = chargedMahInput.toFloatOrNull() ?: return null
+            val apv = loadedAmpPerVolt ?: return null
+            if (logged < MIN_CAL_MAH || charged < MIN_CAL_MAH) return null
+            val ratio = charged / logged
+            if (ratio !in 0.5f..3f) return null
+            return ratio * apv
+        }
+
+    /** Why [calculatedAmpPerVolt] is null despite both fields being filled, else null. */
+    val ampCalRejectReason: String?
+        get() {
+            val logged = loggedMahInput.toFloatOrNull() ?: return null
+            val charged = chargedMahInput.toFloatOrNull() ?: return null
+            if (logged < MIN_CAL_MAH || charged < MIN_CAL_MAH)
+                return "Use a flight of at least $MIN_CAL_MAH mAh — small numbers are mostly sensor offset"
+            if (charged / logged !in 0.5f..3f)
+                return "Charged/logged ratio ${"%.2f".format(charged / logged)} is implausible — check both numbers"
+            return null
+        }
+
+    companion object {
+        const val MIN_CAL_MAH = 3000
+    }
+
     /**
      * Voltage Divider Calced (Mission Planner formula):
      *   newMult = (measuredVoltage / calcedVoltage) × currentMult
@@ -189,7 +230,8 @@ class BatteryMonitorViewModel(
                     it.copy(
                         isDroneConnected = t.connected,
                         measuredVoltageLive = t.voltage,
-                        measuredCurrentLive = t.currentA
+                        measuredCurrentLive = t.currentA,
+                        consumedMahLive = t.consumedMah
                     )
                 }
             }
@@ -310,6 +352,8 @@ class BatteryMonitorViewModel(
                     loadedVoltPin     = confirmed["BATT_VOLT_PIN"]?.toInt()      ?: cur.loadedVoltPin,
                     loadedCurrPin     = confirmed["BATT_CURR_PIN"]?.toInt()      ?: cur.loadedCurrPin,
                     measuredVoltageInput = if (allSucceeded) "" else cur.measuredVoltageInput,
+                    loggedMahInput  = if (allSucceeded) "" else cur.loggedMahInput,
+                    chargedMahInput = if (allSucceeded) "" else cur.chargedMahInput,
                     successMessage = if (allSucceeded)
                         "Saved ${writes.size} parameter(s) to drone"
                     else
@@ -329,6 +373,14 @@ class BatteryMonitorViewModel(
     // ── Update measurement inputs (calibration) ──────────────────────
     fun updateMeasuredVoltageInput(text: String) {
         _state.update { it.copy(measuredVoltageInput = sanitizeDecimalString(text)) }
+    }
+
+    fun updateLoggedMahInput(text: String) {
+        _state.update { it.copy(loggedMahInput = sanitizeDecimalString(text)) }
+    }
+
+    fun updateChargedMahInput(text: String) {
+        _state.update { it.copy(chargedMahInput = sanitizeDecimalString(text)) }
     }
 
     fun clearMessages() {

@@ -8,6 +8,9 @@ import com.divpundir.mavlink.connection.StreamState
 import com.divpundir.mavlink.definitions.common.*
 import com.divpundir.mavlink.definitions.minimal.*
 import com.divpundir.mavlink.definitions.ardupilotmega.MagCalProgress
+import com.divpundir.mavlink.definitions.ardupilotmega.EscTelemetry1To4
+import com.divpundir.mavlink.definitions.ardupilotmega.EscTelemetry5To8
+import com.divpundir.mavlink.definitions.ardupilotmega.EscTelemetry9To12
 import com.divpundir.mavlink.definitions.common.MagCalReport
 import com.example.kftgcs.telemetry.AppScope
 import com.example.kftgcs.telemetry.TelemetryState
@@ -43,6 +46,7 @@ import com.example.kftgcs.auth.AuthResult
 import com.example.kftgcs.utils.LogUtils
 import kotlinx.coroutines.withTimeoutOrNull
 import timber.log.Timber
+import java.util.Locale
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicLong
 
@@ -57,6 +61,7 @@ object MavMode {
     const val LAND: UInt = 9u // Add LAND mode for explicit landing
     const val POSHOLD: UInt = 16u // POSHOLD (Position Hold) - holds position precisely like Hover
     const val BRAKE: UInt = 17u // BRAKE mode - immediately stops all horizontal movement
+    const val SMART_RTL: UInt = 21u
     // Add other modes as needed
 }
 
@@ -179,6 +184,34 @@ private const val MISSION_ITEM_RETRANSMIT_WINDOW_MS = 1200L
  * an over-large burst just moves the loss from "slow" to "dropped", costing another round.
  */
 private const val MISSION_DOWNLOAD_WINDOW = 12
+
+/** Motor High Current: minimum gap between repeat alerts for the same ESC. */
+private const val ESC_ALERT_INTERVAL_MS = 10_000L
+
+/** Motor Health: drop an ESC's reading after this long without an update (stream is 2Hz). */
+private const val ESC_STALE_AFTER_MS = 3_000L
+
+/**
+ * Unpacks one ESC_TELEMETRY_x_TO_y group (4 ESCs, [firstEsc] = 1, 5 or 9). Slots whose
+ * packet count is 0 are ESCs the FC has never heard from and are skipped, so absent
+ * ESCs don't show up as rows of zeros.
+ */
+private fun escReadings(
+    firstEsc: Int,
+    temperature: List<UByte>, voltage: List<UShort>, current: List<UShort>,
+    totalCurrent: List<UShort>, rpm: List<UShort>, count: List<UShort>,
+    now: Long
+): List<EscReading> = (0 until 4).filter { (count.getOrNull(it)?.toInt() ?: 0) > 0 }.map { i ->
+    EscReading(
+        escNumber = firstEsc + i,
+        tempC = temperature.getOrNull(i)?.toInt() ?: 0,
+        voltageV = (voltage.getOrNull(i)?.toInt() ?: 0) / 100f,
+        currentA = (current.getOrNull(i)?.toInt() ?: 0) / 100f,
+        consumedMah = totalCurrent.getOrNull(i)?.toInt() ?: 0,
+        rpm = rpm.getOrNull(i)?.toInt() ?: 0,
+        updatedAtMs = now
+    )
+}
 
 /**
  * Gap between the individual writes of a download burst. NOT a wait for the reply.
@@ -954,6 +987,11 @@ class MavlinkTelemetryRepository(
             // consumes yet; raise this once real per-sector UI is built.
             setMessageRate(330u, 2f) // OBSTACLE_DISTANCE - diagnostic only
 
+            // ESC_TELEMETRY - feeds the Motor High Current alert. ArduPilot maps this one ID to
+            // its whole ESC-telemetry stream and sends every populated group (1-4, 5-8, 9-12)
+            // on each tick, so one request covers all ESCs. ~56 B per group per send.
+            setMessageRate(11030u, 2f) // ESC_TELEMETRY_1_TO_4 (+5_TO_8, 9_TO_12)
+
             // Request AUTOPILOT_VERSION for drone identification
             val autopilotVersionCmd = CommandLong(
                 targetSystem = fcuSystemId,
@@ -1623,14 +1661,20 @@ class MavlinkTelemetryRepository(
                     // position goes stale the moment the link drops — the pilot can flip a switch
                     // while we are not listening. Forget it rather than show a stale "terrain OFF".
                     val dropSwitches = linkDown && current.radarSwitchState != RadarSwitchState()
-                    if (!dropTerrain && !dropProximity && !dropSwitches) {
+                    // An ESC whose group stops arriving (or the whole link) must not keep
+                    // showing its last reading on the Motor Health screen.
+                    val liveEscs = if (linkDown) emptyMap()
+                        else current.escs.filterValues { now - it.updatedAtMs < ESC_STALE_AFTER_MS }
+                    val dropEscs = liveEscs.size != current.escs.size
+                    if (!dropTerrain && !dropProximity && !dropSwitches && !dropEscs) {
                         current
                     } else {
                         current.copy(
                             terrainData = if (dropTerrain) null else current.terrainData,
                             proximityData = if (dropProximity) null else current.proximityData,
                             radarSwitchState =
-                                if (dropSwitches) RadarSwitchState() else current.radarSwitchState
+                                if (dropSwitches) RadarSwitchState() else current.radarSwitchState,
+                            escs = liveEscs
                         )
                     }
                 }
@@ -1811,6 +1855,7 @@ class MavlinkTelemetryRepository(
                         _state.update { s ->
                             s.copy(
                                 currentA = currentA,
+                                consumedMah = b.currentConsumed.takeIf { it >= 0 },
                                 // resolvePackVoltage() arbitrates between this cell-sum and the
                                 // SYS_STATUS fallback; never write the raw sum directly.
                                 voltage = resolved ?: s.voltage,
@@ -2890,6 +2935,62 @@ class MavlinkTelemetryRepository(
                 }
         }
 
+        // ═══ ESC TELEMETRY: MOTOR HEALTH + MOTOR HIGH CURRENT ═══
+        // DroneCAN ESCs (via the CAN hubs) report through ArduPilot's AP_ESC_Telem, which the
+        // FC sends as ESC_TELEMETRY_1_TO_4 / 5_TO_8 / 9_TO_12 — the same data Mission Planner
+        // shows as ESCx_curr. Current is in centi-amps. Array slot i of the 5_TO_8 message is
+        // ESC 5+i, so the ESC number matches Mission Planner's ESCx numbering.
+        // Every reading is also published as TelemetryState.escs for the Motor Health screen.
+        // Re-alerts per ESC every ESC_ALERT_INTERVAL_MS while it stays over the limit.
+        val lastEscAlertMs = LongArray(12)
+        val lastEscTempAlertMs = LongArray(12)
+        scope.launch {
+            mavFrame
+                .filter { state.value.fcuDetected && it.systemId == fcuSystemId }
+                .map { it.message }
+                .collect { msg ->
+                    val now = System.currentTimeMillis()
+                    val readings = when (msg) {
+                        is EscTelemetry1To4 -> escReadings(1, msg.temperature, msg.voltage, msg.current, msg.totalcurrent, msg.rpm, msg.count, now)
+                        is EscTelemetry5To8 -> escReadings(5, msg.temperature, msg.voltage, msg.current, msg.totalcurrent, msg.rpm, msg.count, now)
+                        is EscTelemetry9To12 -> escReadings(9, msg.temperature, msg.voltage, msg.current, msg.totalcurrent, msg.rpm, msg.count, now)
+                        else -> return@collect
+                    }
+                    _state.update { it.copy(escs = it.escs + readings.associateBy { r -> r.escNumber }) }
+
+                    val limitA = sharedViewModel.motorHighCurrentLimitA.value
+                    val limitC = sharedViewModel.motorHighTempLimitC.value
+                    for (r in readings) {
+                        val esc = r.escNumber - 1
+                        // Texts kept under STATUSTEXT's 50-char limit.
+                        val alerts = buildList {
+                            if (limitA > 0f && r.currentA > limitA && now - lastEscAlertMs[esc] >= ESC_ALERT_INTERVAL_MS) {
+                                lastEscAlertMs[esc] = now
+                                add(String.format(Locale.US, "Motor High Current: ESC%d %.1fA > %.1fA", r.escNumber, r.currentA, limitA))
+                            }
+                            if (limitC > 0f && r.tempC > limitC && now - lastEscTempAlertMs[esc] >= ESC_ALERT_INTERVAL_MS) {
+                                lastEscTempAlertMs[esc] = now
+                                add(String.format(Locale.US, "Motor High Temp: ESC%d %dC > %.0fC", r.escNumber, r.tempC, limitC))
+                            }
+                        }
+                        for (text in alerts) {
+                            // Notification → panel + local flight event log (UnifiedFlightTracker).
+                            sharedViewModel.addNotification(Notification(text, NotificationType.WARNING))
+                            // STATUSTEXT → ArduPilot writes GCS STATUSTEXT into its DataFlash
+                            // log (MSG), so the event is in the .bin next to the ESC data.
+                            try {
+                                connection.trySendUnsignedV2(
+                                    gcsSystemId, gcsComponentId,
+                                    Statustext(severity = MavSeverity.WARNING.wrap(), text = text)
+                                )
+                            } catch (e: Exception) {
+                                Timber.w(e, "Motor alert STATUSTEXT send failed")
+                            }
+                        }
+                    }
+                }
+        }
+
         // MISSION_CURRENT for mission progress and waypoint tracking
         var lastMissionSeq = -1
         scope.launch {
@@ -3120,7 +3221,7 @@ class MavlinkTelemetryRepository(
         // PARAM_VALUE for parameter reading
         scope.launch {
             mavFrame
-                .filter { state.value.fcuDetected && it.systemId == fcuSystemId }
+                .filter { state.value.fcuDetected && it.systemId == fcuSystemId && it.componentId == fcuComponentId }
                 .map { it.message }
                 .filterIsInstance<ParamValue>()
                 .collect { paramValue ->
@@ -6090,7 +6191,7 @@ class MavlinkTelemetryRepository(
      * on it, and this function used to stamp FENCE_ACTION=4 (Brake or Land) and
      * FENCE_MARGIN=3 onto the FC on every single fence upload, silently reverting
      * whatever the operator had configured. The GCS now reads both and reports them
-     * (see SharedViewModel.syncFenceParametersOnConnect / getCurrentFenceAction).
+     * (see SharedViewModel.refreshFenceParameters / getCurrentFenceAction).
      */
     private suspend fun configureFenceParameters(config: FenceConfiguration): Int? {
         try {
@@ -6107,21 +6208,26 @@ class MavlinkTelemetryRepository(
             // this used to start at 0 and OR in only the bits the current config implied,
             // which meant every mission-fence upload cleared the home-cylinder bit and
             // silently disarmed the 300m range fence.
-            val currentType = readFenceParameter("FENCE_TYPE")?.toInt() ?: 0
+            val currentTypeValue = readFenceParameter("FENCE_TYPE")
+            if (currentTypeValue == null || !currentTypeValue.isFinite() ||
+                currentTypeValue < 0f || currentTypeValue != currentTypeValue.toInt().toFloat()) {
+                Timber.e("Geofence: cannot preserve unreadable FENCE_TYPE; upload aborted")
+                return null
+            }
+            val currentType = currentTypeValue.toInt()
             var fenceType = currentType
             config.zones.forEach { zone ->
                 when (zone) {
                     is FenceZone.Polygon -> fenceType = fenceType or FENCE_TYPE_POLYGON
-                    is FenceZone.Circle -> fenceType = fenceType or FENCE_TYPE_CIRCLE
+                    is FenceZone.Circle -> fenceType = fenceType or FENCE_TYPE_POLYGON
                     else -> {}
                 }
             }
             if (config.circleRadiusMeters != null || config.armCircleFence) {
                 fenceType = fenceType or FENCE_TYPE_CIRCLE
             }
-            if (config.altitudeMax != null || config.altitudeMin != null) {
-                fenceType = fenceType or FENCE_TYPE_ALT_MAX
-            }
+            if (config.altitudeMax != null) fenceType = fenceType or FENCE_TYPE_ALT_MAX
+            if (config.altitudeMin != null) fenceType = fenceType or FENCE_TYPE_ALT_MIN
 
             if (fenceType != currentType) {
                 if (!setFenceParameter("FENCE_TYPE", fenceType.toFloat())) {
@@ -6138,15 +6244,6 @@ class MavlinkTelemetryRepository(
                     return null
                 }
                 delay(200)
-
-                // RTL_ALT must stay under the ceiling we just wrote. If it does not, the
-                // breach action begins by climbing to RTL_ALT — straight back through the
-                // fence it is recovering from — and the vehicle can loop: breach, RTL,
-                // climb, breach. syncRtlAltOnConnect enforces this at connect and from
-                // Options; doing it here too means no upload path can leave the pair
-                // inconsistent, including a caller that passes its own altitudeMax.
-                clampRtlAltBelowFenceCeiling(config.altitudeMax)
-                delay(200)
             }
 
             if (config.altitudeMin != null) {
@@ -6161,71 +6258,6 @@ class MavlinkTelemetryRepository(
         } catch (e: Exception) {
             Timber.e(e, "Geofence: failed configuring fence parameters")
             return null
-        }
-    }
-
-    /**
-     * Lower RTL_ALT if it sits at or above [fenceAltMaxM], the FC's altitude fence ceiling.
-     *
-     * Only ever LOWERED, never raised: an operator who deliberately set a conservative RTL
-     * altitude keeps it. Units matter — RTL_ALT is CENTIMETRES, and RTL_ALT=0 means "return
-     * at the current altitude", so the written value is floored rather than allowed to reach
-     * zero. Same policy as [SharedViewModel.syncRtlAltOnConnect], whose constants it borrows
-     * so there is one definition of "how far under the ceiling RTL belongs".
-     *
-     * Measured from FENCE_ALT_MAX, which sits FC_ALT_FENCE_SAFETY_OFFSET_M below the pilot's
-     * nominal ceiling — so the target here is ~1 m lower than syncRtlAltOnConnect computes
-     * from the ceiling itself. That is deliberate, not drift: RTL has to clear the fence that
-     * is actually armed, and because both paths only ever LOWER RTL_ALT the difference
-     * settles once rather than ratcheting down on every upload.
-     *
-     * Best-effort: a failure here is logged and surfaced but does not fail the fence upload.
-     * A fence that is live with a too-high RTL_ALT is still better than no fence, and
-     * SharedViewModel.handleAltitudeFailsafe brakes before RTL as the in-flight backstop.
-     */
-    private suspend fun clampRtlAltBelowFenceCeiling(fenceAltMaxM: Float): Boolean {
-        val headroomM = sharedViewModel.RTL_ALT_BELOW_CEILING_M
-        val floorM = sharedViewModel.RTL_ALT_MIN_M
-        val desiredM = (fenceAltMaxM - headroomM).coerceAtLeast(floorM)
-
-        if (desiredM >= fenceAltMaxM) {
-            // Ceiling at or under the floor: no RTL altitude is both legal and sane.
-            Timber.e("Geofence: FENCE_ALT_MAX=${fenceAltMaxM}m is too low for a safe RTL_ALT (floor ${floorM}m) - RTL will breach it")
-            return false
-        }
-
-        val currentCm = readFenceParameter("RTL_ALT", timeoutMs = 4000L)
-        if (currentCm == null) {
-            Timber.w("Geofence: could not read RTL_ALT - cannot confirm RTL stays under the ${fenceAltMaxM}m fence ceiling")
-            return false
-        }
-
-        val currentM = currentCm / 100f
-        if (currentM <= desiredM) {
-            Timber.i("Geofence: RTL_ALT=${currentM}m already clears the ${fenceAltMaxM}m fence ceiling - left as configured")
-            return true
-        }
-
-        return if (setFenceParameter("RTL_ALT", desiredM * 100f)) {
-            Timber.i("Geofence: ✓ RTL_ALT lowered ${currentM}m -> ${desiredM}m (${headroomM}m under the ${fenceAltMaxM}m fence ceiling)")
-            // Said out loud, not just logged: an operator who set RTL_ALT deliberately and
-            // then sees the drone return lower needs to know it was overridden on purpose.
-            sharedViewModel.addNotification(
-                Notification(
-                    message = "RTL altitude lowered to ${desiredM.toInt()} m so an RTL stays under the ${fenceAltMaxM.toInt()} m fence ceiling",
-                    type = NotificationType.INFO
-                )
-            )
-            true
-        } else {
-            Timber.e("Geofence: ✗ Failed to lower RTL_ALT - an RTL may climb through the ${fenceAltMaxM}m fence ceiling")
-            sharedViewModel.addNotification(
-                Notification(
-                    message = "⚠️ Could not lower RTL_ALT below the fence ceiling — an RTL may exceed it",
-                    type = NotificationType.WARNING
-                )
-            )
-            false
         }
     }
 

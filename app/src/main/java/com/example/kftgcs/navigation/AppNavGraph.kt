@@ -47,6 +47,7 @@ import com.example.kftgcs.uimain.PlanScreen
 import com.example.kftgcs.uimain.TopNavBar
 import com.example.kftgcs.uimain.SettingsScreen
 import com.example.kftgcs.uimain.SensorSettingsScreen
+import com.example.kftgcs.uimain.MotorHealthScreen
 import com.example.kftgcs.uimain.SecurityScreen
 import com.example.kftgcs.uimain.CalibrationsScreen
 import com.example.kftgcs.uimain.SprayCalibrationScreen
@@ -107,6 +108,7 @@ sealed class Screen(val route: String) {
     object Aircraft : Screen("aircraft")
     object RangeFinderSettings : Screen("rangefinder_settings")
     object SensorSettings : Screen("sensor_settings")
+    object MotorHealth : Screen("motor_health")
     object AboutApp : Screen("about_app")
     // Spray Calibration routes
     object SprayCalibration : Screen("spray_calibration")
@@ -478,6 +480,10 @@ fun AppNavGraph(
 
         composable(Screen.SensorSettings.route) {
             SensorSettingsScreen(navController = navController, sharedViewModel = sharedViewModel)
+        }
+
+        composable(Screen.MotorHealth.route) {
+            MotorHealthScreen(navController = navController, sharedViewModel = sharedViewModel)
         }
 
         composable(Screen.AboutApp.route) {

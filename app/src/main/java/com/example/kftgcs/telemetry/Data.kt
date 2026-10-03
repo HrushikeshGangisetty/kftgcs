@@ -223,6 +223,8 @@ data class TelemetryState(
     val voltageReceivedAtMs: Long? = null,
     val batteryPercent: Int? = null,
     val currentA : Float? = null,
+    // BATTERY_STATUS id=0 current_consumed (mAh since FC boot); null = FC doesn't report it
+    val consumedMah: Int? = null,
     //RC Battery
     val rcBatteryPercent: Int? = null,
     //Sat count and HDOP
@@ -313,6 +315,10 @@ data class TelemetryState(
     // "no usable return" on purpose, which otherwise looks like a broken sensor.
     val radarSwitchState: RadarSwitchState = RadarSwitchState(),
 
+    // Latest ESC_TELEMETRY reading per ESC number (1-based, as Mission Planner's ESCx_*).
+    // Entries are dropped after a few seconds without an update.
+    val escs: Map<Int, EscReading> = emptyMap(),
+
     // Spray telemetry for agricultural drones
     val sprayTelemetry: SprayTelemetry = SprayTelemetry()
 )
@@ -336,4 +342,15 @@ data class TelemetryState(
 data class DronePathPoint(
     val position: LatLng,
     val isSpraying: Boolean
+)
+
+/** One ESC's telemetry from ESC_TELEMETRY_x_TO_y (Mission Planner's ESCx_temp/curr/volt/rpm). */
+data class EscReading(
+    val escNumber: Int,
+    val tempC: Int,
+    val voltageV: Float,
+    val currentA: Float,
+    val consumedMah: Int,
+    val rpm: Int,
+    val updatedAtMs: Long
 )

@@ -4,6 +4,8 @@ import android.widget.Toast
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
@@ -90,6 +92,7 @@ fun BatteryMonitorScreen(
             Modifier
                 .fillMaxSize()
                 .padding(padding)
+                .verticalScroll(rememberScrollState())
                 .padding(horizontal = 16.dp, vertical = 12.dp),
             verticalArrangement = Arrangement.spacedBy(16.dp)
         ) {
@@ -106,45 +109,13 @@ fun BatteryMonitorScreen(
 
             // ── Calculated new BATT_VOLT_MULT ─────────────────────────
             val calc = state.calculatedVoltageDivider
-            Card(
-                shape = RoundedCornerShape(12.dp),
-                colors = CardDefaults.cardColors(
-                    containerColor = BmCard
-                ),
-                modifier = Modifier.fillMaxWidth()
-            ) {
-                Row(
-                    Modifier
-                        .padding(horizontal = 16.dp, vertical = 14.dp)
-                        .fillMaxWidth(),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Column(Modifier.weight(1f)) {
-                        Text(
-                            "Calculated BATT_VOLT_MULT",
-                            color = BmAccentLt, fontSize = 12.sp,
-                            fontWeight = FontWeight.SemiBold
-                        )
-                        Spacer(Modifier.height(4.dp))
-                        Text(
-                            calc?.let { "%.6f".format(it) } ?: "—",
-                            color = BmTextW, fontSize = 18.sp,
-                            fontWeight = FontWeight.Bold,
-                            fontFamily = FontFamily.Monospace
-                        )
-                    }
-                    if (calc != null) {
-                        Text(
-                            "ready to save",
-                            color = BmGreen, fontSize = 11.sp,
-                            fontWeight = FontWeight.Medium
-                        )
-                    }
-                }
-            }
+            CalculatedCard("Calculated BATT_VOLT_MULT", calc)
 
             // ── Save button ───────────────────────────────────────────
-            Button(
+            SaveButton(
+                text = "Save BATT_VOLT_MULT to Drone",
+                isSaving = state.isSaving,
+                enabled = state.isDroneConnected && !state.isSaving && !state.isLoading && calc != null,
                 onClick = {
                     viewModel.saveToDrone(
                         monitor     = null,
@@ -154,31 +125,8 @@ fun BatteryMonitorScreen(
                         voltPin     = null,
                         currPin     = null
                     )
-                },
-                enabled = state.isDroneConnected && !state.isSaving && !state.isLoading && calc != null,
-                colors = ButtonDefaults.buttonColors(
-                    containerColor = BmGreen,
-                    disabledContainerColor = BmAccent.copy(alpha = 0.25f)
-                ),
-                shape = RoundedCornerShape(12.dp),
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .height(52.dp)
-            ) {
-                if (state.isSaving) {
-                    CircularProgressIndicator(
-                        modifier = Modifier.size(20.dp),
-                        color = Color.White,
-                        strokeWidth = 2.5.dp
-                    )
-                    Spacer(Modifier.width(10.dp))
-                    Text("Saving…", fontWeight = FontWeight.SemiBold)
-                } else {
-                    Icon(Icons.Filled.Save, null, Modifier.size(20.dp))
-                    Spacer(Modifier.width(8.dp))
-                    Text("Save BATT_VOLT_MULT to Drone", fontWeight = FontWeight.SemiBold)
                 }
-            }
+            )
 
             // ── Hint when drone not connected ─────────────────────────
             if (!state.isDroneConnected) {
@@ -196,6 +144,115 @@ fun BatteryMonitorScreen(
                     color = BmTextMuted, fontSize = 11.sp
                 )
             }
+
+            // ── Current calibration (charger method) ──────────────────
+            HorizontalDivider(color = BmTextMuted.copy(alpha = 0.3f))
+            Text("Current Calibration", color = BmTextW, fontSize = 16.sp, fontWeight = FontWeight.Bold)
+            Text(
+                "1. Start with a fully charged pack and fly (hover is fine) for most of it.\n" +
+                "2. Before unplugging, note the FC's consumed mAh below (or CurrTot from the log).\n" +
+                "3. Charge back to full and note the mAh your charger reports.",
+                color = BmTextMuted, fontSize = 12.sp
+            )
+
+            LabeledNumberField(
+                label = "Consumed mAh (FC / log)",
+                suffix = "mAh",
+                value = state.loggedMahInput,
+                onValueChange = viewModel::updateLoggedMahInput,
+                keyboardType = KeyboardType.Decimal,
+                helper = "FC counter now: ${state.consumedMahLive?.let { "$it mAh" } ?: "—"}"
+            )
+            LabeledNumberField(
+                label = "Charged mAh (from charger)",
+                suffix = "mAh",
+                value = state.chargedMahInput,
+                onValueChange = viewModel::updateChargedMahInput,
+                keyboardType = KeyboardType.Decimal,
+                helper = "Current BATT_AMP_PERVLT: ${state.loadedAmpPerVolt?.let { "%.3f".format(it) } ?: "—"}"
+            )
+
+            val ampCalc = state.calculatedAmpPerVolt
+            CalculatedCard("Calculated BATT_AMP_PERVLT", ampCalc)
+            state.ampCalRejectReason?.let {
+                Text("⚠ $it", color = BmTextMuted, fontSize = 11.sp)
+            }
+
+            SaveButton(
+                text = "Save BATT_AMP_PERVLT to Drone",
+                isSaving = state.isSaving,
+                enabled = state.isDroneConnected && !state.isSaving && !state.isLoading && ampCalc != null,
+                onClick = {
+                    viewModel.saveToDrone(
+                        monitor     = null,
+                        capacityMah = null,
+                        voltMult    = null,
+                        ampPerVolt  = ampCalc,
+                        voltPin     = null,
+                        currPin     = null
+                    )
+                }
+            )
+        }
+    }
+}
+
+@Composable
+private fun CalculatedCard(label: String, value: Float?) {
+    Card(
+        shape = RoundedCornerShape(12.dp),
+        colors = CardDefaults.cardColors(containerColor = BmCard),
+        modifier = Modifier.fillMaxWidth()
+    ) {
+        Row(
+            Modifier
+                .padding(horizontal = 16.dp, vertical = 14.dp)
+                .fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Column(Modifier.weight(1f)) {
+                Text(label, color = BmAccentLt, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
+                Spacer(Modifier.height(4.dp))
+                Text(
+                    value?.let { "%.6f".format(it) } ?: "—",
+                    color = BmTextW, fontSize = 18.sp,
+                    fontWeight = FontWeight.Bold,
+                    fontFamily = FontFamily.Monospace
+                )
+            }
+            if (value != null) {
+                Text("ready to save", color = BmGreen, fontSize = 11.sp, fontWeight = FontWeight.Medium)
+            }
+        }
+    }
+}
+
+@Composable
+private fun SaveButton(text: String, isSaving: Boolean, enabled: Boolean, onClick: () -> Unit) {
+    Button(
+        onClick = onClick,
+        enabled = enabled,
+        colors = ButtonDefaults.buttonColors(
+            containerColor = BmGreen,
+            disabledContainerColor = BmAccent.copy(alpha = 0.25f)
+        ),
+        shape = RoundedCornerShape(12.dp),
+        modifier = Modifier
+            .fillMaxWidth()
+            .height(52.dp)
+    ) {
+        if (isSaving) {
+            CircularProgressIndicator(
+                modifier = Modifier.size(20.dp),
+                color = Color.White,
+                strokeWidth = 2.5.dp
+            )
+            Spacer(Modifier.width(10.dp))
+            Text("Saving…", fontWeight = FontWeight.SemiBold)
+        } else {
+            Icon(Icons.Filled.Save, null, Modifier.size(20.dp))
+            Spacer(Modifier.width(8.dp))
+            Text(text, fontWeight = FontWeight.SemiBold)
         }
     }
 }

@@ -46,6 +46,8 @@ enum class EventType {
     SYSTEM_ERROR,
     TANK_EMPTY,
     LOW_VOLTAGE,
+    MOTOR_HIGH_CURRENT,
+    MOTOR_HIGH_TEMP,
     NOTIFICATION
 }
 

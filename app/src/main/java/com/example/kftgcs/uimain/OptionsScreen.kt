@@ -26,6 +26,7 @@ import androidx.compose.ui.unit.sp
 import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.navigation.NavHostController
 import com.example.kftgcs.telemetry.BatteryFsAction
+import com.example.kftgcs.telemetry.LimitFailsafePolicy
 import com.example.kftgcs.telemetry.SharedViewModel
 import com.example.kftgcs.viewmodel.OptionsViewModel
 import java.util.Locale
@@ -63,6 +64,12 @@ fun OptionsScreen(
     val syncStatus by viewModel.syncStatus.collectAsState()
     val isLoadingFromDrone by viewModel.isLoadingFromDrone.collectAsState()
     val loadStatus by viewModel.loadStatus.collectAsState()
+    val fenceAction by sharedViewModel.fenceAction.collectAsState()
+    val fenceRadius by sharedViewModel.fenceRadiusMeters.collectAsState()
+    val fenceMargin by sharedViewModel.fenceMargin.collectAsState()
+    val fenceType by sharedViewModel.fenceTypeBits.collectAsState()
+    val fenceEnable by sharedViewModel.fenceEnable.collectAsState()
+    val fcAltitudeMax by sharedViewModel.fcAltitudeMax.collectAsState()
 
    // On first open, read voltage parameters from the flight controller
     LaunchedEffect(Unit) {
@@ -258,7 +265,7 @@ fun OptionsScreen(
                     horizontalArrangement = Arrangement.SpaceBetween
                 ) {
                     Text(
-                        text = "Enforce altitude ceiling",
+                        text = "Enable GCS altitude monitoring",
                         color = Color.White,
                         fontSize = 15.sp
                     )
@@ -275,54 +282,55 @@ fun OptionsScreen(
                 }
 
                 NumericTextField(
-                    label = "Max Altitude (m AGL) — FENCE_ALT_MAX",
+                    label = "Max Altitude (m above home) — FENCE_ALT_MAX",
                     value = options.maxAltitude,
                     onValueChange = { viewModel.updateMaxAltitude(it) }
                 )
 
                 Spacer(modifier = Modifier.height(8.dp))
 
-                // Describes the WALL, not the breach action, because the wall is what the
-                // pilot actually meets in normal flying. The old copy ("acts at N m") was
-                // doubly misleading: the action fired at least 6 m below N, and what it did
-                // was fly the aircraft home. Quoting the usable height is the honest number
-                // and the one they plan a spray pass around.
-                //
-                // The numbers below must track SharedViewModel: the wall sits at
-                // ceiling − (FC_ALT_FENCE_SAFETY_OFFSET_M + 1), and the drone's own fence at
-                // ceiling − FC_ALT_FENCE_SAFETY_OFFSET_M. Read from the view model rather than
-                // re-typed here so the copy cannot quietly go stale against the behaviour.
-                val fcOffset = sharedViewModel.FC_ALT_FENCE_SAFETY_OFFSET_M
-                val holdAltitude = (options.maxAltitude - (fcOffset + 1f)).coerceAtLeast(0f)
-                val fcFenceAltitude = (options.maxAltitude - fcOffset).coerceAtLeast(0f)
-                val warnAltitude = (options.maxAltitude -
-                    minOf(10f, options.maxAltitude * 0.2f)).coerceAtLeast(0f)
-                // What happens AT the limit now depends on the action below: Hover stops the
-                // climb and hands control straight back, while RTL/Land stop the climb and
-                // then run that action. The copy has to say which, or a pilot who picks RTL
-                // has no way to know their next pass will end in a flight home.
-                val holdsAtLimit = options.maxAltitudeAction.equals("HOVER", ignoreCase = true)
-                val atLimitText = if (holdsAtLimit) {
-                    "Usable to ${String.format(Locale.US, "%.1f", holdAltitude)} m: a climb is stopped there and control handed straight back. "
-                } else {
-                    val actionLabel = if (options.maxAltitudeAction.equals("LAND", ignoreCase = true)) "Land" else "RTL"
-                    "Climbs are stopped at ${String.format(Locale.US, "%.1f", holdAltitude)} m and the drone then performs $actionLabel — " +
-                        "choose Hover if you want to keep working at this height. "
-                }
                 Text(
-                    text = atLimitText +
-                        "Voice warning from ${warnAltitude.toInt()} m while climbing. " +
-                        "Above ${String.format(Locale.US, "%.1f", fcFenceAltitude)} m the drone's own fence takes over and runs the action below — " +
-                        "it enforces this onboard, so it holds even if the tablet link drops.",
+                    text = "The GCS altitude action triggers at the first fresh position reading at or above " +
+                        "FENCE_ALT_MAX. Approach warnings do not change this limit. " +
+                        "Aircraft momentum and telemetry delay can carry it beyond the boundary.",
                     color = Color(0xFFB0B0B0),
                     fontSize = 13.sp,
                     modifier = Modifier.padding(start = 4.dp, bottom = 12.dp)
                 )
+                Text(
+                    text = "Confirmed altitude: ${fcAltitudeMax?.let { "$it m above home" } ?: "Not confirmed"}\n" +
+                        "Action at both limits — FENCE_ACTION: ${fenceAction?.pilotLabel ?: "Not confirmed"}",
+                    color = Color.White,
+                    fontSize = 14.sp
+                )
 
-                ActionDropdown(
-                    label = "Action at Limit",
-                    selected = options.maxAltitudeAction,
-                    onSelectionChanged = { viewModel.updateMaxAltitudeAction(it) }
+            }
+
+            Spacer(modifier = Modifier.height(16.dp))
+            SectionCard(title = "Max Range — Drone Parameters") {
+                val rangeActionAt = LimitFailsafePolicy.rangeActionThreshold(fenceRadius, fenceMargin)
+                val hasValidMargin = LimitFailsafePolicy.validRangeMargin(fenceRadius, fenceMargin)
+                Text(
+                    text = "FENCE_RADIUS: ${fenceRadius?.let { "$it m from home" } ?: "Not confirmed"}\n" +
+                        "FENCE_MARGIN: ${fenceMargin?.let { "$it m" } ?: "Not confirmed"}\n" +
+                        "GCS range action at: ${rangeActionAt?.let { "$it m from home" } ?: "Not confirmed"}" +
+                        (if (rangeActionAt != null && !hasValidMargin) " (margin unavailable/invalid; using radius)" else "") + "\n" +
+                        "FENCE_ACTION: ${fenceAction?.pilotLabel ?: "Not confirmed"}\n" +
+                        "FENCE_ENABLE: ${fenceEnable?.toString() ?: "Not confirmed"}; " +
+                        "FENCE_TYPE: ${fenceType?.toString() ?: "Not confirmed"}",
+                    color = Color.White,
+                    fontSize = 14.sp
+                )
+                Text(
+                    text = "The altitude switch controls GCS monitoring only; it does not change onboard fences. " +
+                        "GCS range monitoring acts at FENCE_RADIUS minus FENCE_MARGIN while connected and armed, " +
+                        "using fresh position telemetry and a confirmed action. " +
+                        "A zero margin acts at the radius; an unread or invalid margin also falls back to the radius. " +
+                        "Onboard fence enforcement also requires FENCE_ENABLE = 1 and the appropriate " +
+                        "FENCE_TYPE bits (altitude: 1, circle: 2). These settings are read only here.",
+                    color = Color(0xFFB0B0B0),
+                    fontSize = 13.sp,
+                    modifier = Modifier.padding(top = 8.dp)
                 )
             }
 
@@ -331,6 +339,7 @@ fun OptionsScreen(
             // Save Button
             Button(
                 onClick = { viewModel.saveAndSync(sharedViewModel) },
+                enabled = !isLoadingFromDrone,
                 modifier = Modifier
                     .fillMaxWidth()
                     .height(56.dp),

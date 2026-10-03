@@ -27,8 +27,7 @@ data class FailsafeOptions(
     val lowVoltLevel2Action: String = "HOVER",
     // Altitude ceiling failsafe — mirrors the FC's FENCE_ALT_MAX parameter.
     val maxAltitudeEnabled: Boolean = true,
-    val maxAltitude: Float = 120.0f,
-    val maxAltitudeAction: String = "HOVER"
+    val maxAltitude: Float = 120.0f
 )
 
 class OptionsViewModel(application: Application) : AndroidViewModel(application) {
@@ -47,11 +46,10 @@ class OptionsViewModel(application: Application) : AndroidViewModel(application)
         private const val KEY_LOW_VOLT_LEVEL_2_ACTION = "low_volt_level_2_action"
         private const val KEY_MAX_ALTITUDE_ENABLED = "max_altitude_enabled"
         private const val KEY_MAX_ALTITUDE = "max_altitude"
-        private const val KEY_MAX_ALTITUDE_ACTION = "max_altitude_action"
 
         private const val DEFAULT_MAX_ALTITUDE = 120.0f
 
-        // Keys for fieldsEditedSinceLoad
+        // Keys for editedFields
         private const val FIELD_LOW_VOLT_1 = "low_volt_1"
         private const val FIELD_LOW_VOLT_2 = "low_volt_2"
         private const val FIELD_LOW_ACTION_1 = "low_action_1"
@@ -104,12 +102,13 @@ class OptionsViewModel(application: Application) : AndroidViewModel(application)
 
     /** True while a save is queued or running, so a double tap cannot start a second one. */
     private var saveInProgress = false
+    private var loadedSessionId: Long? = null
 
     /**
-     * Fields the pilot has typed into since the current load began. A load that lands later must
-     * not overwrite them. Only touched on the main thread.
+     * Pending explicit parameter edits. Refresh must preserve them, and Save must never
+     * send an untouched field. Only touched on the main thread.
      */
-    private val fieldsEditedSinceLoad = mutableSetOf<String>()
+    private val editedFields = mutableSetOf<String>()
 
     init {
         loadSettings()
@@ -131,8 +130,16 @@ class OptionsViewModel(application: Application) : AndroidViewModel(application)
         attempts: Int = 2
     ): Float? {
         repeat(attempts) { attempt ->
+            if (loadedSessionId != sharedViewModel.failsafeSessionId) {
+                _loadStatus.value = "Connection changed; refresh the settings."
+                throw kotlinx.coroutines.CancellationException("Failsafe connection changed")
+            }
             val value = sharedViewModel.readParameter(paramId, timeoutMs = PARAM_READ_TIMEOUT_MS)
-            if (value != null) return value
+            if (loadedSessionId != sharedViewModel.failsafeSessionId) {
+                _loadStatus.value = "Connection changed; refresh the settings."
+                throw kotlinx.coroutines.CancellationException("Failsafe connection changed")
+            }
+            if (value != null && value.isFinite()) return value
             LogUtils.w(TAG, "↻ Retrying read of $paramId (attempt ${attempt + 1}/$attempts)")
             kotlinx.coroutines.delay(PARAM_RETRY_GAP_MS)
         }
@@ -148,7 +155,6 @@ class OptionsViewModel(application: Application) : AndroidViewModel(application)
         _isLoadingFromDrone.value = true
         _loadStatus.value = "Reading failsafe parameters from drone..."
         // Anything typed from here on is the pilot's and must survive the load.
-        fieldsEditedSinceLoad.clear()
 
         viewModelScope.launch {
             try {
@@ -164,6 +170,8 @@ class OptionsViewModel(application: Application) : AndroidViewModel(application)
                 _loadStatus.value = "Reading failsafe parameters from drone..."
 
                 droneSyncMutex.withLock {
+                    if (loadedSessionId != sharedViewModel.failsafeSessionId) editedFields.clear()
+                    loadedSessionId = sharedViewModel.failsafeSessionId
                     val failures = mutableListOf<String>()
                     val prefs = getApplication<Application>().getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
 
@@ -174,7 +182,7 @@ class OptionsViewModel(application: Application) : AndroidViewModel(application)
                     // after which `voltage <= 0` never fires and the failsafe is silently off.
                     // Same rule the connect-time sync applies.
                     if (volt1 != null && volt1 > 0f) {
-                        if (FIELD_LOW_VOLT_1 !in fieldsEditedSinceLoad) {
+                        if (FIELD_LOW_VOLT_1 !in editedFields) {
                             _options.value = _options.value.copy(lowVoltLevel1 = volt1)
                             // The GCS failsafe enforces what is in prefs, so what the FC says
                             // has to land there too or screen and enforcement drift apart.
@@ -191,7 +199,7 @@ class OptionsViewModel(application: Application) : AndroidViewModel(application)
                     // Read BATT_CRT_VOLT → lowVoltLevel2
                     val volt2 = readParamWithRetry(sharedViewModel, PARAM_BATT_CRT_VOLT)
                     if (volt2 != null && volt2 > 0f) {
-                        if (FIELD_LOW_VOLT_2 !in fieldsEditedSinceLoad) {
+                        if (FIELD_LOW_VOLT_2 !in editedFields) {
                             _options.value = _options.value.copy(lowVoltLevel2 = volt2)
                             prefs.edit().putFloat(KEY_LOW_VOLT_LEVEL_2, volt2).apply()
                         }
@@ -203,13 +211,16 @@ class OptionsViewModel(application: Application) : AndroidViewModel(application)
 
                     kotlinx.coroutines.delay(100)
 
-                    // Read FENCE_ALT_MAX → maxAltitude (the altitude ceiling failsafe)
+                    // Refresh the shared action/radius/type/enable cache used by the monitors.
+                    failures.addAll(sharedViewModel.refreshFenceParameters())
+
+                    // Read the exact altitude above home used by the flight controller.
                     val altMax = readParamWithRetry(sharedViewModel, PARAM_FENCE_ALT_MAX)
-                    if (altMax != null && altMax > 0f) {
-                        // Add the safety offset back so the pilot sees the ceiling they set, not the
-                        // biased value stored on the FC.
-                        val ceiling = altMax + sharedViewModel.FC_ALT_FENCE_SAFETY_OFFSET_M
-                        if (FIELD_MAX_ALTITUDE !in fieldsEditedSinceLoad) {
+                    sharedViewModel.recordAltitudeCeilingFromFc(altMax)
+                    if (altMax != null && altMax.isFinite() && altMax > 0f) {
+                        // Show the FC's exact above-home ceiling without an artificial offset.
+                        val ceiling = altMax
+                        if (FIELD_MAX_ALTITUDE !in editedFields) {
                             _options.value = _options.value.copy(maxAltitude = ceiling)
                         }
                         LogUtils.i(TAG, "✓ Read $PARAM_FENCE_ALT_MAX = ${altMax} m → ceiling ${ceiling} m")
@@ -226,7 +237,7 @@ class OptionsViewModel(application: Application) : AndroidViewModel(application)
                     val lowAct = readParamWithRetry(sharedViewModel, PARAM_BATT_FS_LOW_ACT)
                     val lowActionName = lowAct?.let { BatteryFsAction.fromFcValue(it) }
                     if (lowActionName != null) {
-                        if (FIELD_LOW_ACTION_1 !in fieldsEditedSinceLoad) {
+                        if (FIELD_LOW_ACTION_1 !in editedFields) {
                             _options.value = _options.value.copy(lowVoltLevel1Action = lowActionName)
                             prefs.edit().putString(KEY_LOW_VOLT_LEVEL_1_ACTION, lowActionName).apply()
                         }
@@ -241,7 +252,7 @@ class OptionsViewModel(application: Application) : AndroidViewModel(application)
                     val crtAct = readParamWithRetry(sharedViewModel, PARAM_BATT_FS_CRT_ACT)
                     val crtActionName = crtAct?.let { BatteryFsAction.fromFcValue(it) }
                     if (crtActionName != null) {
-                        if (FIELD_LOW_ACTION_2 !in fieldsEditedSinceLoad) {
+                        if (FIELD_LOW_ACTION_2 !in editedFields) {
                             _options.value = _options.value.copy(lowVoltLevel2Action = crtActionName)
                             prefs.edit().putString(KEY_LOW_VOLT_LEVEL_2_ACTION, crtActionName).apply()
                         }
@@ -254,7 +265,7 @@ class OptionsViewModel(application: Application) : AndroidViewModel(application)
                     _loadStatus.value = if (failures.isEmpty()) {
                         "Loaded failsafe values from drone ✓"
                     } else {
-                        "Could not read: ${failures.joinToString()}. Using saved values."
+                        "Could not read: ${failures.joinToString()}. Unconfirmed fields may show saved values; no parameters were written."
                     }
                 }
             } finally {
@@ -276,8 +287,7 @@ class OptionsViewModel(application: Application) : AndroidViewModel(application)
             lowVoltLevel1Action = prefs.getString(KEY_LOW_VOLT_LEVEL_1_ACTION, BatteryFsAction.HOVER) ?: BatteryFsAction.HOVER,
             lowVoltLevel2Action = prefs.getString(KEY_LOW_VOLT_LEVEL_2_ACTION, "HOVER") ?: "HOVER",
             maxAltitudeEnabled = prefs.getBoolean(KEY_MAX_ALTITUDE_ENABLED, true),
-            maxAltitude = prefs.getFloat(KEY_MAX_ALTITUDE, DEFAULT_MAX_ALTITUDE),
-            maxAltitudeAction = prefs.getString(KEY_MAX_ALTITUDE_ACTION, "HOVER") ?: "HOVER"
+            maxAltitude = prefs.getFloat(KEY_MAX_ALTITUDE, DEFAULT_MAX_ALTITUDE)
         )
     }
 
@@ -294,22 +304,22 @@ class OptionsViewModel(application: Application) : AndroidViewModel(application)
     }
 
     fun updateLowVoltLevel1(value: Float) {
-        fieldsEditedSinceLoad.add(FIELD_LOW_VOLT_1)
+        editedFields.add(FIELD_LOW_VOLT_1)
         _options.value = _options.value.copy(lowVoltLevel1 = value)
     }
 
     fun updateLowVoltLevel2(value: Float) {
-        fieldsEditedSinceLoad.add(FIELD_LOW_VOLT_2)
+        editedFields.add(FIELD_LOW_VOLT_2)
         _options.value = _options.value.copy(lowVoltLevel2 = value)
     }
 
     fun updateLowVoltLevel1Action(action: String) {
-        fieldsEditedSinceLoad.add(FIELD_LOW_ACTION_1)
+        editedFields.add(FIELD_LOW_ACTION_1)
         _options.value = _options.value.copy(lowVoltLevel1Action = action)
     }
 
     fun updateLowVoltLevel2Action(action: String) {
-        fieldsEditedSinceLoad.add(FIELD_LOW_ACTION_2)
+        editedFields.add(FIELD_LOW_ACTION_2)
         _options.value = _options.value.copy(lowVoltLevel2Action = action)
     }
 
@@ -318,12 +328,8 @@ class OptionsViewModel(application: Application) : AndroidViewModel(application)
     }
 
     fun updateMaxAltitude(value: Float) {
-        fieldsEditedSinceLoad.add(FIELD_MAX_ALTITUDE)
+        editedFields.add(FIELD_MAX_ALTITUDE)
         _options.value = _options.value.copy(maxAltitude = value)
-    }
-
-    fun updateMaxAltitudeAction(action: String) {
-        _options.value = _options.value.copy(maxAltitudeAction = action)
     }
 
     /**
@@ -339,6 +345,7 @@ class OptionsViewModel(application: Application) : AndroidViewModel(application)
             try {
                 // Waits for any in-flight load, then snapshots the options AFTER it has landed so
                 // the save cannot be based on values the load is about to replace.
+                sharedViewModel.awaitConnectSync()
                 droneSyncMutex.withLock {
                     syncToDrone(sharedViewModel)
                 }
@@ -348,136 +355,89 @@ class OptionsViewModel(application: Application) : AndroidViewModel(application)
         }
     }
 
-    /** Body of [saveAndSync]. Callers must hold [droneSyncMutex]. */
+    /** Only explicit edits may generate PARAM_SET. Reading/opening the screen never does. */
     private suspend fun syncToDrone(sharedViewModel: SharedViewModel) {
+        if (editedFields.isNotEmpty() && loadedSessionId != sharedViewModel.failsafeSessionId) {
+            _syncStatus.value = "Not saved: connection changed. Refresh and review the current drone's settings."
+            return
+        }
         val current = _options.value
-
-        // Refuse thresholds the failsafe cannot work with, before anything is persisted or sent:
-        //  - <= 0 V never triggers (voltage <= 0 is never true), i.e. the failsafe is off;
-        //  - critical at or above warning means the warning band is empty, so Level 1 never fires.
-        // A 12S default (43/42 V) left on a 6S drone is caught by the pilot at the pre-arm popup.
-        val thresholdError = when {
-            current.lowVoltLevel1 <= 0f || current.lowVoltLevel2 <= 0f ->
-                "Not saved: voltage thresholds must be above 0 V"
-            current.lowVoltLevel2 >= current.lowVoltLevel1 ->
-                "Not saved: Level 2 (critical) must be lower than Level 1 (warning)"
+        val edited = editedFields.toSet()
+        val values = mapOf(
+            FIELD_LOW_VOLT_1 to current.lowVoltLevel1,
+            FIELD_LOW_VOLT_2 to current.lowVoltLevel2,
+            FIELD_LOW_ACTION_1 to BatteryFsAction.toFcValue(current.lowVoltLevel1Action),
+            FIELD_LOW_ACTION_2 to BatteryFsAction.toFcValue(current.lowVoltLevel2Action),
+            FIELD_MAX_ALTITUDE to current.maxAltitude
+        )
+        val validationError = when {
+            edited.any { values[it] == null || values[it]?.isFinite() != true } ->
+                "Not saved: edited parameters must have valid finite values"
+            (FIELD_LOW_VOLT_1 in edited || FIELD_LOW_VOLT_2 in edited) &&
+                (current.lowVoltLevel1 <= 0f || current.lowVoltLevel2 <= 0f ||
+                    current.lowVoltLevel2 >= current.lowVoltLevel1) ->
+                "Not saved: voltage thresholds must be positive and critical lower than warning"
+            FIELD_MAX_ALTITUDE in edited && current.maxAltitude < 1f ->
+                "Not saved: maximum altitude must be at least 1 m above home"
             else -> null
         }
-        if (thresholdError != null) {
-            _syncStatus.value = thresholdError
+        if (validationError != null) {
+            _syncStatus.value = validationError
             return
         }
 
-        // Save locally first
-        val saved = try {
-            getApplication<Application>()
-                .getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-                .edit()
-                .putString(KEY_MISSION_COMPLETION_ACTION, current.missionCompletionAction)
-                .putString(KEY_TANK_EMPTY_ACTION_MANUAL, current.tankEmptyActionManual)
-                .putString(KEY_TANK_EMPTY_ACTION_AUTO, current.tankEmptyActionAuto)
-                .putFloat(KEY_LOW_VOLT_LEVEL_1, current.lowVoltLevel1)
-                .putFloat(KEY_LOW_VOLT_LEVEL_2, current.lowVoltLevel2)
-                .putString(KEY_LOW_VOLT_LEVEL_1_ACTION, current.lowVoltLevel1Action)
-                .putString(KEY_LOW_VOLT_LEVEL_2_ACTION, current.lowVoltLevel2Action)
-                .putBoolean(KEY_MAX_ALTITUDE_ENABLED, current.maxAltitudeEnabled)
-                .putFloat(KEY_MAX_ALTITUDE, current.maxAltitude)
-                .putString(KEY_MAX_ALTITUDE_ACTION, current.maxAltitudeAction)
-                .commit()
-        } catch (e: Exception) {
-            false
-        }
-
+        val prefs = getApplication<Application>().getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        // These settings belong to the GCS. FC-backed thresholds/actions are cached only
+        // after the drone confirms a write, so a rejected edit cannot change enforcement.
+        val saved = prefs.edit()
+            .putString(KEY_MISSION_COMPLETION_ACTION, current.missionCompletionAction)
+            .putString(KEY_TANK_EMPTY_ACTION_MANUAL, current.tankEmptyActionManual)
+            .putString(KEY_TANK_EMPTY_ACTION_AUTO, current.tankEmptyActionAuto)
+            .putBoolean(KEY_MAX_ALTITUDE_ENABLED, current.maxAltitudeEnabled)
+            .commit()
         if (!saved) {
             _syncStatus.value = "Failed to save locally"
             return
         }
-
-        // What is now saved is what is on screen; nothing the pilot typed is still pending.
-        fieldsEditedSinceLoad.clear()
-
-        // Sync to drone
-        run {
-            val results = mutableListOf<String>()
-
-            // A write counts only when the FC's reply carries the value we wrote — an ack that
-            // merely names the parameter can be a stale reply, or the FC clamping/rejecting it.
-            suspend fun write(name: String, value: Float): Boolean {
-                val ack = sharedViewModel.setParameter(name, value, timeoutMs = 5000L)
-                return if (sharedViewModel.paramAckMatches(ack, value)) {
-                    true
-                } else {
-                    results.add(name)
-                    LogUtils.e(TAG, "✗ Failed to set $name (FC reports ${ack?.paramValue})")
-                    false
-                }
+        val failures = mutableListOf<String>()
+        suspend fun write(field: String, name: String, key: String, action: String? = null) {
+            if (field !in edited) return
+            if (loadedSessionId != sharedViewModel.failsafeSessionId) {
+                failures.add("$name (connection changed)")
+                return
             }
-
-            // BATT_LOW_VOLT ← lowVoltLevel1
-            if (write(PARAM_BATT_LOW_VOLT, current.lowVoltLevel1)) {
-                LogUtils.i(TAG, "✓ $PARAM_BATT_LOW_VOLT = ${current.lowVoltLevel1}")
-            }
-
-            // BATT_CRT_VOLT ← lowVoltLevel2
-            if (write(PARAM_BATT_CRT_VOLT, current.lowVoltLevel2)) {
-                LogUtils.i(TAG, "✓ $PARAM_BATT_CRT_VOLT = ${current.lowVoltLevel2}")
-            }
-
-            // BATT_FS_LOW_ACT ← the level 1 action the pilot selected (or the value the FC
-            // already had, which Options loaded into the field). These used to be forced to 0
-            // here, overriding whatever the drone was configured with.
-            val lowActValue = BatteryFsAction.toFcValue(current.lowVoltLevel1Action)
-            if (lowActValue == null) {
-                results.add(PARAM_BATT_FS_LOW_ACT)
-                LogUtils.e(TAG, "✗ Unknown level 1 action '${current.lowVoltLevel1Action}'")
-            } else if (write(PARAM_BATT_FS_LOW_ACT, lowActValue)) {
-                LogUtils.i(TAG, "✓ $PARAM_BATT_FS_LOW_ACT = ${lowActValue.toInt()} (${current.lowVoltLevel1Action})")
-            }
-
-            // BATT_FS_CRT_ACT ← the level 2 action the pilot selected. The GCS enforces the same
-            // action (see SharedViewModel.handleBatteryVoltageFailsafe), so the FC and the GCS
-            // ask for the same mode rather than racing each other.
-            val crtActValue = BatteryFsAction.toFcValue(current.lowVoltLevel2Action)
-            if (crtActValue == null) {
-                results.add(PARAM_BATT_FS_CRT_ACT)
-                LogUtils.e(TAG, "✗ Unknown level 2 action '${current.lowVoltLevel2Action}'")
-            } else if (write(PARAM_BATT_FS_CRT_ACT, crtActValue)) {
-                LogUtils.i(TAG, "✓ $PARAM_BATT_FS_CRT_ACT = ${crtActValue.toInt()} (${current.lowVoltLevel2Action})")
-            }
-
-            // ═══ Altitude ceiling → FENCE_ALT_MAX + RTL_ALT + FENCE_TYPE/FENCE_ENABLE ═══
-            //
-            // Delegated to SharedViewModel.applyAltitudeCeilingToFc() rather than written
-            // here, because the ceiling is THREE parameters that have to move together and
-            // this path used to move only one of them:
-            //
-            //   FENCE_ALT_MAX  — the limit itself, biased below the pilot's ceiling because
-            //                    ArduPilot arrests the climb AFTER detecting the breach.
-            //   RTL_ALT        — must stay under the ceiling, or the breach action (an RTL)
-            //                    starts by climbing to RTL_ALT and straight through it. This
-            //                    was previously synced on connect only, so changing the
-            //                    ceiling in Options left RTL_ALT agreeing with the old one.
-            //   FENCE_TYPE /
-            //   FENCE_ENABLE   — without these the FC ignores FENCE_ALT_MAX entirely and the
-            //                    ceiling is held by the GCS over the telemetry link alone.
-            //
-            // FENCE_ACTION and FENCE_MARGIN are still never written: the breach behaviour
-            // stays the operator's.
-            if (current.maxAltitudeEnabled && current.maxAltitude > 0f) {
-                // Reported in the status line too: this used to be fire-and-forget, so a ceiling
-                // that never reached the FC still ended in "Saved & synced to drone".
-                if (sharedViewModel.applyAltitudeCeilingToFc()) {
-                    LogUtils.i(TAG, "Altitude ceiling ${current.maxAltitude} m pushed to the FC (see OptionsSync/FenceSync logs)")
-                } else {
-                    results.add(PARAM_FENCE_ALT_MAX)
-                }
-            }
-
-            if (results.isEmpty()) {
-                _syncStatus.value = "Saved & synced to drone"
+            val value = values.getValue(field) ?: return
+            val confirmed = if (field == FIELD_MAX_ALTITUDE) {
+                sharedViewModel.applyAltitudeCeilingToFc(value)
             } else {
-                _syncStatus.value = "Saved locally. Failed to sync: ${results.joinToString()}"
+                sharedViewModel.paramAckMatches(sharedViewModel.setParameter(name, value, timeoutMs = 5000L), value)
             }
+            if (!confirmed) {
+                failures.add(name)
+                return
+            }
+            if (action != null) prefs.edit().putString(key, action).apply()
+            else prefs.edit().putFloat(key, value).apply()
+            // Preserve an edit made while its previous value was being sent.
+            val latest = _options.value
+            val unchanged = when (field) {
+                FIELD_LOW_VOLT_1 -> latest.lowVoltLevel1 == current.lowVoltLevel1
+                FIELD_LOW_VOLT_2 -> latest.lowVoltLevel2 == current.lowVoltLevel2
+                FIELD_LOW_ACTION_1 -> latest.lowVoltLevel1Action == current.lowVoltLevel1Action
+                FIELD_LOW_ACTION_2 -> latest.lowVoltLevel2Action == current.lowVoltLevel2Action
+                else -> latest.maxAltitude == current.maxAltitude
+            }
+            if (unchanged) editedFields.remove(field)
+        }
+        write(FIELD_LOW_VOLT_1, PARAM_BATT_LOW_VOLT, KEY_LOW_VOLT_LEVEL_1)
+        write(FIELD_LOW_VOLT_2, PARAM_BATT_CRT_VOLT, KEY_LOW_VOLT_LEVEL_2)
+        write(FIELD_LOW_ACTION_1, PARAM_BATT_FS_LOW_ACT, KEY_LOW_VOLT_LEVEL_1_ACTION, current.lowVoltLevel1Action)
+        write(FIELD_LOW_ACTION_2, PARAM_BATT_FS_CRT_ACT, KEY_LOW_VOLT_LEVEL_2_ACTION, current.lowVoltLevel2Action)
+        write(FIELD_MAX_ALTITUDE, PARAM_FENCE_ALT_MAX, KEY_MAX_ALTITUDE)
+        _syncStatus.value = when {
+            failures.isNotEmpty() -> "Failed to sync: ${failures.joinToString()}. Edits retained for retry."
+            edited.isEmpty() -> "GCS settings saved. Drone parameters unchanged."
+            else -> "Saved; edited parameters confirmed by drone"
         }
     }
 }
