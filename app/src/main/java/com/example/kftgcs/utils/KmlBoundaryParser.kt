@@ -35,7 +35,6 @@ data class KmlParseResult(
  */
 class KmlBoundaryParser {
 
-    private val TAG = "KmlBoundaryParser"
     private val ns: String? = null // Namespace handling disabled for simple extraction
 
     /**
@@ -77,15 +76,6 @@ class KmlBoundaryParser {
                 errorMessage = "Unexpected error: ${e.message}"
             )
         }
-    }
-
-    /**
-     * Parse KML file and return only the first polygon found.
-     * For backward compatibility with single-polygon workflows.
-     */
-    fun parseFirstPolygon(inputStream: InputStream): List<LatLng> {
-        val result = parseAllPolygons(inputStream)
-        return result.polygons.firstOrNull()?.points ?: emptyList()
     }
 
     private fun readKml(parser: XmlPullParser): List<KmlPolygon> {

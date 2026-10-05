@@ -92,22 +92,6 @@ val HW_VER_PRESETS = listOf(
     HwVerPreset("Navio2 / Edge",                               0,        1)
 )
 
-fun findSensorPresetFor(voltMult: Float?, ampPerVolt: Float?, eps: Float = 0.01f): SensorPreset {
-    if (voltMult == null || ampPerVolt == null) return SENSOR_PRESETS.first()
-    return SENSOR_PRESETS.firstOrNull { p ->
-        p.voltMult != null && p.ampPerVolt != null &&
-        kotlin.math.abs(p.voltMult - voltMult) < eps &&
-        kotlin.math.abs(p.ampPerVolt - ampPerVolt) < eps
-    } ?: SENSOR_PRESETS.first()
-}
-
-fun findHwVerPresetFor(voltPin: Int?, currPin: Int?): HwVerPreset {
-    if (voltPin == null || currPin == null) return HW_VER_PRESETS.first()
-    return HW_VER_PRESETS.firstOrNull { p ->
-        p.voltPin == voltPin && p.currPin == currPin
-    } ?: HW_VER_PRESETS.first()
-}
-
 internal fun sanitizeDecimalString(text: String): String {
     var seenDot = false
     return buildString {

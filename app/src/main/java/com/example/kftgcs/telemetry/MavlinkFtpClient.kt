@@ -5,12 +5,16 @@ import com.divpundir.mavlink.api.MavMessage
 import com.divpundir.mavlink.definitions.common.FileTransferProtocol
 import com.example.kftgcs.utils.LogUtils
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
+import java.io.File
 import java.io.IOException
+import java.io.OutputStream
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicLong
 
@@ -39,8 +43,6 @@ class MavlinkFtpClient(
     /** One entry from a directory listing. */
     data class FtpEntry(val name: String, val sizeBytes: Long, val isDir: Boolean)
 
-    private var seq = 0
-
     /**
      * List [dirPath] (e.g. `/APM/LOGS`). Pages through the directory until the FC NAKs with EOF.
      * Throws [IOException] on timeout or a non-EOF error (e.g. directory not found).
@@ -65,11 +67,13 @@ class MavlinkFtpClient(
     }
 
     /**
-     * Download the file at [filePath] over MAVLink FTP, returning its raw bytes and reporting progress
-     * `0f..1f`. Opens read-only, burst-reads with a resume-on-stall watchdog, then terminates the
-     * session. Throws [IOException] on open failure, timeout, or a stalled transfer.
+     * Download the file at [filePath] over MAVLink FTP into [dest], reporting progress `0f..1f`.
+     * Opens read-only, burst-reads with a resume-on-stall watchdog, then terminates the session.
+     * The bytes are streamed to `<dest>.part` and renamed on success, so a log of any size never
+     * sits in memory and a failed transfer leaves no half-written [dest] behind. Throws
+     * [IOException] on open failure, timeout, or a stalled transfer.
      */
-    suspend fun downloadFile(filePath: String, onProgress: (Float) -> Unit): ByteArray {
+    suspend fun downloadFile(filePath: String, dest: File, onProgress: (Float) -> Unit) {
         val open = request(frame(OP_OPEN_RO, data = filePath.toByteArray(Charsets.US_ASCII)))
             ?: throw IOException("FTP OpenFileRO timed out for $filePath")
         if (open.opcode == OP_NAK) {
@@ -78,12 +82,20 @@ class MavlinkFtpClient(
         val session = open.session
         val fileSize = if (open.size >= 4) le32(open.data(), 0) else 0L
 
+        val part = File(dest.path + ".part")
         try {
-            return burstRead(session, fileSize, onProgress)
+            part.outputStream().buffered().use { out -> burstRead(session, fileSize, out, onProgress) }
+            dest.delete()
+            if (!part.renameTo(dest)) throw IOException("Could not save ${dest.name}")
+            onProgress(1f)
         } finally {
-            // Best-effort session cleanup so the FC frees the slot.
-            withTimeoutOrNull(1000L) {
-                request(frame(OP_TERMINATE, session = session), timeoutMs = 800L, retries = 1)
+            part.delete() // no-op once renamed
+            // Best-effort session cleanup so the FC frees the slot. NonCancellable so it still runs
+            // when the user leaves the screen mid-download.
+            withContext(NonCancellable) {
+                withTimeoutOrNull(1000L) {
+                    request(frame(OP_TERMINATE, session = session), timeoutMs = 800L, retries = 1)
+                }
             }
         }
     }
@@ -91,36 +103,67 @@ class MavlinkFtpClient(
     private suspend fun burstRead(
         session: Int,
         fileSize: Long,
+        out: OutputStream,
         onProgress: (Float) -> Unit
-    ): ByteArray = coroutineScope {
-        var buffer = ByteArray(if (fileSize in 1..MAX_ALLOC) fileSize.toInt() else 64 * 1024)
-        val hwm = AtomicInteger(0)
+    ): Unit = coroutineScope {
+        // Bytes written so far. Only the packet at exactly this offset is accepted, so what is on
+        // disk is always contiguous and a dropped packet can never leave a zero-filled hole.
+        val received = AtomicLong(0)
         val lastDataAt = AtomicLong(System.currentTimeMillis())
         val finished = CompletableDeferred<Unit>()
+        val chunk = ByteArray(MAX_DATA)
+        var lastPercent = -1
 
         val collector = launch {
             frames.collect { f ->
                 val m = f.message
                 if (m !is FileTransferProtocol) return@collect
                 val r = Resp(m.payload)
-                if (r.session != session) return@collect
+                if (r.session != session || r.reqOpcode != OP_BURST_READ) return@collect
+                if (finished.isCompleted) return@collect
 
-                if (r.opcode == OP_ACK && r.reqOpcode == OP_BURST_READ) {
-                    val ofs = r.offset.toInt()
-                    val data = r.data()
-                    val end = ofs + data.size
-                    if (end > buffer.size) buffer = buffer.copyOf(maxOf(end, buffer.size * 2))
-                    System.arraycopy(data, 0, buffer, ofs, data.size)
-                    if (end > hwm.get()) hwm.set(end)
+                if (r.opcode == OP_ACK) {
+                    // Any burst packet proves the FC is still sending, even one we have to discard.
                     lastDataAt.set(System.currentTimeMillis())
-                    if (fileSize > 0) onProgress((hwm.get().toFloat() / fileSize).coerceIn(0f, 1f))
+                    val ofs = r.offset
+                    val n = r.size.coerceIn(0, MAX_DATA)
+                    if (ofs == received.get()) {
+                        r.copyData(chunk, n)
+                        out.write(chunk, 0, n)
+                        val written = received.addAndGet(n.toLong())
+                        if (fileSize > 0) {
+                            val percent = (written * 100 / fileSize).toInt().coerceIn(0, 100)
+                            if (percent != lastPercent) {
+                                lastPercent = percent
+                                onProgress(percent / 100f)
+                            }
+                        }
+                    }
+                    // ofs > received is a gap (a packet was lost). The FC does not read a new
+                    // request until its current burst is over, so there is nothing to gain by
+                    // asking now: the rest of this burst is discarded and the next one, requested
+                    // below, starts from the gap.
 
-                    val doneBySize = fileSize > 0 && hwm.get() >= fileSize
-                    val doneByBurst = r.burstComplete && (fileSize <= 0 || hwm.get() >= fileSize)
-                    if ((doneBySize || doneByBurst) && !finished.isCompleted) finished.complete(Unit)
-                } else if (r.opcode == OP_NAK && r.reqOpcode == OP_BURST_READ) {
-                    // EOF means the FC has sent everything from the requested offset.
-                    if (r.errorCode() == ERR_EOF && !finished.isCompleted) finished.complete(Unit)
+                    val have = received.get()
+                    if (fileSize > 0 && have >= fileSize) {
+                        finished.complete(Unit)
+                    } else if (r.burstComplete && ofs + n >= have) {
+                        // The FC ends every burst after a fixed number of packets and waits for the
+                        // client to ask for the next one. (ofs + n < have is the tail of a
+                        // duplicate burst that a later request already covers.)
+                        send(frame(OP_BURST_READ, session = session, offset = have))
+                    }
+                } else if (r.opcode == OP_NAK) {
+                    val err = r.errorCode()
+                    if (err == ERR_EOF) {
+                        // EOF means the FC has nothing past the requested offset. With a known size
+                        // that only ends the transfer once we really have every byte.
+                        if (fileSize <= 0 || received.get() >= fileSize) finished.complete(Unit)
+                    } else {
+                        finished.completeExceptionally(
+                            IOException("FTP read failed (err=$err) at ${received.get()} bytes")
+                        )
+                    }
                 }
             }
         }
@@ -128,12 +171,12 @@ class MavlinkFtpClient(
         try {
             send(frame(OP_BURST_READ, session = session, offset = 0))
 
-            var lastProgress = 0
+            var lastProgress = 0L
             var stalls = 0
             while (!finished.isCompleted) {
                 delay(200L)
                 if (finished.isCompleted) break
-                val h = hwm.get()
+                val h = received.get()
                 if (h > lastProgress) {
                     lastProgress = h
                     stalls = 0
@@ -145,35 +188,37 @@ class MavlinkFtpClient(
                         throw IOException("FTP download stalled at $h bytes after $stalls resume attempts")
                     }
                     LogUtils.w("MavFtp", "Burst stalled at $h bytes; resume $stalls/$MAX_STALL_RETRIES")
-                    send(frame(OP_BURST_READ, session = session, offset = h.toLong()))
+                    send(frame(OP_BURST_READ, session = session, offset = h))
                     lastDataAt.set(System.currentTimeMillis())
                 }
             }
-            onProgress(1f)
-            val h = hwm.get()
-            if (h == buffer.size) buffer else buffer.copyOf(h)
+            finished.await() // rethrows a NAK failure
         } finally {
             collector.cancel()
         }
     }
 
     /**
-     * Send [msg] and wait for the next [FileTransferProtocol] reply, retransmitting the same request a
-     * few times if the link drops it. Returns null only if every attempt times out.
+     * Send [msg] and wait for the [FileTransferProtocol] reply to that opcode, retransmitting the
+     * same request a few times if the link drops it. Returns null only if every attempt times out.
+     * Replies to any other opcode are ignored: a burst packet still in flight from an earlier
+     * transfer must not be taken as the answer to this request.
      */
     private suspend fun request(
         msg: FileTransferProtocol,
         timeoutMs: Long = 2000L,
         retries: Int = 3
     ): Resp? {
+        val opcode = msg.payload[3].toInt()
         repeat(retries) {
             val resp = coroutineScope {
                 val deferred = CompletableDeferred<Resp>()
                 val collector = launch {
                     frames.collect { f ->
                         val m = f.message
-                        if (m is FileTransferProtocol && !deferred.isCompleted) {
-                            deferred.complete(Resp(m.payload))
+                        if (m is FileTransferProtocol) {
+                            val r = Resp(m.payload)
+                            if (r.reqOpcode == opcode && !deferred.isCompleted) deferred.complete(r)
                         }
                     }
                 }
@@ -234,7 +279,7 @@ class MavlinkFtpClient(
         data: ByteArray = EMPTY
     ): FileTransferProtocol {
         val p = UByteArray(PAYLOAD_LEN)
-        val s = seq++ and 0xFFFF
+        val s = seq.getAndIncrement() and 0xFFFF
         p[0] = (s and 0xFF).toUByte()
         p[1] = ((s shr 8) and 0xFF).toUByte()
         p[2] = session.toUByte()
@@ -269,6 +314,11 @@ class MavlinkFtpClient(
             return ByteArray(n) { payload[HEADER_LEN + it].toByte() }
         }
 
+        /** Copy the first [n] data bytes into [into] without allocating. */
+        fun copyData(into: ByteArray, n: Int) {
+            for (i in 0 until n) into[i] = payload[HEADER_LEN + i].toByte()
+        }
+
         fun errorCode(): Int = if (size >= 1) data()[0].toInt() and 0xFF else -1
     }
 
@@ -289,9 +339,12 @@ class MavlinkFtpClient(
 
         private const val IDLE_MS = 3000L
         private const val MAX_STALL_RETRIES = 8
-        private const val MAX_ALLOC = 512L * 1024L * 1024L // sanity cap for pre-sizing the buffer
-
         private val EMPTY = ByteArray(0)
+
+        // Shared by every client. A new client is built per operation, and if each one restarted
+        // at 0 the FC could see a request numbered one below its last reply, take it for a
+        // retransmission and answer with that cached reply instead.
+        private val seq = AtomicInteger(0)
 
         private fun le32(b: ByteArray, i: Int): Long =
             (b[i].toLong() and 0xFF) or

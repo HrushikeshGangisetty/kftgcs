@@ -259,6 +259,4 @@ object KFTAuth {
             return@coroutineScope AuthResult.FAILED
         }
     }
-
-    private class ChallengeCompleteException : Exception()
 }

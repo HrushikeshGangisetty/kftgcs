@@ -435,26 +435,6 @@ class FullParamListViewModel(
         }
     }
 
-    /**
-     * Refresh a single parameter (PARAM_REQUEST_READ #20).
-     */
-    fun refreshParam(paramName: String) {
-        viewModelScope.launch {
-            val value = sharedViewModel.readParameter(paramName, 3000L)
-            if (value != null) {
-                _state.update { current ->
-                    val updatedParams = current.params.toMutableMap()
-                    updatedParams[paramName]?.let { existing ->
-                        updatedParams[paramName] = existing.copy(value = value)
-                    }
-                    current.copy(params = updatedParams)
-                }
-            } else {
-                _state.update { it.copy(writeError = "Could not read $paramName from the drone") }
-            }
-        }
-    }
-
     fun clearWriteMessages() {
         _state.update { it.copy(writeSuccess = null, writeError = null) }
     }

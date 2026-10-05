@@ -27,6 +27,4 @@ object UsbPortOwnership {
     fun release(device: UsbDevice, owner: String) {
         owners.remove(device.deviceName, owner)
     }
-
-    fun ownerOf(device: UsbDevice): String? = owners[device.deviceName]
 }

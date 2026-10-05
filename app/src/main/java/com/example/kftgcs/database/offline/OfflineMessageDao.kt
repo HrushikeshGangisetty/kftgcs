@@ -36,9 +36,6 @@ interface OfflineMessageDao {
     @Query("DELETE FROM offline_messages WHERE id = :id")
     suspend fun deleteById(id: Long)
 
-    @Query("DELETE FROM offline_messages")
-    suspend fun deleteAll()
-
     @Query("SELECT COUNT(*) FROM offline_messages WHERE status = 'PENDING'")
     suspend fun countPending(): Int
 

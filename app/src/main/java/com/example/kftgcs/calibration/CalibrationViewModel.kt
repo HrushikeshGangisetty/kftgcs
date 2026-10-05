@@ -72,10 +72,6 @@ class CalibrationViewModel(private val sharedViewModel: SharedViewModel) : ViewM
         }
     }
 
-    fun onCalibrationButtonClick() {
-        onButtonClick()
-    }
-
     /**
      * Start the IMU calibration process
      */
@@ -390,11 +386,6 @@ class CalibrationViewModel(private val sharedViewModel: SharedViewModel) : ViewM
             // Keep the dialog open so user knows reboot was sent
             // They can dismiss it manually after seeing the drone reboot
         }
-    }
-
-    // Legacy method for compatibility with existing UI
-    fun onNextPosition() {
-        onPositionReady()
     }
 
     override fun onCleared() {

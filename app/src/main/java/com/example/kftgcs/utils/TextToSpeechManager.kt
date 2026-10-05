@@ -197,31 +197,11 @@ class TextToSpeechManager(private val context: Context) : TextToSpeech.OnInitLis
     }
 
     /**
-     * Reset a specific spoken key so speakOnce can be used again for that key.
-     */
-    fun resetSpokenKey(key: String) {
-        synchronized(dedupeLock) {
-            spokenKeys.remove(key)
-        }
-    }
-
-    /**
      * Clears all spoken keys so speakOnce can be used again for any key.
      */
     fun resetAllSpoken() {
         synchronized(dedupeLock) {
             spokenKeys.clear()
-        }
-    }
-
-    /**
-     * Allows callers to reset the dedupe state so the same message can be spoken again immediately.
-     * Useful when calibration finishes or different calibration steps should re-announce the same phrase.
-     */
-    fun resetLastSpoken() {
-        synchronized(dedupeLock) {
-            lastSpokenText = null
-            lastSpokenAt = 0L
         }
     }
 
@@ -293,27 +273,6 @@ class TextToSpeechManager(private val context: Context) : TextToSpeech.OnInitLis
     }
 
     /**
-     * Announces compass calibration started
-     */
-    fun announceCompassCalibrationStarted() {
-        speakImmediate(getMessage("compass_calibration_started"))
-    }
-
-    /**
-     * Announces compass calibration completed successfully
-     */
-    fun announceCompassCalibrationCompleted() {
-        speak(getMessage("compass_calibration_completed"))
-    }
-
-    /**
-     * Announces compass calibration failed
-     */
-    fun announceCompassCalibrationFailed() {
-        speak(getMessage("compass_calibration_failed"))
-    }
-
-    /**
      * Announces reboot drone message
      */
     fun announceRebootDrone() {
@@ -379,27 +338,6 @@ class TextToSpeechManager(private val context: Context) : TextToSpeech.OnInitLis
         // Use a stable key per position so repeated UI actions won't replay the same phrase
         val key = "IMU_POS_${position.uppercase(Locale.US)}"
         speakOnce(key, spokenText)
-    }
-
-    /**
-     * Announces mission paused at waypoint
-     */
-    fun announceMissionPaused(waypoint: Int) {
-        val message = when (currentLanguage) {
-            "en" -> "Mission paused at waypoint $waypoint"
-            "te" -> "మిషన్ వేపాయింట్ $waypoint వద్ద పాజ్ చేయబడింది"
-            "hi" -> "मिशन वेपॉइंट $waypoint पर रुका हुआ है"
-            "mr" -> "मिशन वेपॉइंट $waypoint वर थांबले आहे"
-            "ta" -> "பணி வேபாயிண்ட் $waypoint இல் இடைநிறுத்தப்பட்டது"
-            "kn" -> "ಮಿಷನ್ ವೇಪಾಯಿಂಟ್ $waypoint ನಲ್ಲಿ ವಿರಾಮಗೊಂಡಿದೆ"
-            "ml" -> "മിഷൻ വേപോയിന്റ് $waypoint ൽ താൽക്കാലികമായി നിർത്തി"
-            "gu" -> "મિશન વેપોઈન્ટ $waypoint પર રોકાયેલ છે"
-            "as" -> "মিছন ৱেপইণ্ট $waypoint ত বিৰতি হৈছে"
-            "bn" -> "মিশন ওয়েপয়েন্ট $waypoint এ বিরতি দেওয়া হয়েছে"
-            "pa" -> "ਮਿਸ਼ਨ ਵੇਪੁਆਇੰਟ $waypoint ਤੇ ਰੁਕਿਆ ਹੋਇਆ ਹੈ"
-            else -> "Mission paused at waypoint $waypoint"
-        }
-        speak(message)
     }
 
     /**

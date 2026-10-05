@@ -34,10 +34,17 @@ class UsbSerialMavConnection(
 ) : MavConnection {
 
     companion object {
-        // Finite read timeout (ms) so the read loop stays interruptible and close() can't hang
-        // indefinitely on a blocking bulk transfer. A 0-byte return just means "retry".
-        private const val READ_TIMEOUT_MS = 200
+        // 0 = blocking read through a queued UsbRequest, which is what usb-serial-for-android
+        // recommends: a bulkTransfer with a short timeout (the library saw it up to 200 ms) loses
+        // data on a continuous stream such as a log download. close() unblocks the read by closing
+        // the port, which cancels the request. Set this back to 200 to restore the old behaviour.
+        private const val READ_TIMEOUT_MS = 0
         private const val WRITE_TIMEOUT_MS = 2000
+
+        // Every USB read goes into a buffer of this size. It must be a multiple of the endpoint's
+        // packet size (64 or 512): a read into anything smaller than the incoming packet overflows
+        // and the kernel throws the bytes away. 16 KB is also the most Android moves per request.
+        private const val READ_BUFFER_SIZE = 16 * 1024
 
         /** Name registered in [UsbPortOwnership] while this connection holds the port. */
         const val OWNER = "MAVLink telemetry (USB)"
@@ -76,6 +83,10 @@ class UsbSerialMavConnection(
                 UsbSerialPort.STOPBITS_1,
                 UsbSerialPort.PARITY_NONE
             )
+            // Some CDC devices send nothing until the host raises DTR. Not every driver supports
+            // the control lines, so a failure here is not fatal.
+            runCatching { port.setDTR(true) }
+            runCatching { port.setRTS(true) }
             this.port = port
 
             val input = UsbSerialInputStream(port)
@@ -97,9 +108,11 @@ class UsbSerialMavConnection(
                 resource,
                 ArdupilotmegaDialect
             )
-        } catch (e: IOException) {
+        } catch (e: Exception) {
+            // Not just IOException: openDevice/open can throw SecurityException or
+            // IllegalArgumentException, and the ownership claim must be released for those too.
             close() // Clean up on failure
-            throw e
+            throw e as? IOException ?: IOException(e.message ?: "USB open failed", e)
         }
     }
 
@@ -136,9 +149,11 @@ class UsbSerialMavConnection(
     }
 
     /**
-     * Bridges [UsbSerialPort.read] into a blocking [InputStream]. The serial read returns 0 on a
-     * timeout (no data yet); we loop until bytes arrive or the stream is closed, so okio sees normal
-     * blocking semantics. A real device error propagates as [IOException].
+     * Bridges [UsbSerialPort.read] into a blocking [InputStream]. USB is always read into [buf]
+     * (see [READ_BUFFER_SIZE]) and the caller is served from it, because okio asks for whatever
+     * space is left in its segment, which is usually not a whole number of USB packets. A read
+     * that returns 0 just means "nothing yet"; we loop until bytes arrive or the stream is closed.
+     * A real device error propagates as [IOException].
      */
     private class UsbSerialInputStream(private val port: UsbSerialPort) : InputStream() {
 
@@ -147,8 +162,9 @@ class UsbSerialMavConnection(
 
         private val single = ByteArray(1)
 
-        // Reusable scratch buffer for offset reads (okio reads into segment offsets).
-        private var scratch = ByteArray(0)
+        private val buf = ByteArray(READ_BUFFER_SIZE)
+        private var pos = 0
+        private var limit = 0
 
         @Throws(IOException::class)
         override fun read(): Int {
@@ -160,25 +176,22 @@ class UsbSerialMavConnection(
         override fun read(b: ByteArray, off: Int, len: Int): Int {
             if (len <= 0) return 0
 
-            // port.read() always fills from index 0; read into the target directly when possible,
-            // otherwise into a reusable scratch buffer and copy to the requested offset.
-            val direct = off == 0
-            val dest: ByteArray = if (direct) {
-                b
-            } else {
-                if (scratch.size < len) scratch = ByteArray(len)
-                scratch
+            while (pos == limit) {
+                if (closed) return -1
+                try {
+                    limit = port.read(buf, READ_TIMEOUT_MS)
+                    pos = 0
+                } catch (e: Exception) {
+                    // close() races with a read in flight; whatever that throws is end-of-stream.
+                    if (closed) return -1
+                    throw e as? IOException ?: IOException(e.message ?: "USB read failed", e)
+                }
             }
 
-            while (!closed) {
-                val n = port.read(dest, len, READ_TIMEOUT_MS)
-                if (n > 0) {
-                    if (!direct) System.arraycopy(dest, 0, b, off, n)
-                    return n
-                }
-                // n == 0 -> timed out with no data; keep waiting.
-            }
-            return -1
+            val n = minOf(len, limit - pos)
+            System.arraycopy(buf, pos, b, off, n)
+            pos += n
+            return n
         }
 
         override fun close() {

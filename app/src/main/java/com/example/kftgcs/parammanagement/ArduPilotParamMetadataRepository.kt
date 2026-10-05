@@ -31,10 +31,6 @@ object ArduPilotParamMetadataRepository {
     /** URLs for different vehicle types */
     private const val COPTER_URL =
         "https://autotest.ardupilot.org/Parameters/ArduCopter/apm.pdef.xml"
-    private const val PLANE_URL =
-        "https://autotest.ardupilot.org/Parameters/ArduPlane/apm.pdef.xml"
-    private const val ROVER_URL =
-        "https://autotest.ardupilot.org/Parameters/Rover/apm.pdef.xml"
 
     private const val CACHE_FILE_NAME = "ardupilot_param_metadata.json"
     /** Full metadata snapshot bundled in app assets (works offline, in the field). */
@@ -107,21 +103,6 @@ object ArduPilotParamMetadataRepository {
             return true
         }
         return false
-    }
-
-    /**
-     * Check if metadata has been loaded (memory or disk cache exists).
-     */
-    fun isMetadataLoaded(): Boolean = memoryCache != null
-
-    /**
-     * Clear all caches (memory + disk).
-     */
-    suspend fun clearCache(context: Context) {
-        memoryCache = null
-        withContext(Dispatchers.IO) {
-            getCacheFile(context).delete()
-        }
     }
 
     // ─────────────────────────────────────────────────────────────────

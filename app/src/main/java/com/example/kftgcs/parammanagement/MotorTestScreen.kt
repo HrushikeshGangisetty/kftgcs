@@ -32,7 +32,6 @@ private val MtCard        = Color(0xFF1E2D6B)
 private val MtAccent      = Color(0xFF3A6BD5)
 private val MtStop        = Color(0xFFE53935)
 private val MtSequence    = Color(0xFFF57C00)
-private val MtSuccess     = Color(0xFF38A169)
 private val MtWarning     = Color(0xFFFFC107)
 private val MtTextW       = Color.White
 private val MtTextMuted   = Color.White.copy(alpha = 0.55f)

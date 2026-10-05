@@ -8,12 +8,10 @@ import com.example.kftgcs.telemetry.LogEntryInfo
 import com.example.kftgcs.telemetry.MavlinkTelemetryRepository
 import com.example.kftgcs.telemetry.SdLogEntry
 import com.example.kftgcs.utils.LogUtils
-import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
 import java.io.File
 
 /**
@@ -50,8 +48,8 @@ sealed interface AnalyzeLogUiState {
  * active MAVLink (USB serial) connection via [MavlinkTelemetryRepository], and caches the raw
  * bytes into the app's internal cache directory.
  *
- * All serial read/write work runs on background threads inside the repository
- * (Dispatchers.IO); the file write here is also wrapped in [Dispatchers.IO]. This ViewModel
+ * All serial read/write work, and the streaming of the log to disk, runs on background
+ * threads inside the repository (Dispatchers.IO). This ViewModel
  * only orchestrates state transitions on the main thread.
  *
  * Scope intentionally stops at [AnalyzeLogUiState.Downloaded] — no parsing/analysis yet.
@@ -140,13 +138,9 @@ class AnalyzeLogViewModel(application: Application) : AndroidViewModel(applicati
         _uiState.value = AnalyzeLogUiState.DownloadingSd(log, 0f)
         viewModelScope.launch {
             try {
-                val bytes = repo.downloadSdLog(log.path) { percent ->
+                val file = File(getApplication<Application>().cacheDir, "sdlog_${log.name}")
+                repo.downloadSdLog(log.path, file) { percent ->
                     _uiState.value = AnalyzeLogUiState.DownloadingSd(log, percent)
-                }
-                val file = withContext(Dispatchers.IO) {
-                    val out = File(getApplication<Application>().cacheDir, "sdlog_${log.name}")
-                    out.writeBytes(bytes)
-                    out
                 }
                 LogUtils.i("AnalyzeLogVM", "SD log ${log.name} saved (${file.length()} bytes)")
                 _uiState.value = AnalyzeLogUiState.Downloaded(null, file, label = log.name)
@@ -171,13 +165,9 @@ class AnalyzeLogViewModel(application: Application) : AndroidViewModel(applicati
         _uiState.value = AnalyzeLogUiState.Downloading(log, 0f)
         viewModelScope.launch {
             try {
-                val bytes = repo.downloadLog(log.id, log.sizeBytes) { percent ->
+                val file = File(getApplication<Application>().cacheDir, "log_${log.id}.bin")
+                repo.downloadLog(log.id, log.sizeBytes, file) { percent ->
                     _uiState.value = AnalyzeLogUiState.Downloading(log, percent)
-                }
-                val file = withContext(Dispatchers.IO) {
-                    val out = File(getApplication<Application>().cacheDir, "log_${log.id}.bin")
-                    out.writeBytes(bytes)
-                    out
                 }
                 LogUtils.i("AnalyzeLogVM", "Log ${log.id} saved (${file.length()} bytes) at ${file.absolutePath}")
                 _uiState.value = AnalyzeLogUiState.Downloaded(log, file)

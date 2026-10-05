@@ -60,8 +60,6 @@ class RCCalibrationViewModel(private val sharedViewModel: SharedViewModel) : Vie
     private val capturedMax = IntArray(16) { 1500 }
     private val capturedTrim = IntArray(16) { 1500 }
 
-    private var oldRcRate: Float = 0f
-
     init {
         // Observe connection state
         viewModelScope.launch {

@@ -34,8 +34,6 @@ import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.withTimeout
-import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlin.coroutines.resume
@@ -45,9 +43,11 @@ import com.example.kftgcs.auth.KFTAuth
 import com.example.kftgcs.auth.AuthResult
 import com.example.kftgcs.utils.LogUtils
 import kotlinx.coroutines.withTimeoutOrNull
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.cancelAndJoin
 import timber.log.Timber
+import java.io.File
 import java.util.Locale
-import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicLong
 
 
@@ -412,11 +412,7 @@ class MavlinkTelemetryRepository(
     @Volatile private var activeAuthJob: kotlinx.coroutines.Job? = null
 
     // For total distance tracking
-    private val positionHistory = mutableListOf<Pair<Double, Double>>()
     private var totalDistanceMeters: Float = 0f
-    private var lastMissionRunning = false
-    private var flightStartTime: Long = 0L  // Track when flight actually started
-    private var isFlightActive = false  // Track if flight is in progress
 
     // Flow rate filter for sensor fault detection and smoothing
     private val flowRateFilter = FlowRateFilter(windowSize = 5)
@@ -3633,70 +3629,6 @@ class MavlinkTelemetryRepository(
     }?.toInt()
 
     /**
-     * Send RC_CHANNELS_OVERRIDE message to control specific RC channels.
-     * This is used for real-time PWM control of spray systems and other RC-controlled peripherals.
-     *
-     * @param channel The RC channel number (1-18)
-     * @param pwmValue The PWM value (typically 1000-2000, use 0 or UINT16_MAX to release channel)
-     */
-    suspend fun sendRcChannelOverride(channel: Int, pwmValue: UShort) {
-        // RC_CHANNELS_OVERRIDE has 18 channels, use UINT16_MAX (65535) to not override a channel
-        val noOverride: UShort = 65535u
-
-        val rcOverride = RcChannelsOverride(
-            targetSystem = fcuSystemId,
-            targetComponent = fcuComponentId,
-            chan1Raw = if (channel == 1) pwmValue else noOverride,
-            chan2Raw = if (channel == 2) pwmValue else noOverride,
-            chan3Raw = if (channel == 3) pwmValue else noOverride,
-            chan4Raw = if (channel == 4) pwmValue else noOverride,
-            chan5Raw = if (channel == 5) pwmValue else noOverride,
-            chan6Raw = if (channel == 6) pwmValue else noOverride,
-            chan7Raw = if (channel == 7) pwmValue else noOverride,
-            chan8Raw = if (channel == 8) pwmValue else noOverride,
-            chan9Raw = if (channel == 9) pwmValue else noOverride,
-            chan10Raw = if (channel == 10) pwmValue else noOverride,
-            chan11Raw = if (channel == 11) pwmValue else noOverride,
-            chan12Raw = if (channel == 12) pwmValue else noOverride,
-            chan13Raw = if (channel == 13) pwmValue else noOverride,
-            chan14Raw = if (channel == 14) pwmValue else noOverride,
-            chan15Raw = if (channel == 15) pwmValue else noOverride,
-            chan16Raw = if (channel == 16) pwmValue else noOverride,
-            chan17Raw = if (channel == 17) pwmValue else noOverride,
-            chan18Raw = if (channel == 18) pwmValue else noOverride
-        )
-
-        try {
-            connection.trySendUnsignedV2(
-                gcsSystemId,
-                gcsComponentId,
-                rcOverride
-            )
-        } catch (e: Exception) {
-        }
-    }
-
-    /**
-     * Send DO_SET_SERVO command - controls servo/motor output directly.
-     * Note: This sets servo output, not RC input. The servo number corresponds to
-     * SERVO outputs (SERVO1_FUNCTION, SERVO2_FUNCTION, etc.), not RC channels.
-     *
-     * For ArduPilot:
-     * - Servo 1-8 typically map to MAIN outputs
-     * - Servo 9+ map to AUX outputs
-     *
-     * @param servoNumber Servo output number (1-based)
-     * @param pwmValue PWM value (typically 1000-2000)
-     */
-    suspend fun sendServoCommand(servoNumber: Int, pwmValue: Int) {
-        sendCommand(
-            MavCmd.DO_SET_SERVO,
-            param1 = servoNumber.toFloat(),
-            param2 = pwmValue.toFloat()
-        )
-    }
-
-    /**
      * Send pre-arm checks command to validate vehicle is ready to arm
      * Returns true if pre-arm checks pass, false otherwise
      */
@@ -4421,126 +4353,156 @@ class MavlinkTelemetryRepository(
         }
 
     /**
-     * Download a single DataFlash log over MAVLink and return its raw bytes.
+     * Download a single DataFlash log over MAVLink into [dest].
      *
      * Sends LOG_REQUEST_DATA for the whole log (ofs=0, count=0xFFFFFFFF) and
-     * reassembles the LOG_DATA chunks (up to 90 bytes each) into a contiguous
-     * buffer. Progress is reported via [onProgress] in the range 0f..1f. A chunk
-     * carrying fewer than 90 bytes marks the end of the log. A LOG_REQUEST_END is
-     * sent on completion so the FC stops transmitting.
+     * appends the LOG_DATA chunks (up to 90 bytes each) to `<dest>.part`, which is
+     * renamed to [dest] on success. The log is never held in memory, so its size
+     * is not limited by the heap. Progress is reported via [onProgress] in the
+     * range 0f..1f. A chunk carrying fewer than 90 bytes marks the end of the log.
+     * A LOG_REQUEST_END is always sent, on success, failure or cancellation, so
+     * the FC stops transmitting.
+     *
+     * Only the chunk at the next expected offset is accepted. A chunk further
+     * ahead means one was lost, and the log is re-requested from the gap, so a
+     * dropped packet can never leave a hole in the file.
      *
      * If no chunk arrives within an idle window the transfer fails (throws) so a
      * stalled link surfaces an error instead of hanging.
      *
      * @param id the log id from [LogEntryInfo].
      * @param sizeBytes the expected size from [LogEntryInfo] (used for progress and
-     *   buffer allocation). If 0/unknown the buffer grows dynamically.
+     *   end detection). May be 0/unknown.
      */
     suspend fun downloadLog(
         id: Int,
         sizeBytes: Long,
+        dest: File,
         idleTimeoutMs: Long = 3000L,
         maxStallRetries: Int = 8,
         onProgress: (Float) -> Unit
-    ): ByteArray = withContext(Dispatchers.IO) {
+    ): Unit = withContext(Dispatchers.IO) {
         if (!state.value.fcuDetected) throw IllegalStateException("No flight controller connected")
 
-        // Pre-size when the size is known; otherwise start small and grow.
-        var buffer = ByteArray(if (sizeBytes > 0) sizeBytes.toInt() else 64 * 1024)
-        // Highest (ofs + len) written so far == bytes of the file we have. Atomic because it is
-        // written by the collector coroutine and read by the watchdog loop below.
-        val highWaterMark = AtomicInteger(0)
-        // Wall-clock time of the most recent LOG_DATA chunk, for the idle watchdog.
+        // Bytes written so far, contiguous from 0. Atomic because it is written by the collector
+        // coroutine and read by the watchdog loop below.
+        val received = AtomicLong(0)
+        // Wall-clock time of the most recent accepted LOG_DATA chunk, for the idle watchdog.
         val lastDataAt = AtomicLong(System.currentTimeMillis())
         val finished = CompletableDeferred<Unit>()
 
-        val job = AppScope.launch {
-            connection.mavFrame.collect { frame ->
-                val msg = frame.message
-                if (msg is LogData && msg.id.toInt() == id) {
-                    val ofs = (msg.ofs.toLong() and 0xFFFFFFFFL).toInt()
-                    val count = msg.count.toInt() and 0xFF
-                    val bytes = msg.data.take(count).map { it.toByte() }
-
-                    val end = ofs + count
-                    if (end > buffer.size) {
-                        buffer = buffer.copyOf(maxOf(end, buffer.size * 2))
-                    }
-                    for (i in 0 until count) {
-                        buffer[ofs + i] = bytes[i]
-                    }
-                    if (end > highWaterMark.get()) highWaterMark.set(end)
-                    lastDataAt.set(System.currentTimeMillis())
-
-                    if (sizeBytes > 0) {
-                        onProgress((highWaterMark.get().toFloat() / sizeBytes).coerceIn(0f, 1f))
-                    }
-
-                    // A short final chunk, or reaching the expected size, ends the log.
-                    val reachedEnd = (sizeBytes > 0 && highWaterMark.get() >= sizeBytes) || count < 90
-                    if (reachedEnd && !finished.isCompleted) finished.complete(Unit)
-                }
-            }
-        }
-
+        val part = File(dest.path + ".part")
         try {
-            // Initial request: stream the whole log from offset 0.
-            sendLogRequest(id, ofs = 0)
+            part.outputStream().buffered().use { out ->
+                val chunk = ByteArray(90)
+                var lastPercent = -1
+                var lastGapRequestAt = 0L
 
-            // Watchdog: instead of failing on the first gap, re-request from where we stopped so a
-            // brief FC pause or a dropped packet resumes cleanly. Only give up after the FC stays
-            // silent across [maxStallRetries] consecutive idle windows (~idleTimeoutMs each).
-            var lastProgress = 0
-            var stalls = 0
-            val pollMs = 200L
-            while (!finished.isCompleted) {
-                delay(pollMs)
-                if (finished.isCompleted) break
+                val job = AppScope.launch {
+                    connection.mavFrame.collect { frame ->
+                        val msg = frame.message
+                        if (msg !is LogData || msg.id.toInt() != id || finished.isCompleted) return@collect
 
-                val hwm = highWaterMark.get()
-                if (hwm > lastProgress) {
-                    // Data is flowing again — reset the stall counter.
-                    lastProgress = hwm
-                    stalls = 0
-                    continue
-                }
+                        val ofs = msg.ofs.toLong()
+                        val count = minOf(msg.count.toInt(), chunk.size)
+                        val have = received.get()
+                        if (ofs == have) {
+                            for (i in 0 until count) chunk[i] = msg.data[i].toByte()
+                            out.write(chunk, 0, count)
+                            val written = received.addAndGet(count.toLong())
+                            lastDataAt.set(System.currentTimeMillis())
 
-                if (System.currentTimeMillis() - lastDataAt.get() >= idleTimeoutMs) {
-                    stalls++
-                    if (stalls > maxStallRetries) {
-                        throw java.io.IOException(
-                            "Log download stalled (no data for ${idleTimeoutMs}ms at $hwm bytes " +
-                                "after $maxStallRetries resume attempts)"
-                        )
+                            if (sizeBytes > 0) {
+                                val percent = (written * 100 / sizeBytes).toInt().coerceIn(0, 100)
+                                if (percent != lastPercent) {
+                                    lastPercent = percent
+                                    onProgress(percent / 100f)
+                                }
+                            }
+
+                            // A short final chunk, or reaching the expected size, ends the log.
+                            if ((sizeBytes > 0 && written >= sizeBytes) || count < 90) {
+                                finished.complete(Unit)
+                            }
+                        } else if (ofs > have) {
+                            // A chunk was lost. Restart the stream from the gap, at most twice a
+                            // second: chunks already in flight keep landing ahead of it for a moment.
+                            val now = System.currentTimeMillis()
+                            if (now - lastGapRequestAt >= 500L) {
+                                lastGapRequestAt = now
+                                LogUtils.w("LogDownload", "Gap at $have (got $ofs); re-requesting")
+                                sendLogRequest(id, ofs = have)
+                            }
+                        }
+                        // ofs < have: a duplicate after a re-request; already on disk.
                     }
-                    LogUtils.w(
-                        "LogDownload",
-                        "Stalled at $hwm bytes; resume attempt $stalls/$maxStallRetries"
-                    )
-                    // Re-request the remainder from the current offset and re-arm the window.
-                    sendLogRequest(id, ofs = hwm)
-                    lastDataAt.set(System.currentTimeMillis())
+                }
+
+                try {
+                    // Initial request: stream the whole log from offset 0.
+                    sendLogRequest(id, ofs = 0)
+
+                    // Watchdog: re-request from where we stopped so a brief FC pause resumes
+                    // cleanly. Only give up after the FC stays silent across [maxStallRetries]
+                    // consecutive idle windows (~idleTimeoutMs each).
+                    var lastProgress = 0L
+                    var stalls = 0
+                    val pollMs = 200L
+                    while (!finished.isCompleted) {
+                        delay(pollMs)
+                        if (finished.isCompleted) break
+
+                        val have = received.get()
+                        if (have > lastProgress) {
+                            // Data is flowing again — reset the stall counter.
+                            lastProgress = have
+                            stalls = 0
+                            continue
+                        }
+
+                        if (System.currentTimeMillis() - lastDataAt.get() >= idleTimeoutMs) {
+                            stalls++
+                            if (stalls > maxStallRetries) {
+                                throw java.io.IOException(
+                                    "Log download stalled (no data for ${idleTimeoutMs}ms at $have bytes " +
+                                        "after $maxStallRetries resume attempts)"
+                                )
+                            }
+                            LogUtils.w(
+                                "LogDownload",
+                                "Stalled at $have bytes; resume attempt $stalls/$maxStallRetries"
+                            )
+                            // Re-request the remainder from the current offset and re-arm the window.
+                            sendLogRequest(id, ofs = have)
+                            lastDataAt.set(System.currentTimeMillis())
+                        }
+                    }
+                } finally {
+                    // NonCancellable: this must also run when the caller is cancelled (user left
+                    // the screen). The collector has to be finished before `out` is closed, and
+                    // without LOG_REQUEST_END the FC keeps streaming the log over the link.
+                    withContext(NonCancellable) {
+                        job.cancelAndJoin()
+                        try {
+                            val end = LogRequestEnd(targetSystem = fcuSystemId, targetComponent = fcuComponentId)
+                            connection.trySendUnsignedV2(gcsSystemId, gcsComponentId, end)
+                        } catch (e: Exception) {
+                            LogUtils.w("LogDownload", "Failed to send LOG_REQUEST_END: ${e.message}")
+                        }
+                    }
                 }
             }
 
-            try {
-                val end = LogRequestEnd(targetSystem = fcuSystemId, targetComponent = fcuComponentId)
-                connection.trySendUnsignedV2(gcsSystemId, gcsComponentId, end)
-            } catch (e: Exception) {
-                LogUtils.w("LogDownload", "Failed to send LOG_REQUEST_END: ${e.message}")
-            }
-
+            dest.delete()
+            if (!part.renameTo(dest)) throw java.io.IOException("Could not save ${dest.name}")
             onProgress(1f)
-            // Trim to the actual number of bytes received.
-            val hwm = highWaterMark.get()
-            if (hwm == buffer.size) buffer else buffer.copyOf(hwm)
         } finally {
-            job.cancel()
+            part.delete() // no-op once renamed
         }
     }
 
     /** Send a LOG_REQUEST_DATA for log [id] starting at byte [ofs], requesting the remainder. */
-    private suspend fun sendLogRequest(id: Int, ofs: Int) {
+    private suspend fun sendLogRequest(id: Int, ofs: Long) {
         val req = LogRequestData(
             targetSystem = fcuSystemId,
             targetComponent = fcuComponentId,
@@ -4576,118 +4538,15 @@ class MavlinkTelemetryRepository(
         }
 
     /**
-     * Download a log from the FC's SD card by absolute [path] (from [listSdLogs]) over MAVLink FTP.
-     * Progress is reported `0f..1f`. The `.bin` bytes returned are identical to a LOG_DATA download.
+     * Download a log from the FC's SD card by absolute [path] (from [listSdLogs]) over MAVLink FTP
+     * into [dest]. Progress is reported `0f..1f`. The `.bin` written is identical to a LOG_DATA
+     * download.
      */
-    suspend fun downloadSdLog(path: String, onProgress: (Float) -> Unit): ByteArray =
+    suspend fun downloadSdLog(path: String, dest: File, onProgress: (Float) -> Unit): Unit =
         withContext(Dispatchers.IO) {
             if (!state.value.fcuDetected) throw IllegalStateException("No flight controller connected")
-            newFtpClient().downloadFile(path, onProgress)
+            newFtpClient().downloadFile(path, dest, onProgress)
         }
-
-    /**
-     * 🔥 Upload fence items to Flight Controller
-     * Similar to uploadMissionWithAck but specifically for geofence points
-     */
-    suspend fun uploadFenceItems(fenceItems: List<MissionItemInt>, timeoutMs: Long = 30000): Boolean {
-        if (!state.value.fcuDetected) {
-            return false
-        }
-
-        if (fenceItems.isEmpty()) {
-            return false
-        }
-
-        try {
-            // Step 1: Send mission count for fence items
-            val missionCount = MissionCount(
-                targetSystem = fcuSystemId,
-                targetComponent = fcuComponentId,
-                count = fenceItems.size.toUShort(),
-                missionType = MavEnumValue.of(MavMissionType.FENCE)
-            )
-
-            connection.trySendUnsignedV2(gcsSystemId, gcsComponentId, missionCount)
-
-            // Step 2: Wait for mission requests and send fence items
-            val finalAckDeferred = CompletableDeferred<Pair<Boolean, String>>()
-            // Concurrent + frontier guard, for the same reasons as uploadMissionWithAck: the
-            // collector hops pool threads, and answering a stale re-request after the FC has
-            // advanced trips MAV_MISSION_INVALID_SEQUENCE. Fences are small enough that this
-            // has not bitten yet, but the defect is identical.
-            val sentSeqs = java.util.concurrent.ConcurrentHashMap.newKeySet<Int>()
-            val lastSentAtMs = java.util.concurrent.ConcurrentHashMap<Int, Long>()
-
-            // Buffered `mavFrame`, not raw `connection.mavFrame` — same DROP_OLDEST hazard
-            // that stalled mission upload at the second item. See uploadMissionWithAck.
-            val job = AppScope.launch {
-                mavFrame.collect { frame ->
-                    when (val msg = frame.message) {
-                        is MissionRequest, is MissionRequestInt -> {
-                            val seq = if (msg is MissionRequestInt) msg.seq.toInt() else (msg as MissionRequest).seq.toInt()
-
-                            if (seq !in 0 until fenceItems.size) {
-                                finalAckDeferred.complete(false to "Invalid fence sequence $seq")
-                                return@collect
-                            }
-
-                            // Drop retransmits that crossed our reply — see the guard in
-                            // uploadMissionWithAck for why this is time-based.
-                            val sentAt = lastSentAtMs[seq]
-                            if (sentAt != null && System.currentTimeMillis() - sentAt < MISSION_ITEM_RETRANSMIT_WINDOW_MS) {
-                                Timber.w("Geofence: ⏭️ Ignoring duplicate request for seq=$seq (sent ${System.currentTimeMillis() - sentAt}ms ago)")
-                                return@collect
-                            }
-
-                            val fenceItem = fenceItems[seq].copy(
-                                targetSystem = fcuSystemId,
-                                targetComponent = fcuComponentId,
-                                seq = seq.toUShort()
-                            )
-
-                            delay(50L) // Small delay for stability
-                            connection.trySendUnsignedV2(gcsSystemId, gcsComponentId, fenceItem)
-                            sentSeqs.add(seq)
-                            lastSentAtMs[seq] = System.currentTimeMillis()
-                        }
-
-                        is MissionAck -> {
-                            if (msg.missionType.value == MavMissionType.FENCE.value) {
-                                when (msg.type.value) {
-                                    MavMissionResult.MAV_MISSION_ACCEPTED.value -> {
-                                        finalAckDeferred.complete(true to "Fence upload successful")
-                                    }
-                                    MavMissionResult.MAV_MISSION_DENIED.value -> {
-                                        finalAckDeferred.complete(false to "Fence upload denied")
-                                    }
-                                    MavMissionResult.MAV_MISSION_ERROR.value -> {
-                                        finalAckDeferred.complete(false to "Fence upload error")
-                                    }
-                                    else -> {
-                                        finalAckDeferred.complete(false to "Unknown fence upload result: ${msg.type.value}")
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-
-            // Wait for completion
-            val result = withTimeout(timeoutMs) {
-                finalAckDeferred.await()
-            }
-
-            job.cancel()
-
-            return result.first
-
-        } catch (e: TimeoutCancellationException) {
-            return false
-        } catch (e: Exception) {
-            return false
-        }
-    }
 
     /**
      * Retrieve all waypoints from the flight controller.
@@ -5228,11 +5087,6 @@ class MavlinkTelemetryRepository(
         val minutes = (seconds % 3600) / 60
         val secs = seconds % 60
         return String.format("%02d:%02d:%02d", hours, minutes, secs)
-    }
-
-    // Format distance for human-readable display
-    private fun formatDistance(meters: Float): String {
-        return String.format("%.1f m", meters)
     }
 
     suspend fun sendCommandLong(command: CommandLong) {
@@ -6794,47 +6648,6 @@ class MavlinkTelemetryRepository(
         fenceMonitoringJob?.cancel()
         fenceMonitoringJob = null
         _fenceStatus.value = FenceStatus()
-    }
-
-    /**
-     * Clear all fence data from flight controller
-     */
-    /**
-     * Remove the polygon/inclusion fence items from the FC WITHOUT disabling the fence.
-     *
-     * [clearGeofenceFromFC] also sets FENCE_ENABLE=0, which is right when the pilot turns the
-     * geofence off, but wrong for clearing a stale polygon at connect: that would disarm the
-     * home-centred range cylinder along with it. Here we clear only the stored fence items,
-     * leaving FENCE_ENABLE and FENCE_TYPE as configured.
-     */
-    suspend fun clearFenceItemsOnly(): Boolean {
-        return withContext(Dispatchers.IO) {
-            try {
-                val clearCmd = MissionClearAll(
-                    targetSystem = fcuSystemId,
-                    targetComponent = fcuComponentId,
-                    missionType = MavEnumValue.of(MavMissionType.FENCE)
-                )
-                connection.trySendUnsignedV2(gcsSystemId, gcsComponentId, clearCmd)
-
-                val ack = withTimeoutOrNull(5000) {
-                    mavFrame
-                        .filter { it.systemId == fcuSystemId }
-                        .map { it.message }
-                        .filterIsInstance<MissionAck>()
-                        .first { it.missionType.value == MavMissionType.FENCE.value }
-                }
-
-                val ok = ack?.type?.value == MavMissionResult.MAV_MISSION_ACCEPTED.value
-                if (ok) {
-                    // The polygon is gone, so any polygon breach it was reporting is stale.
-                    _fenceStatus.value = FenceStatus()
-                }
-                ok
-            } catch (e: Exception) {
-                false
-            }
-        }
     }
 
     suspend fun clearGeofenceFromFC(): Boolean {

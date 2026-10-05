@@ -1,6 +1,5 @@
 package com.example.kftgcs.parammanagement
 
-import android.widget.Toast
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.kftgcs.telemetry.SharedViewModel
@@ -144,15 +143,6 @@ class FlightModeViewModel(
 
     fun clearMessages() {
         _state.update { it.copy(errorMessage = null, successMessage = null) }
-    }
-
-    // ── Pending local edit (before saving) ───────────────────────────
-    fun updateLocalMode(slotIndex: Int, modeKey: Int) {
-        _state.update { current ->
-            val updated = current.modes.toMutableList()
-            updated[slotIndex] = modeKey
-            current.copy(modes = updated)
-        }
     }
 
     private fun modeLabel(key: Int) =

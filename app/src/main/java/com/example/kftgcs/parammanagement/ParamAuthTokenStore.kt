@@ -34,20 +34,7 @@ class ParamAuthTokenStore(context: Context) {
         }
     }
 
-    fun updateAccessToken(accessToken: String, expiresInSeconds: Long?, refreshToken: String? = null) {
-        val expiresAtMillis = expiresInSeconds?.let { System.currentTimeMillis() + it * 1000L }
-        prefs.edit().apply {
-            putString(KEY_ACCESS_TOKEN, accessToken)
-            if (expiresAtMillis != null) putLong(KEY_EXPIRES_AT, expiresAtMillis) else remove(KEY_EXPIRES_AT)
-            if (refreshToken != null) putString(KEY_REFRESH_TOKEN, refreshToken)
-            apply()
-        }
-    }
-
     fun getAccessToken(): String? = prefs.getString(KEY_ACCESS_TOKEN, null)
-    fun getRefreshToken(): String? = prefs.getString(KEY_REFRESH_TOKEN, null)
-    fun getExpiresAtMillis(): Long? =
-        if (prefs.contains(KEY_EXPIRES_AT)) prefs.getLong(KEY_EXPIRES_AT, 0L) else null
 
     fun getCachedUser(): ParamUser? {
         val id = prefs.getString(KEY_USER_ID, null)
@@ -56,11 +43,6 @@ class ParamAuthTokenStore(context: Context) {
         val role = prefs.getString(KEY_USER_ROLE, null)
         return if (id == null && email == null && fullName == null && role == null) null
         else ParamUser(id, email, fullName, role)
-    }
-
-    fun isAccessTokenLikelyExpired(skewSeconds: Long = 30): Boolean {
-        val expiresAt = getExpiresAtMillis() ?: return false
-        return System.currentTimeMillis() >= expiresAt - skewSeconds * 1000L
     }
 
     fun clear() {

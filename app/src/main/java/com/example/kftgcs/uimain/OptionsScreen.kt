@@ -1,6 +1,5 @@
 package com.example.kftgcs.uimain
 
-import android.widget.Toast
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -29,7 +28,6 @@ import com.example.kftgcs.telemetry.BatteryFsAction
 import com.example.kftgcs.telemetry.LimitFailsafePolicy
 import com.example.kftgcs.telemetry.SharedViewModel
 import com.example.kftgcs.viewmodel.OptionsViewModel
-import java.util.Locale
 
 private val DarkBackground = Color(0xFF23272A)
 private val AccentBlue = Color(0xFF87CEEB)

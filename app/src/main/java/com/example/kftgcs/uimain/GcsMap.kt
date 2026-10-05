@@ -13,7 +13,6 @@ import com.example.kftgcs.R
 import com.example.kftgcs.location.rememberPhoneLocation
 import com.example.kftgcs.telemetry.DronePathPoint
 import com.example.kftgcs.telemetry.TelemetryState
-import com.example.kftgcs.telemetry.SharedViewModel
 import com.google.android.gms.maps.CameraUpdateFactory
 import com.google.android.gms.maps.model.LatLng
 import com.google.android.gms.maps.model.BitmapDescriptor
@@ -1656,53 +1655,6 @@ private fun averageAngles(angle1: Double, angle2: Double): Double {
 
     // Normalize result
     return ((avg % 360) + 360) % 360
-}
-
-/**
- * Create a bitmap descriptor with distance label for obstacle edges
- */
-private fun createDistanceLabel(text: String): BitmapDescriptor {
-    val width = 120
-    val height = 40
-    val bitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
-    val canvas = Canvas(bitmap)
-
-    // Draw background with rounded corners
-    val bgPaint = android.graphics.Paint().apply {
-        isAntiAlias = true
-        color = android.graphics.Color.argb(200, 50, 50, 50) // Semi-transparent dark gray
-        style = android.graphics.Paint.Style.FILL
-    }
-    val rect = android.graphics.RectF(0f, 0f, width.toFloat(), height.toFloat())
-    canvas.drawRoundRect(rect, 8f, 8f, bgPaint)
-
-    // Draw border
-    val borderPaint = android.graphics.Paint().apply {
-        isAntiAlias = true
-        color = android.graphics.Color.WHITE
-        style = android.graphics.Paint.Style.STROKE
-        strokeWidth = 2f
-    }
-    canvas.drawRoundRect(rect, 8f, 8f, borderPaint)
-
-    // Draw text
-    val textPaint = android.graphics.Paint().apply {
-        isAntiAlias = true
-        color = android.graphics.Color.WHITE
-        textSize = 28f
-        typeface = android.graphics.Typeface.create(android.graphics.Typeface.DEFAULT, android.graphics.Typeface.BOLD)
-        textAlign = android.graphics.Paint.Align.CENTER
-    }
-
-    // Calculate text position (centered)
-    val textBounds = android.graphics.Rect()
-    textPaint.getTextBounds(text, 0, text.length, textBounds)
-    val x = width / 2f
-    val y = height / 2f + textBounds.height() / 2f
-
-    canvas.drawText(text, x, y, textPaint)
-
-    return BitmapDescriptorFactory.fromBitmap(bitmap)
 }
 
 /**

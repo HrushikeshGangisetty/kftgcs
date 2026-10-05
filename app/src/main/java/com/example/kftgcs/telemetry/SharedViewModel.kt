@@ -2329,53 +2329,6 @@ class SharedViewModel : ViewModel() {
     }
 
     /**
-     * Clear mission completely - from both FC and map.
-     * Also resets all pause/resume state.
-     * Called when user navigates to home tab or goes back while mission is paused.
-     */
-    fun clearMissionCompletely() {
-        LogUtils.i("SharedVM", "🧹 Clearing mission completely (FC + map + pause/resume state)")
-
-        // Step 1: Clear mission from FC
-        viewModelScope.launch {
-            try {
-                val cleared = repo?.clearMissionFromFC() ?: false
-                if (cleared) {
-                    LogUtils.i("SharedVM", "✅ Mission cleared from FC")
-                } else {
-                    LogUtils.w("SharedVM", "⚠️ Failed to clear mission from FC (may not be connected)")
-                }
-            } catch (e: Exception) {
-                LogUtils.e("SharedVM", "❌ Error clearing mission from FC", e)
-            }
-        }
-
-        // Step 2: Clear map data
-        clearMissionFromMap()
-
-        // Step 3: Reset all pause/resume state
-        _resumePointLocation.value = null
-        _resumePointWaypoint.value = null
-        _resumeMissionReady.value = false
-        _resumePreparationFailed.value = false
-        _resumePreparationInProgress.value = false
-        _showAddResumeHerePopup.value = false
-        _pendingResumeLocation = null
-        _missionPauseLocation = null
-        _sprayWasActiveBeforePause = false
-
-        // Step 4: Reset telemetry paused state
-        _telemetryState.update {
-            it.copy(
-                missionPaused = false,
-                pausedAtWaypoint = null
-            )
-        }
-
-        LogUtils.i("SharedVM", "✅ Mission completely cleared")
-    }
-
-    /**
      * Clear the geofence polygon and disable geofence monitoring.
      * Called when navigating away from mission or when user disables geofence.
      * Uses Mission Planner-style approach to clear fence from FC.
@@ -2669,14 +2622,6 @@ class SharedViewModel : ViewModel() {
         }
     }
 
-    /**
-     * Legacy function for backward compatibility - redirects to handleTankEmpty()
-     * @deprecated Use handleTankEmpty() instead
-     */
-    fun handleTankEmptyInAutoMode() {
-        handleTankEmpty()
-    }
-
     // ═══ SVD (DGCA inspection) build ═══
     // The SVD flavour ships without the Options page, so the pilot cannot configure the
     // failsafe actions at all. They are fixed at RTL, and the voltage thresholds are read
@@ -2820,16 +2765,6 @@ class SharedViewModel : ViewModel() {
     private fun getMaxAltitude(): Float = _fcAltitudeMax.value ?: 0f
 
     /**
-     * The altitude ceiling other components should respect (geofence upload, mission
-     * planning). Returns the configured value, or null when the failsafe is disabled.
-     */
-    fun getAltitudeCeiling(): Float? {
-        val context = GCSApplication.getInstance() ?: return null
-        if (!isAltitudeFailsafeEnabled(context)) return null
-        return getMaxAltitude().takeIf { it > 0f }
-    }
-
-    /**
      * Slack subtracted from the pilot's ceiling before it is written to the FC's
      * FENCE_ALT_MAX.
      *
@@ -2855,16 +2790,6 @@ class SharedViewModel : ViewModel() {
      * restoring a bias is a one-line change and those round trips stay symmetrical.
      */
     val FC_ALT_FENCE_SAFETY_OFFSET_M = 0.0f
-
-    /**
-     * The value to write to the FC's FENCE_ALT_MAX: the pilot's ceiling less
-     * [FC_ALT_FENCE_SAFETY_OFFSET_M], floored so a very low ceiling cannot go non-positive
-     * (which ArduPilot would read as "no altitude fence").
-     */
-    fun getFcAltitudeFenceMax(): Float? {
-        val ceiling = getAltitudeCeiling() ?: return null
-        return (ceiling - FC_ALT_FENCE_SAFETY_OFFSET_M).coerceAtLeast(1f)
-    }
 
     fun speak(text: String) {
         ttsManager?.speak(text)
@@ -3102,11 +3027,6 @@ class SharedViewModel : ViewModel() {
         LogUtils.d("SharedVM", "Refreshed ${devices.size} USB serial devices")
     }
 
-    fun hasUsbPermission(context: Context, device: UsbDevice): Boolean {
-        val usbManager = context.getSystemService(Context.USB_SERVICE) as? UsbManager ?: return false
-        return usbManager.hasPermission(device)
-    }
-
     /**
      * Request runtime permission for a USB device. The result is delivered via a one-shot
      * [BroadcastReceiver]; [onResult] is invoked with whether access was granted.
@@ -3256,27 +3176,6 @@ class SharedViewModel : ViewModel() {
         if (completed) {
             LogUtils.i("SharedVM", "Mission completed via updateFlightState - keeping map lines visible")
         }
-    }
-
-    /**
-     * Mark the mission completed popup as handled to prevent it from showing again
-     * This should be called after the popup is shown or skipped
-     */
-    fun markMissionCompletedHandled() {
-        _telemetryState.value = _telemetryState.value.copy(missionCompletedHandled = true)
-        LogUtils.i("SharedVM", "Mission completed handled - popup won't show again for this mission")
-    }
-
-    /**
-     * Reset mission completed state - called when starting a new mission
-     */
-    fun resetMissionCompletedState() {
-        _telemetryState.value = _telemetryState.value.copy(
-            missionCompleted = false,
-            missionCompletedHandled = false,
-            lastMissionElapsedSec = null
-        )
-        LogUtils.i("SharedVM", "Mission completed state reset")
     }
 
     /**
@@ -4562,11 +4461,6 @@ class SharedViewModel : ViewModel() {
     private val _useSquareGeofence = MutableStateFlow(true)
     val useSquareGeofence: StateFlow<Boolean> = _useSquareGeofence.asStateFlow()
 
-    fun setGeofenceShape(useSquare: Boolean) {
-        _useSquareGeofence.value = useSquare
-        updateGeofencePolygon()
-    }
-
     fun setSurveyPolygon(polygon: List<LatLng>) {
         _surveyPolygon.value = polygon
         updateGeofencePolygon()
@@ -4885,22 +4779,6 @@ class SharedViewModel : ViewModel() {
     }
 
     /**
-     * Validates that all points are inside or on the polygon boundary
-     */
-    private fun validatePolygonContainsPoints(polygon: List<LatLng>, points: List<LatLng>): Boolean {
-        if (polygon.size < 3) return false
-
-        // Check if all points are inside the polygon with a small tolerance
-        for (point in points) {
-            if (!GeofenceUtils.isPointInPolygon(point, polygon)) {
-                LogUtils.w("SharedVM", "Point not in geofence: $point")
-                return false
-            }
-        }
-        return true
-    }
-
-    /**
      * Schedule a debounced geofence upload to Flight Controller.
      * This prevents rapid uploads when user is adjusting the slider or dragging points.
      * The actual upload happens after FENCE_UPLOAD_DEBOUNCE_MS of no changes.
@@ -5014,13 +4892,6 @@ class SharedViewModel : ViewModel() {
         } finally {
             fenceUploadMutex.unlock()
         }
-    }
-
-    /**
-     * Legacy function name for compatibility - now uses debounced upload
-     */
-    private fun uploadGeofenceToFC(polygon: List<LatLng>) {
-        scheduleGeofenceUpload(polygon)
     }
 
     // Spray control state
@@ -5209,9 +5080,6 @@ class SharedViewModel : ViewModel() {
     // The location (LatLng) where the drone paused - for displaying "R" marker on map
     private val _resumePointLocation = MutableStateFlow<LatLng?>(null)
     val resumePointLocation: StateFlow<LatLng?> = _resumePointLocation.asStateFlow()
-
-    // Track the previous mode to detect AUTO -> LOITER transition
-    private var previousMode: String? = null
 
     // Flag to track if we have a stored resume mission ready to execute
     private val _resumeMissionReady = MutableStateFlow(false)
@@ -5737,50 +5605,6 @@ class SharedViewModel : ViewModel() {
     }
 
     /**
-     * Called when user confirms "Add Resume Here" in the popup
-     * This stores the resume point and prepares the mission for resume
-     */
-    fun confirmAddResumeHere(onProgress: (String) -> Unit = {}, onResult: (Boolean, String?) -> Unit = { _, _ -> }) {
-        viewModelScope.launch {
-            val resumeWaypoint = _resumePointWaypoint.value ?: run {
-                LogUtils.e("SharedVM", "No resume waypoint stored!")
-                onResult(false, "No resume waypoint stored")
-                return@launch
-            }
-
-            val resumeLocation = effectiveResumeLocation()
-            LogUtils.i("ResumeMission", "=== CONFIRM ADD RESUME HERE ===")
-            LogUtils.i("ResumeMission", "Resume waypoint: $resumeWaypoint, location: ${resumeLocation?.latitude}, ${resumeLocation?.longitude}")
-
-            _showAddResumeHerePopup.value = false
-
-            try {
-                val result = prepareResumeMission(resumeWaypoint, resumeLocation, onProgress)
-                if (!result.success) {
-                    onResult(false, result.failureReason)
-                    return@launch
-                }
-
-                if (!engageAutoForResume(onProgress)) {
-                    onResult(false, "Failed to switch to AUTO. Stuck in: ${_telemetryState.value.mode}")
-                    return@launch
-                }
-
-                onProgress("Mission resumed!")
-                markMissionResumed(resumeWaypoint)
-
-                LogUtils.i("ResumeMission", "Resume mission complete (${result.itemCount} items)")
-                onResult(true, null)
-
-            } catch (e: Exception) {
-                LogUtils.e("ResumeMission", "Resume mission failed", e)
-                addNotification(Notification("Resume mission failed: ${e.message}", NotificationType.ERROR))
-                onResult(false, e.message)
-            }
-        }
-    }
-
-    /**
      * Resume mission from a manually placed point on the map.
      *
      * Strategy: Find the mission segment (WPi → WPi+1) that the resume point lies closest to,
@@ -5866,15 +5690,6 @@ class SharedViewModel : ViewModel() {
                 _resumePreparationInProgress.value = false
             }
         }
-    }
-
-    /**
-     * Called when user dismisses the "Add Resume Here" popup without confirming
-     */
-    fun dismissAddResumeHerePopup() {
-        _showAddResumeHerePopup.value = false
-        _resumePointWaypoint.value = null
-        LogUtils.i("SharedVM", "Add Resume Here popup dismissed")
     }
 
     /**
@@ -6001,18 +5816,6 @@ class SharedViewModel : ViewModel() {
             ttsManager?.speak("Warning. No resume point loaded. Flying the original mission.")
         }
     }
-
-    /**
-     * Update the previous mode tracking (called from TelemetryRepository)
-     */
-    fun updatePreviousMode(mode: String?) {
-        previousMode = mode
-    }
-
-    /**
-     * Get the previous mode for transition detection
-     */
-    fun getPreviousMode(): String? = previousMode
 
     // --- MAVLink Actions ---
 
@@ -6518,77 +6321,6 @@ class SharedViewModel : ViewModel() {
                 repo?.requestMissionAndLog()
             } catch (e: Exception) {
                 LogUtils.e("SharedVM", "Exception during mission readback", e)
-            }
-        }
-    }
-
-    fun pauseMission(onResult: (Boolean, String?) -> Unit = { _, _ -> }) {
-        viewModelScope.launch {
-            try {
-                val currentWp = _telemetryState.value.currentWaypoint
-                val lastAutoWp = _telemetryState.value.lastAutoWaypoint
-                // The item the drone is flying TOWARDS. Resuming from an already-reached item
-                // sends the drone back to the start of the line it was half way along.
-                // MISSION_PROGRESS_UNKNOWN means the FC has not reported progress; fall back to
-                // the raw telemetry for display rather than storing the sentinel as a waypoint.
-                // The real resume sequence is decided in onModeChangedToLoiterFromAuto, which
-                // refuses outright in that case.
-                val targetSeq = repo?.currentMissionTargetSeq()
-                val waypointToStore = targetSeq?.takeIf { it != MISSION_PROGRESS_UNKNOWN }
-                    ?: (if (lastAutoWp > 0) lastAutoWp else currentWp)
-
-                // Record where the mission is being interrupted, so the resume flies back to
-                // this exact spot even if the pilot dismisses the "Set Resume Point" popup.
-                val pauseLat = _telemetryState.value.latitude
-                val pauseLon = _telemetryState.value.longitude
-                if (pauseLat != null && pauseLon != null) {
-                    _missionPauseLocation = LatLng(pauseLat, pauseLon)
-                }
-
-                // Save spray state before pause for automatic restore on resume
-                // Check both app state and telemetry (RC7 or flow rate indicates active spraying)
-                val sprayTelemetry = _telemetryState.value.sprayTelemetry
-                _sprayWasActiveBeforePause = _sprayEnabled.value || sprayTelemetry.sprayEnabled || (sprayTelemetry.flowRateLiterPerMin ?: 0f) > 0f
-                LogUtils.i("SharedVM", "💧 Spray state before pause: $_sprayWasActiveBeforePause (app=${_sprayEnabled.value}, RC7=${sprayTelemetry.sprayEnabled}, flow=${sprayTelemetry.flowRateLiterPerMin})")
-
-                // DEBUG LOGS
-                LogUtils.i("SharedVM", "=== PAUSE MISSION ===")
-                LogUtils.i("SharedVM", "lastAutoWaypoint: $lastAutoWp")
-                LogUtils.i("SharedVM", "currentWaypoint: $currentWp")
-                LogUtils.i("SharedVM", "waypointToStore (will be pausedAtWaypoint): $waypointToStore")
-                LogUtils.i("DEBUG_PAUSE", "Pausing - lastAutoWp: $lastAutoWp, currentWp: $currentWp, storing: $waypointToStore")
-
-                // Switch to LOITER to hold position
-                // NOTE: The mode change will be detected by TelemetryRepository which will
-                // trigger onModeChangedToLoiterFromAuto() to show the "Add Resume Here" popup
-                val result = repo?.changeMode(MavMode.LOITER) ?: false
-
-                if (result) {
-                    // Don't set missionPaused here - let the mode change detection handle it
-                    // The popup will be shown by onModeChangedToLoiterFromAuto()
-                    LogUtils.i("SharedVM", "LOITER mode change command sent. Waiting for mode change detection...")
-
-                    // ✅ Send mission status PAUSED to backend (crash-safe)
-                    try {
-                        WebSocketManager.getInstance().sendMissionStatus(WebSocketManager.MISSION_STATUS_PAUSED)
-                        WebSocketManager.getInstance().sendMissionEvent(
-                            eventType = "MISSION_PAUSED",
-                            eventStatus = "INFO",
-                            description = "Mission paused"
-                        )
-                    } catch (e: Exception) {
-                        LogUtils.e("SharedVM", "Failed to send PAUSED status", e)
-                    }
-
-                    // Announce via TTS
-                    ttsManager?.announceMissionPaused(waypointToStore ?: 0)
-                    onResult(true, null)
-                } else {
-                    onResult(false, "Failed to pause mission")
-                }
-            } catch (e: Exception) {
-                LogUtils.e("SharedVM", "Failed to pause mission", e)
-                onResult(false, e.message)
             }
         }
     }
@@ -7434,37 +7166,6 @@ class SharedViewModel : ViewModel() {
     val splitPlanWaypointLon: StateFlow<Double?> = _splitPlanWaypointLon.asStateFlow()
 
     /**
-     * Toggle split plan mode - show confirmation dialog
-     */
-    fun toggleSplitPlan() {
-        if (_splitPlanActive.value) {
-            // If already in split plan mode, resume from split point
-            resumeFromSplitPlan { success, error ->
-                if (success) {
-                    addNotification(
-                        Notification(
-                            message = "Resuming mission from split point",
-                            type = NotificationType.SUCCESS
-                        )
-                    )
-                } else {
-                    addNotification(
-                        Notification(
-                            message = "Failed to resume: ${error ?: "Unknown error"}",
-                            type = NotificationType.ERROR
-                        )
-                    )
-                }
-            }
-        } else {
-            // Not in split plan mode - initiate split
-            LogUtils.i("SharedVM", "Split plan toggle initiated")
-            // The dialog will be shown in the UI (MainPage), we just need to trigger it
-            // by setting a mutable state - but that's handled in the composable
-        }
-    }
-
-    /**
      * Confirm split plan action - called when user clicks Yes in dialog
      */
     fun confirmSplitPlan() {
@@ -7575,108 +7276,12 @@ class SharedViewModel : ViewModel() {
         }
     }
 
-    /**
-     * Resume mission from the split waypoint
-     * This will start the mission from where the drone came down
-     */
-    fun resumeFromSplitPlan(onResult: (Boolean, String?) -> Unit = { _, _ -> }) {
-        viewModelScope.launch {
-            try {
-                LogUtils.i("SharedVM", "Resuming from split plan...")
-
-                if (repo == null) {
-                    LogUtils.w("SharedVM", "No repo available, cannot resume from split")
-                    onResult(false, "Not connected to vehicle")
-                    return@launch
-                }
-
-                if (!_splitPlanActive.value) {
-                    LogUtils.w("SharedVM", "No active split plan to resume")
-                    onResult(false, "No split plan active")
-                    return@launch
-                }
-
-                if (!_telemetryState.value.fcuDetected) {
-                    LogUtils.w("SharedVM", "FCU not detected, cannot resume from split")
-                    onResult(false, "FCU not detected")
-                    return@launch
-                }
-
-                if (!_missionUploaded.value || lastUploadedCount == 0) {
-                    LogUtils.w("SharedVM", "No mission uploaded, cannot resume")
-                    onResult(false, "No mission uploaded")
-                    return@launch
-                }
-
-                if (!_telemetryState.value.armable) {
-                    LogUtils.w("SharedVM", "Vehicle not armable")
-                    onResult(false, "Vehicle not armable. Check sensors and GPS.")
-                    return@launch
-                }
-
-                val sats = _telemetryState.value.sats ?: 0
-                if (sats < 6) {
-                    LogUtils.w("SharedVM", "Insufficient GPS satellites ($sats)")
-                    onResult(false, "Insufficient GPS satellites ($sats). Need at least 6.")
-                    return@launch
-                }
-
-                // Arm the vehicle
-                LogUtils.i("SharedVM", "Arming vehicle for split plan resume...")
-                repo?.arm()
-                delay(500)
-
-                if (!_telemetryState.value.armed) {
-                    LogUtils.w("SharedVM", "Failed to arm vehicle")
-                    onResult(false, "Failed to arm vehicle")
-                    return@launch
-                }
-
-                LogUtils.i("SharedVM", "✓ Vehicle armed successfully")
-
-                // Send mission start command
-                LogUtils.i("SharedVM", "Sending mission start command...")
-                repo?.sendMissionStartCommand()
-                delay(500)
-
-                // Switch to AUTO mode
-                LogUtils.i("SharedVM", "Switching to AUTO mode...")
-                val autoSuccess = repo?.changeMode(MavMode.AUTO) ?: false
-
-                if (!autoSuccess) {
-                    LogUtils.e("SharedVM", "Failed to switch to AUTO mode")
-                    onResult(false, "Failed to switch to AUTO mode")
-                    return@launch
-                }
-
-                LogUtils.i("SharedVM", "✓ Mission resumed from split point")
-                addNotification(
-                    Notification(
-                        message = "Mission resumed from split waypoint",
-                        type = NotificationType.SUCCESS
-                    )
-                )
-
-                // Clear split plan active flag after successful resume
-                _splitPlanActive.value = false
-                _isSplitPlanActive.value = false
-
-                onResult(true, null)
-            } catch (e: Exception) {
-                LogUtils.e("SharedVM", "Failed to resume from split plan", e)
-                onResult(false, e.message)
-            }
-        }
-    }
-
     // ════════════════════════════════════════════════════════════════
     // GEOFENCE MANAGEMENT (ArduPilot Native System - Mission Planner Style)
     // FC handles all fence enforcement at 400Hz. GCS only uploads and monitors.
     // ════════════════════════════════════════════════════════════════
 
     companion object {
-        // Default fence radius - Distance between waypoints and geofence boundary
-        private const val DEFAULT_FENCE_RADIUS_METERS = 17.0f
 
         // Mission index the inserted "fly back to where you paused" waypoint always lands on.
         // filterWaypointsForResume emits HOME first and the transit waypoint second, and
@@ -7706,11 +7311,6 @@ class SharedViewModel : ViewModel() {
         // [defaultWarnVoltage] / [defaultCritVoltage] for why a known-6S pack overrides them.
         const val DEFAULT_LOW_VOLT_1 = 43.0f   // low voltage level 1 (warning) → BATT_LOW_VOLT
         const val DEFAULT_LOW_VOLT_2 = 42.0f   // low voltage level 2 (critical) → BATT_CRT_VOLT
-
-        // Altitude ceiling failsafe default (metres AGL), mirrored to the FC's FENCE_ALT_MAX.
-        // 120 m is the DGCA / most-jurisdictions legal ceiling for this class of drone and
-        // matches the value the geofence upload has always used.
-        const val DEFAULT_MAX_ALTITUDE_M = 120.0f
 
         // NOTE: the max range from home is no longer a GCS constant. It is the FC's
         // FENCE_RADIUS parameter, owned by the operator, and the GCS only reads it.
@@ -8549,56 +8149,6 @@ class SharedViewModel : ViewModel() {
     }
 
     /**
-     * Upload circular geofence (inclusion or exclusion)
-     */
-    fun uploadCircularGeofence(
-        center: LatLng,
-        radiusMeters: Float,
-        isInclusion: Boolean = true,
-        altitudeMax: Float? = null
-    ) {
-        viewModelScope.launch {
-            try {
-                LogUtils.i("Geofence", "Uploading circular geofence: radius=${radiusMeters}m")
-
-                val zones = listOf(
-                    FenceZone.Circle(
-                        center = center,
-                        radiusMeters = radiusMeters,
-                        isInclusion = isInclusion
-                    ),
-                    FenceZone.ReturnPoint(center)
-                )
-
-                val config = FenceConfiguration(
-                    zones = zones,
-                    altitudeMax = altitudeMax
-                )
-
-                val success = repo?.uploadGeofence(config) ?: false
-
-                if (success) {
-                    _fenceConfiguration.value = config
-                    _geofenceEnabled.value = true
-                    addNotification(Notification(
-                        message = "✅ Circular geofence enabled (${radiusMeters}m radius)",
-                        type = NotificationType.SUCCESS
-                    ))
-                    speak("Circular geofence enabled")
-                } else {
-                    addNotification(Notification(
-                        message = "❌ Failed to upload circular geofence",
-                        type = NotificationType.ERROR
-                    ))
-                }
-
-            } catch (e: Exception) {
-                LogUtils.e("Geofence", "Error uploading circular geofence: ${e.message}")
-            }
-        }
-    }
-
-    /**
      * Download current geofence from flight controller
      */
     fun downloadGeofence() {
@@ -8634,41 +8184,6 @@ class SharedViewModel : ViewModel() {
 
             } catch (e: Exception) {
                 LogUtils.e("Geofence", "Error downloading geofence: ${e.message}")
-            }
-        }
-    }
-
-    /**
-     * Enable/disable geofence on FC
-     */
-    fun setFenceEnabled(enabled: Boolean) {
-        if (!enabled) {
-            // Reset local state immediately when disabling
-            stopFenceStatusMonitoring()
-            resetGeofenceState()
-        }
-
-        viewModelScope.launch {
-            val success = repo?.enableFence(enabled) ?: false
-
-            if (success) {
-                _geofenceEnabled.value = enabled
-                val message = if (enabled) "✅ Geofence enabled" else "⚠️ Geofence disabled"
-                addNotification(Notification(message, NotificationType.INFO))
-                speak(if (enabled) "Geofence enabled" else "Geofence disabled")
-                LogUtils.i("Geofence", message)
-
-                // Restart monitoring if enabling, or ensure stopped if disabling
-                if (enabled && repo != null) {
-                    startFenceStatusMonitoring()
-                }
-            } else {
-                addNotification(
-                    Notification(
-                        message = "❌ Failed to ${if (enabled) "enable" else "disable"} geofence",
-                        type = NotificationType.ERROR
-                    )
-                )
             }
         }
     }

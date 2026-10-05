@@ -8,7 +8,6 @@ import java.security.KeyStore
 import javax.crypto.Cipher
 import javax.crypto.KeyGenerator
 import javax.crypto.SecretKey
-import javax.crypto.spec.GCMParameterSpec
 
 /**
  * SecurePinManager - Handles secure PIN storage using Android Keystore
@@ -26,7 +25,6 @@ object SecurePinManager {
     private const val KEY_ALIAS = "aerogcs_pin_encryption_key"
     private const val ANDROID_KEYSTORE = "AndroidKeyStore"
     private const val TRANSFORMATION = "AES/GCM/NoPadding"
-    private const val GCM_TAG_LENGTH = 128
 
     // SharedPreferences keys for storing encrypted data
     private const val PREFS_NAME = "secure_pin_prefs"
@@ -96,50 +94,6 @@ object SecurePinManager {
     }
 
     /**
-     * Load and decrypt the stored PIN
-     * @param context Application context
-     * @return The decrypted PIN, or null if not set or decryption fails
-     */
-    fun loadPin(context: Context): String? {
-        try {
-            val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-
-            val encryptedPinBase64 = prefs.getString(KEY_ENCRYPTED_PIN, null) ?: return null
-            val ivBase64 = prefs.getString(KEY_IV, null) ?: return null
-
-            val encryptedBytes = Base64.decode(encryptedPinBase64, Base64.NO_WRAP)
-            val iv = Base64.decode(ivBase64, Base64.NO_WRAP)
-
-            val secretKey = getOrCreateSecretKey()
-
-            val cipher = Cipher.getInstance(TRANSFORMATION)
-            val spec = GCMParameterSpec(GCM_TAG_LENGTH, iv)
-            cipher.init(Cipher.DECRYPT_MODE, secretKey, spec)
-
-            val decryptedBytes = cipher.doFinal(encryptedBytes)
-            val pin = String(decryptedBytes, Charsets.UTF_8)
-
-            return pin
-
-        } catch (e: Exception) {
-            // If decryption fails (e.g., key was invalidated), clear the stored data
-            clearPin(context)
-            return null
-        }
-    }
-
-    /**
-     * Verify if the provided PIN matches the stored PIN
-     * @param context Application context
-     * @param pin The PIN to verify
-     * @return true if PIN matches, false otherwise
-     */
-    fun verifyPin(context: Context, pin: String): Boolean {
-        val storedPin = loadPin(context)
-        return storedPin != null && storedPin == pin
-    }
-
-    /**
      * Check if a PIN has been set
      * @param context Application context
      * @return true if a PIN is stored
@@ -147,23 +101,6 @@ object SecurePinManager {
     fun isPinSet(context: Context): Boolean {
         val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
         return prefs.contains(KEY_ENCRYPTED_PIN) && prefs.contains(KEY_IV)
-    }
-
-    /**
-     * Clear the stored PIN
-     * @param context Application context
-     */
-    fun clearPin(context: Context) {
-        try {
-            val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-            prefs.edit()
-                .remove(KEY_ENCRYPTED_PIN)
-                .remove(KEY_IV)
-                .apply()
-
-        } catch (e: Exception) {
-            // Failed to clear PIN - continue silently
-        }
     }
 
     /**

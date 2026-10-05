@@ -9,8 +9,6 @@ import kotlin.math.*
  */
 object ObstaclePathPlanner {
 
-    private const val TAG = "ObstaclePathPlanner"
-
     // Buffer distance to maintain from obstacle edges (meters)
     private const val OBSTACLE_BUFFER_METERS = 5.0
 
@@ -290,52 +288,6 @@ object ObstaclePathPlanner {
     }
 
     /**
-     * Find a path around the polygon vertices in a given direction
-     */
-    private fun findPathAroundPolygon(
-        start: LatLng,
-        end: LatLng,
-        polygon: List<LatLng>,
-        clockwise: Boolean
-    ): List<LatLng> {
-        if (polygon.isEmpty()) return emptyList()
-
-        // Find entry and exit vertices (closest vertices to start and end that don't cross the polygon)
-        val entryIndex = findBestEntryVertex(start, polygon)
-        val exitIndex = findBestExitVertex(end, polygon)
-
-        if (entryIndex == -1 || exitIndex == -1) return emptyList()
-
-        // Collect vertices along the path
-        val pathVertices = mutableListOf<LatLng>()
-        val n = polygon.size
-
-        if (entryIndex == exitIndex) {
-            // Same vertex, just add it
-            pathVertices.add(polygon[entryIndex])
-        } else {
-            // Traverse around polygon
-            var current = entryIndex
-            pathVertices.add(polygon[current])
-
-            val maxIterations = n + 1 // Prevent infinite loop
-            var iterations = 0
-
-            while (current != exitIndex && iterations < maxIterations) {
-                current = if (clockwise) {
-                    (current + 1) % n
-                } else {
-                    (current - 1 + n) % n
-                }
-                pathVertices.add(polygon[current])
-                iterations++
-            }
-        }
-
-        return pathVertices
-    }
-
-    /**
      * Find the best entry vertex - the one closest to start that provides clear line of sight
      */
     private fun findBestEntryVertex(start: LatLng, polygon: List<LatLng>): Int {
@@ -461,34 +413,5 @@ object ObstaclePathPlanner {
         return totalDistance
     }
 
-    /**
-     * Check if any point in a list is inside any obstacle
-     */
-    fun isAnyPointInsideObstacles(points: List<LatLng>, obstacles: List<ObstacleZone>): Boolean {
-        for (point in points) {
-            for (obstacle in obstacles) {
-                if (isPointInsidePolygon(point, obstacle.points)) {
-                    return true
-                }
-            }
-        }
-        return false
-    }
-
-    /**
-     * Check if a path intersects any obstacle
-     */
-    fun pathIntersectsObstacles(path: List<LatLng>, obstacles: List<ObstacleZone>): Boolean {
-        if (path.size < 2) return false
-
-        for (i in 0 until path.size - 1) {
-            for (obstacle in obstacles) {
-                if (lineIntersectsPolygon(path[i], path[i + 1], obstacle.points)) {
-                    return true
-                }
-            }
-        }
-        return false
-    }
 }
 

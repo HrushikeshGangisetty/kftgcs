@@ -743,13 +743,6 @@ class UnifiedFlightTracker(
         return String.format("%02d:%02d:%02d", hours, minutes, secs)
     }
 
-    private fun formatDistance(meters: Float): String {
-        return when {
-            meters >= 1000f -> String.format("%.2f km", meters / 1000f)
-            else -> String.format("%.1f m", meters)
-        }
-    }
-
     /**
      * Sprayed acres = swept path: sprayed distance (m) × effective swath (m) / 4046.856.
      * Swath comes from the active mission (auto = line spacing, manual = configured default).
@@ -775,15 +768,5 @@ class UnifiedFlightTracker(
         loggingService?.stopLogging()
     }
 
-    // Public API for manual control (if needed)
-    fun forceStop(reason: String = "User requested") {
-        if (currentState == FlightState.ACTIVE) {
-            CoroutineScope(Dispatchers.Main).launch {
-                stopFlight(reason)
-            }
-        }
-    }
-
-    fun getCurrentState(): String = currentState.name
     fun isFlightActive(): Boolean = currentState == FlightState.ACTIVE
 }

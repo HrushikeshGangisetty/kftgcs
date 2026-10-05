@@ -21,9 +21,6 @@ interface FlightDao {
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertFlight(flight: FlightEntity): Long
 
-    @Update
-    suspend fun updateFlight(flight: FlightEntity)
-
     @Query("UPDATE flights SET endTime = :endTime, flightDuration = :duration, area = :area, consumedLiquid = :consumedLiquid, isCompleted = 1 WHERE id = :flightId")
     suspend fun completeFlight(flightId: Long, endTime: Long, duration: Long, area: Float?, consumedLiquid: Float?)
 

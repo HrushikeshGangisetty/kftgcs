@@ -79,14 +79,6 @@ object CrashLogger {
             ?.sortedByDescending { it.lastModified() }
             ?: emptyList()
 
-    /** Full text of the most recent crash, or null if there are none. */
-    fun getLastCrash(): String? =
-        try {
-            getCrashFiles().firstOrNull()?.readText()
-        } catch (_: Throwable) {
-            null
-        }
-
     /** Delete all stored crash logs (e.g. after the user exports/acknowledges them). */
     fun clear() {
         try {

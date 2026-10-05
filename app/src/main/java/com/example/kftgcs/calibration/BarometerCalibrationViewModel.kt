@@ -54,10 +54,6 @@ class BarometerCalibrationViewModel(
         }
     }
 
-    fun checkConditions(flatSurface: Boolean, windGood: Boolean) {
-        _uiState.update { it.copy(isFlatSurface = flatSurface, isWindGood = windGood) }
-    }
-
     fun startCalibration() {
         val state = _uiState.value
         // Validate environment conditions with clear messaging

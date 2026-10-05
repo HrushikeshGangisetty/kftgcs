@@ -64,7 +64,4 @@ class FlightLoggingService(
         loggingJob = null
     }
 
-    fun isLogging(): Boolean {
-        return loggingJob?.isActive == true
-    }
 }

@@ -345,9 +345,6 @@ class WebSocketManager {
         connect()
     }
 
-    fun isReadyForTelemetry(): Boolean =
-        isConnected && readyForTelemetry && sessionStarted && missionId != null
-
     // ── OkHttp WebSocket listener ────────────────────────────────────────────
 
     private val socketListener = object : WebSocketListener() {

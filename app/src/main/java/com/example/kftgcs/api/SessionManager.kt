@@ -135,18 +135,6 @@ object SessionManager {
         }
     }
 
-    fun saveAdminId(context: Context, adminId: Int) {
-        getPreferences(context).edit {
-            putInt(KEY_ADMIN_ID, adminId)
-        }
-    }
-
-    fun saveSuperAdminId(context: Context, superAdminId: Int) {
-        getPreferences(context).edit {
-            putInt(KEY_SUPER_ADMIN_ID, superAdminId)
-        }
-    }
-
     fun saveUserDetails(context: Context, firstName: String, lastName: String) {
         getPreferences(context).edit {
             putString(KEY_FIRST_NAME, firstName)

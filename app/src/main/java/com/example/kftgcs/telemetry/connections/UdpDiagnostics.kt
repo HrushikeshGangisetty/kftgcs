@@ -291,9 +291,6 @@ object UdpPortScanner {
         }.trim()
     }
 
-    /** The best port to auto-fill, if any. */
-    fun bestPort(results: List<UdpScanResult>): Int? = bestResult(results)?.port
-
     /**
      * The winning row — the port that actually carried a stream.
      *
