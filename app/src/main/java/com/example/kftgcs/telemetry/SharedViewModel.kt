@@ -56,7 +56,10 @@ import com.example.kftgcs.grid.GridGenerator
 import com.example.kftgcs.grid.GridUtils
 import com.example.kftgcs.videotracking.CameraTrackingState
 import com.example.kftgcs.videotracking.TrackingManager
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.async
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
@@ -239,12 +242,31 @@ class SharedViewModel : ViewModel() {
     private val _hobbywingEscs = MutableStateFlow<Map<Int, Int>>(emptyMap())
     val hobbywingEscs: StateFlow<Map<Int, Int>> = _hobbywingEscs.asStateFlow()
 
+    // What each ESC itself reports (GetMajorConfig), by node ID. Absent until the ESC answers.
+    private val _hobbywingEscConfigs = MutableStateFlow<Map<Int, HwEscConfig>>(emptyMap())
+    val hobbywingEscConfigs: StateFlow<Map<Int, HwEscConfig>> = _hobbywingEscConfigs.asStateFlow()
+
     private val _escIdStatus = MutableStateFlow("")
     val escIdStatus: StateFlow<String> = _escIdStatus.asStateFlow()
 
+    // True while a change is being written, so the screen can block a second one.
+    private val _escBusy = MutableStateFlow(false)
+    val escBusy: StateFlow<Boolean> = _escBusy.asStateFlow()
+
+    private val escReplies = MutableSharedFlow<HwEscReply>(extraBufferCapacity = 16)
+
     private var escScanJob: Job? = null
     private var escScanBus = 0
-    private var escCanTransferId = 0
+    private var escScanRepo: MavlinkTelemetryRepository? = null
+    // DroneCAN transfer IDs, one counter per (data type, destination node): see HobbywingEsc.kt.
+    private val escTransferIds = HashMap<Int, Int>()
+    private fun nextEscTransferId(typeId: Int, destNode: Int = 0): Int {
+        val key = typeId * 128 + destNode
+        return ((escTransferIds[key] ?: -1) + 1).also { escTransferIds[key] = it }
+    }
+
+    private fun escConfigRequest(nodeId: Int) =
+        hwServiceFrame(HW_GET_MAJOR_CONFIG, nodeId, listOf(0), nextEscTransferId(HW_GET_MAJOR_CONFIG, nodeId))
 
     private suspend fun sendEscCanFrame(r: MavlinkTelemetryRepository, frame: HwCanFrame) {
         try {
@@ -272,7 +294,11 @@ class SharedViewModel : ViewModel() {
     fun startEscIdScan(bus: Int) {
         stopEscIdScan()
         val r = repo ?: return
+        // What the ESCs reported stays across re-opening the screen, but another bus or another
+        // connection (possibly another drone) is other ESCs.
+        if (bus != escScanBus || r !== escScanRepo) _hobbywingEscConfigs.value = emptyMap()
         escScanBus = bus
+        escScanRepo = r
         _hobbywingEscs.value = emptyMap()
         _escIdStatus.value = ""
         escScanJob = viewModelScope.launch {
@@ -288,15 +314,18 @@ class SharedViewModel : ViewModel() {
                             HW_SET_ID -> {
                                 // The old node entry is stale now; the next GetEscID answer re-adds it.
                                 _hobbywingEscs.update { it - reply.srcNode }
-                                _escIdStatus.value = "ESC saved: node ID ${reply.payload.getOrNull(0)}, " +
-                                    "motor ID ${reply.payload.getOrNull(1)}"
+                                _hobbywingEscConfigs.update { it - reply.srcNode }
                             }
-                            // Any other response is the ESC confirming the request in flight.
-                            else -> _escIdStatus.value = "ESC node ${reply.srcNode}: $escPendingWhat saved."
+                            else -> _hobbywingEscConfigs.update { configs ->
+                                val merged = hwMergeConfig(configs[reply.srcNode] ?: HwEscConfig(), reply)
+                                if (merged == null) configs else configs + (reply.srcNode to merged)
+                            }
                         }
+                        escReplies.tryEmit(reply)
                     }
             }
             try {
+                var tick = 0
                 while (isActive) {
                     if (r.state.value.fcuDetected && !r.state.value.armed) {
                         // The FC stops forwarding ~5 s after the last CAN_FORWARD, so repeat it.
@@ -309,7 +338,7 @@ class SharedViewModel : ViewModel() {
                                 CanFilterModify(
                                     targetSystem = r.fcuSystemId,
                                     targetComponent = r.fcuComponentId,
-                                    bus = bus.toUByte(),
+                                    bus = (bus + 1).toUByte(), // 1-based here, unlike CAN_FRAME.bus
                                     operation = CanFilterOp.CAN_FILTER_REPLACE.wrap(),
                                     numIds = HW_FORWARDED_IDS.size.toUByte(),
                                     ids = List(16) { (HW_FORWARDED_IDS.getOrNull(it) ?: 0).toUShort() }
@@ -318,7 +347,13 @@ class SharedViewModel : ViewModel() {
                         } catch (e: Exception) {
                             LogUtils.e("EscId", "CAN_FILTER_MODIFY send failed", e)
                         }
-                        sendEscCanFrame(r, hwGetEscIdFrame(escCanTransferId++))
+                        sendEscCanFrame(r, hwGetEscIdFrame(nextEscTransferId(HW_GET_ESC_ID)))
+                        // Config reads: every ESC that has not reported its direction yet, plus
+                        // one more per tick (round-robin) to keep the rest fresh.
+                        val nodes = _hobbywingEscs.value.keys.sorted()
+                        val unread = nodes.filter { _hobbywingEscConfigs.value[it]?.ccw == null }
+                        (unread + listOfNotNull(nodes.getOrNull(tick++ % nodes.size.coerceAtLeast(1)))).distinct()
+                            .forEach { sendEscCanFrame(r, escConfigRequest(it)) }
                     }
                     delay(1000)
                 }
@@ -334,51 +369,100 @@ class SharedViewModel : ViewModel() {
     }
 
     /** Hobbywing SetID: gives the ESC currently at [nodeId] a new node ID and motor (throttle) ID. */
-    fun setHobbywingEscId(nodeId: Int, newNodeId: Int, throttleId: Int) =
-        sendHobbywingEscRequest(nodeId, HW_SET_ID, listOf(newNodeId, throttleId), "IDs")
+    fun setHobbywingEscId(nodeId: Int, newNodeId: Int, throttleId: Int) = sendHobbywingEscRequests(
+        nodeId, listOf(EscRequest("node ID $newNodeId / motor ID $throttleId", HW_SET_ID, listOf(newNodeId, throttleId)))
+    )
 
     /** Rotation direction: [ccw] false = clockwise. */
-    fun setHobbywingEscDirection(nodeId: Int, ccw: Boolean) =
-        sendHobbywingEscRequest(nodeId, HW_SET_DIRECTION, listOf(if (ccw) 1 else 0), "direction")
+    fun setHobbywingEscDirection(nodeId: Int, ccw: Boolean) = sendHobbywingEscRequests(
+        nodeId, listOf(EscRequest("direction ${if (ccw) "CCW" else "CW"}", HW_SET_DIRECTION, listOf(if (ccw) 1 else 0)))
+    )
 
     /** Throttle source: CAN (digital) or PWM. */
     fun setHobbywingEscThrottleSource(nodeId: Int, pwm: Boolean) =
-        sendHobbywingEscRequest(nodeId, HW_SET_THROTTLE_SOURCE, listOf(if (pwm) 1 else 0), "throttle source")
+        sendHobbywingEscRequests(nodeId, listOf(throttleSourceRequest(pwm)))
 
     /** [baudCode] is SetBaud's enum: 0 = 1M, 1 = 500k, 2 = 250k, 3 = 200k, 4 = 100k, 5 = 50k. */
     fun setHobbywingEscBaud(nodeId: Int, baudCode: Int) =
-        sendHobbywingEscRequest(nodeId, HW_SET_BAUD, listOf(baudCode), "baud rate")
+        sendHobbywingEscRequests(nodeId, listOf(EscRequest("baud rate", HW_SET_BAUD, listOf(baudCode))))
 
     /**
      * Report rate of status message [msgNumber] (1-3 = data types 20050-20052). [rateCode] is
      * SetReportingFrequency's enum: 1 = 500 Hz, 2 = 250, 3 = 200, 4 = 100, 5 = 50, 6 = 20,
      * 7 = 10, 8 = 1, 9 = off.
      */
-    fun setHobbywingEscMsgRate(nodeId: Int, msgNumber: Int, rateCode: Int) {
+    fun setHobbywingEscMsgRate(nodeId: Int, msgNumber: Int, rateCode: Int) =
+        sendHobbywingEscRequests(nodeId, listOf(msgRateRequest(msgNumber, rateCode)))
+
+    /**
+     * Puts the ESC at [nodeId] back on the stock settings: CAN throttle and the default message
+     * rates. Direction and IDs are per-motor and baud would drop the ESC off the bus, so those
+     * are left alone.
+     */
+    fun resetHobbywingEscDefaults(nodeId: Int) = sendHobbywingEscRequests(
+        nodeId,
+        listOf(throttleSourceRequest(pwm = false)) +
+            HW_DEFAULT_MSG_RATE_CODES.mapIndexed { i, rateCode -> msgRateRequest(i + 1, rateCode) },
+        done = "ESC node $nodeId reset to defaults."
+    )
+
+    private class EscRequest(val what: String, val serviceId: Int, val payload: List<Int>)
+
+    private fun throttleSourceRequest(pwm: Boolean) =
+        EscRequest("throttle source ${if (pwm) "PWM" else "CAN"}", HW_SET_THROTTLE_SOURCE, listOf(if (pwm) 1 else 0))
+
+    private fun msgRateRequest(msgNumber: Int, rateCode: Int): EscRequest {
         val msgId = 20049 + msgNumber
-        sendHobbywingEscRequest(
-            nodeId, HW_SET_REPORTING_FREQUENCY,
-            listOf(1 /* OPTION_WRITE */, msgId and 0xFF, msgId shr 8, rateCode),
-            "message $msgNumber rate"
+        return EscRequest(
+            "message $msgNumber rate", HW_SET_REPORTING_FREQUENCY,
+            listOf(1 /* OPTION_WRITE */, msgId and 0xFF, msgId shr 8, rateCode)
         )
     }
 
-    // What the last request was changing, for the status line when the ESC confirms it.
-    private var escPendingWhat = ""
-
-    private fun sendHobbywingEscRequest(nodeId: Int, serviceId: Int, payload: List<Int>, what: String) {
+    /**
+     * Sends [requests] to the ESC at [nodeId] one at a time, each waiting for the ESC's own
+     * confirmation; stops at the first one that gets no reply. [done] replaces the status line
+     * of the last request when all of them were confirmed.
+     */
+    private fun sendHobbywingEscRequests(nodeId: Int, requests: List<EscRequest>, done: String? = null) {
         val r = repo ?: return
         if (r.state.value.armed) {
             _escIdStatus.value = "Disarm before changing ESC settings."
             return
         }
-        escPendingWhat = what
-        val pending = "Setting ESC node $nodeId $what…"
-        _escIdStatus.value = pending
+        if (_escBusy.value) return
+        _escBusy.value = true
         viewModelScope.launch {
-            sendEscCanFrame(r, hwServiceFrame(serviceId, nodeId, payload, escCanTransferId++))
-            delay(2000)
-            if (_escIdStatus.value == pending) _escIdStatus.value = "No reply from ESC node $nodeId."
+            try {
+                for (request in requests) {
+                    _escIdStatus.value = "Setting ESC node $nodeId ${request.what}…"
+                    val confirmed = coroutineScope {
+                        // Listen before sending so a fast reply cannot be missed.
+                        val reply = async(start = CoroutineStart.UNDISPATCHED) {
+                            withTimeoutOrNull(2000) {
+                                escReplies.first { it.srcNode == nodeId && it.typeId == request.serviceId }
+                            }
+                        }
+                        sendEscCanFrame(
+                            r,
+                            hwServiceFrame(
+                                request.serviceId, nodeId, request.payload, nextEscTransferId(request.serviceId, nodeId)
+                            )
+                        )
+                        reply.await() != null
+                    }
+                    // Read back what the ESC now holds, whether or not it confirmed.
+                    sendEscCanFrame(r, escConfigRequest(nodeId))
+                    if (!confirmed) {
+                        _escIdStatus.value = "No reply from ESC node $nodeId: ${request.what} was NOT confirmed."
+                        return@launch
+                    }
+                    _escIdStatus.value = "ESC node $nodeId: ${request.what} saved."
+                }
+                if (done != null) _escIdStatus.value = done
+            } finally {
+                _escBusy.value = false
+            }
         }
     }
 

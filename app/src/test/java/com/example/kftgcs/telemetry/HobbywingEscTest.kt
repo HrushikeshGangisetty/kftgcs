@@ -33,4 +33,24 @@ class HobbywingEscTest {
         assertNull(hwParseReply(0x98D20A85u, bytes(6, 2, 0xC1), 3))
         assertNull(hwParseReply(0x98F27F85u, bytes(1, 2, 3, 4, 5, 6, 7, 0x80), 8))
     }
+
+    @Test
+    fun parsesMajorConfig() {
+        // GetMajorConfig request to node 5
+        assertEquals(HwCanFrame(0x98F285FFu, bytes(0, 0xC0)), hwServiceFrame(HW_GET_MAJOR_CONFIG, 5, listOf(0), 0))
+        // Response from node 5: CCW, CAN throttle, channel 3; message 2 at 10 Hz (7), message 1 at 50 Hz (5)
+        val reply = hwParseReply(0x98F27F85u, bytes(0x83, 0, 0x75, 0, 0, 0, 0, 0xC0), 8)!!
+        assertEquals(HW_GET_MAJOR_CONFIG, reply.typeId)
+        val config = hwMergeConfig(HwEscConfig(), reply)!!
+        assertEquals(HwEscConfig(ccw = true, pwm = false, msgRates = mapOf(1 to 5, 2 to 7)), config)
+        assertNull(hwMergeConfig(config, HwEscReply(5, HW_GET_MAJOR_CONFIG, listOf(0x80))))
+        // Set responses echo the value the ESC now holds and leave the rest alone.
+        assertEquals(config.copy(ccw = false), hwMergeConfig(config, HwEscReply(5, HW_SET_DIRECTION, listOf(0))))
+        assertEquals(config.copy(pwm = true), hwMergeConfig(config, HwEscReply(5, HW_SET_THROTTLE_SOURCE, listOf(1))))
+        assertEquals(
+            config.copy(msgRates = mapOf(1 to 5, 2 to 7, 3 to 9)),
+            hwMergeConfig(config, HwEscReply(5, HW_SET_REPORTING_FREQUENCY, listOf(1, 0x54, 0x4E, 9)))
+        )
+        assertNull(hwMergeConfig(config, HwEscReply(5, HW_SET_BAUD, emptyList())))
+    }
 }

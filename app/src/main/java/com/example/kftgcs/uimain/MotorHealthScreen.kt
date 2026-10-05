@@ -21,6 +21,7 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Home
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.DropdownMenu
@@ -32,6 +33,7 @@ import androidx.compose.material3.LocalTextStyle
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -49,16 +51,22 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.navigation.NavHostController
 import com.example.kftgcs.telemetry.SharedViewModel
+import kotlinx.coroutines.delay
 import java.util.Locale
 
 private val ScreenBg = Color(0xFF23272A)
 private val Accent = Color(0xFF87CEEB)
 private val CardBorder = Color(0xFF4A5568)
 private val OverLimit = Color(0xFFFF5252)
+private val Confirmed = Color(0xFF66BB6A)
+
+/** A change waiting for the user's OK: [warning] is shown in red when it can ground the drone. */
+private class PendingChange(val title: String, val message: String, val warning: String? = null, val onConfirm: () -> Unit)
 
 /**
- * Motor Health: the per-ESC high-current alert limit, plus a read-only live view of every
- * ESC's telemetry (Mission Planner's ESCx_temp / ESCx_curr / ESCx_volt / ESCx_rpm).
+ * Motor Health: the per-ESC high-current / high-temperature alert limits, Hobbywing ESC IDs and
+ * settings, plus a read-only live view of every ESC's telemetry (Mission Planner's ESCx_temp /
+ * ESCx_curr / ESCx_volt / ESCx_rpm).
  */
 @Composable
 fun MotorHealthScreen(
@@ -69,7 +77,10 @@ fun MotorHealthScreen(
     val limitA by sharedViewModel.motorHighCurrentLimitA.collectAsState()
     val limitC by sharedViewModel.motorHighTempLimitC.collectAsState()
     val hobbywingEscs by sharedViewModel.hobbywingEscs.collectAsState()
+    val escConfigs by sharedViewModel.hobbywingEscConfigs.collectAsState()
     val escIdStatus by sharedViewModel.escIdStatus.collectAsState()
+    val escBusy by sharedViewModel.escBusy.collectAsState()
+    var pendingChange by remember { mutableStateOf<PendingChange?>(null) }
 
     // ESC ID scan runs only while this screen is open and the FC is connected.
     var canBus by remember { mutableStateOf(0) }
@@ -178,64 +189,141 @@ fun MotorHealthScreen(
                         EscIdRow(
                             nodeId = nodeId,
                             motorId = motorId,
+                            direction = escConfigs[nodeId]?.ccw?.let { if (it) "CCW" else "CW" },
                             duplicateMotorId = motorIds.count { it == motorId } > 1,
-                            enabled = !telemetry.armed,
+                            enabled = !telemetry.armed && !escBusy,
                             onSet = { newNode, newMotor -> sharedViewModel.setHobbywingEscId(nodeId, newNode, newMotor) }
                         )
                     }
                 }
 
                 // ── Per-ESC settings: pick an ESC, then Set one value at a time ──
-                Spacer(Modifier.height(16.dp))
+                Spacer(Modifier.height(20.dp))
                 val nodes = hobbywingEscs.keys.sorted()
                 val node = settingsNode.takeIf { it in nodes } ?: nodes.first()
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text("ESC settings for", color = Color.White, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
-                    Box(modifier = Modifier.padding(start = 8.dp)) {
-                        var open by remember { mutableStateOf(false) }
-                        OutlinedButton(onClick = { open = true }) {
-                            Text("Node $node · Motor ${hobbywingEscs[node]}", color = Color.White)
-                        }
-                        DropdownMenu(expanded = open, onDismissRequest = { open = false }, modifier = Modifier.background(ScreenBg)) {
-                            nodes.forEach { n ->
-                                DropdownMenuItem(
-                                    text = { Text("Node $n · Motor ${hobbywingEscs[n]}", color = Color.White) },
-                                    onClick = { settingsNode = n; open = false }
-                                )
-                            }
-                        }
-                    }
-                }
+                val escName = "Node $node · Motor ${hobbywingEscs[node]}"
+                val config = escConfigs[node]
+                val canSet = !telemetry.armed && !escBusy
+                Text("ESC settings", color = Color.White, fontSize = 20.sp, fontWeight = FontWeight.SemiBold)
+                Spacer(Modifier.height(4.dp))
                 Text(
-                    "Current values are not read back from the ESC. A baud rate change takes the ESC " +
-                        "off this bus until the flight controller's CAN bitrate matches.",
+                    "Pick an ESC. \"On ESC now\" is what the ESC itself reports; a change is only " +
+                        "done when that line shows the new value.",
                     color = Color.Gray,
                     fontSize = 13.sp
                 )
                 Spacer(Modifier.height(8.dp))
-                val canSet = !telemetry.armed
-                OptionSetter("Direction", listOf("CW", "CCW"), canSet) {
-                    sharedViewModel.setHobbywingEscDirection(node, ccw = it == 1)
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    nodes.forEach { n ->
+                        Button(
+                            onClick = { settingsNode = n },
+                            colors = ButtonDefaults.buttonColors(
+                                containerColor = if (n == node) Accent else CardBorder,
+                                contentColor = Color.Black
+                            ),
+                            modifier = Modifier.padding(end = 8.dp)
+                        ) { Text("Motor ${hobbywingEscs[n]}", color = Color.Black) }
+                    }
                 }
-                OptionSetter("Throttle source", listOf("CAN", "PWM"), canSet) {
-                    sharedViewModel.setHobbywingEscThrottleSource(node, pwm = it == 1)
-                }
-                // Option order = SetBaud's enum values.
-                OptionSetter("Baud rate", listOf("1000000", "500000", "250000", "200000", "100000", "50000"), canSet) {
-                    sharedViewModel.setHobbywingEscBaud(node, it)
-                }
-                // Option order = SetReportingFrequency's enum values, which start at 1.
-                val rates = listOf("500 Hz", "250 Hz", "200 Hz", "100 Hz", "50 Hz", "20 Hz", "10 Hz", "1 Hz", "Off")
-                (1..3).forEach { msg ->
-                    // Defaults as in the GUI tool: 50 Hz for message 1, 10 Hz for 2 and 3.
-                    OptionSetter("Message $msg rate", rates, canSet, initial = if (msg == 1) 4 else 6) {
-                        sharedViewModel.setHobbywingEscMsgRate(node, msg, it + 1)
+                Spacer(Modifier.height(8.dp))
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .border(BorderStroke(1.dp, CardBorder), RoundedCornerShape(12.dp))
+                        .padding(12.dp)
+                ) {
+                    Text(escName, color = Accent, fontSize = 16.sp, fontWeight = FontWeight.Bold)
+                    HorizontalDivider(color = CardBorder, modifier = Modifier.padding(vertical = 6.dp))
+                    // "Reading…" must not sit there for ever when the ESC never answers.
+                    var readTimedOut by remember(node) { mutableStateOf(false) }
+                    LaunchedEffect(node) { delay(8000); readTimedOut = true }
+                    val reading = if (readTimedOut) "Unknown: the ESC has not answered the settings read" else "Reading from ESC…"
+                    val notReported = "The ESC does not report this value"
+                    OptionSetter("Direction", listOf("CW", "CCW"), canSet, node, config?.ccw?.let { if (it) 1 else 0 }, reading) {
+                        pendingChange = PendingChange(
+                            title = "Change motor direction?",
+                            message = "$escName: set direction to ${if (it == 1) "CCW" else "CW"}.",
+                            warning = "A motor spinning the wrong way will flip the drone on take-off. " +
+                                "Check the direction with propellers removed before flying."
+                        ) { sharedViewModel.setHobbywingEscDirection(node, ccw = it == 1) }
+                    }
+                    OptionSetter("Throttle source", listOf("CAN", "PWM"), canSet, node, config?.pwm?.let { if (it) 1 else 0 }, reading) {
+                        pendingChange = PendingChange(
+                            title = "Change throttle source?",
+                            message = "$escName: take throttle from ${if (it == 1) "PWM" else "CAN"}.",
+                            warning = "The motor will not respond unless the flight controller drives it the same way."
+                        ) { sharedViewModel.setHobbywingEscThrottleSource(node, pwm = it == 1) }
+                    }
+                    // Option order = SetBaud's enum values.
+                    val bauds = listOf("1000000", "500000", "250000", "200000", "100000", "50000")
+                    OptionSetter("Baud rate", bauds, canSet, node, null, notReported) {
+                        pendingChange = PendingChange(
+                            title = "Change CAN baud rate?",
+                            message = "$escName: set baud rate to ${bauds[it]}.",
+                            warning = "The ESC drops off this bus until the flight controller's CAN bitrate matches."
+                        ) { sharedViewModel.setHobbywingEscBaud(node, it) }
+                    }
+                    // Option order = SetReportingFrequency's enum values, which start at 1.
+                    val rates = listOf("500 Hz", "250 Hz", "200 Hz", "100 Hz", "50 Hz", "20 Hz", "10 Hz", "1 Hz", "Off")
+                    (1..3).forEach { msg ->
+                        val unknown = if (msg == 3) "Not reported by the ESC until it is set" else reading
+                        OptionSetter("Message $msg rate", rates, canSet, node, config?.msgRates?.get(msg)?.minus(1), unknown) {
+                            pendingChange = PendingChange(
+                                title = "Change message $msg rate?",
+                                message = "$escName: send message $msg at ${rates[it]}."
+                            ) { sharedViewModel.setHobbywingEscMsgRate(node, msg, it + 1) }
+                        }
+                    }
+                    HorizontalDivider(color = CardBorder, modifier = Modifier.padding(vertical = 6.dp))
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text(
+                            "Defaults: throttle source CAN, message 1 at 50 Hz, messages 2 and 3 at 10 Hz.",
+                            color = Color.Gray,
+                            fontSize = 13.sp,
+                            modifier = Modifier.weight(1f)
+                        )
+                        OutlinedButton(
+                            enabled = canSet,
+                            onClick = {
+                                pendingChange = PendingChange(
+                                    title = "Reset to defaults?",
+                                    message = "$escName: throttle source CAN, message 1 at 50 Hz, messages 2 and 3 " +
+                                        "at 10 Hz. Direction, IDs and baud rate are not changed."
+                                ) { sharedViewModel.resetHobbywingEscDefaults(node) }
+                            }
+                        ) { Text("Reset to defaults", color = if (canSet) Color.White else Color.Gray) }
                     }
                 }
             }
             if (escIdStatus.isNotEmpty()) {
                 Spacer(Modifier.height(8.dp))
                 Text(escIdStatus, color = Accent, fontSize = 13.sp)
+            }
+
+            pendingChange?.let { change ->
+                AlertDialog(
+                    onDismissRequest = { pendingChange = null },
+                    containerColor = ScreenBg,
+                    title = { Text(change.title, color = Color.White, fontWeight = FontWeight.Bold) },
+                    text = {
+                        Column {
+                            Text(change.message, color = Color.White)
+                            change.warning?.let {
+                                Spacer(Modifier.height(8.dp))
+                                Text(it, color = OverLimit)
+                            }
+                        }
+                    },
+                    confirmButton = {
+                        Button(
+                            onClick = { pendingChange = null; change.onConfirm() },
+                            colors = ButtonDefaults.buttonColors(containerColor = Accent, contentColor = Color.Black)
+                        ) { Text("Confirm", color = Color.Black) }
+                    },
+                    dismissButton = {
+                        TextButton(onClick = { pendingChange = null }) { Text("Cancel", color = Color.White) }
+                    }
+                )
             }
 
             Spacer(Modifier.height(28.dp))
@@ -322,7 +410,9 @@ private fun LimitEditor(title: String, description: String, label: String, limit
 
 /** One discovered Hobbywing ESC: editable node ID (1-127) and motor/throttle ID (1-32). */
 @Composable
-private fun EscIdRow(nodeId: Int, motorId: Int, duplicateMotorId: Boolean, enabled: Boolean, onSet: (Int, Int) -> Unit) {
+private fun EscIdRow(
+    nodeId: Int, motorId: Int, direction: String?, duplicateMotorId: Boolean, enabled: Boolean, onSet: (Int, Int) -> Unit
+) {
     var nodeText by remember(nodeId) { mutableStateOf(nodeId.toString()) }
     var motorText by remember(nodeId, motorId) { mutableStateOf(motorId.toString()) }
     val newNode = nodeText.toIntOrNull()?.takeIf { it in 1..126 } // 127 is the GCS itself
@@ -330,7 +420,8 @@ private fun EscIdRow(nodeId: Int, motorId: Int, duplicateMotorId: Boolean, enabl
 
     Row(modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp), verticalAlignment = Alignment.CenterVertically) {
         Text(
-            text = "Node $nodeId · Motor $motorId" + if (duplicateMotorId) " (duplicate)" else "",
+            text = "Node $nodeId · Motor $motorId" + (direction?.let { " · $it" } ?: "") +
+                if (duplicateMotorId) " (duplicate)" else "",
             color = if (duplicateMotorId) OverLimit else Color.White,
             fontSize = 14.sp,
             modifier = Modifier.weight(1.4f)
@@ -345,19 +436,35 @@ private fun EscIdRow(nodeId: Int, motorId: Int, duplicateMotorId: Boolean, enabl
     }
 }
 
-/** "label [dropdown] [Set]": nothing is sent until Set is pressed; [onSet] gets the option index. */
+/**
+ * "label / On ESC now: x  [dropdown] [Set]". [current] is the option index the ESC reports, null
+ * when it has not (yet) reported one - [unknownNote] then says why. The dropdown follows
+ * [current], and nothing is sent until Set is pressed; [onSet] gets the option index.
+ */
 @Composable
-private fun OptionSetter(label: String, options: List<String>, enabled: Boolean, initial: Int = 0, onSet: (Int) -> Unit) {
-    var index by remember { mutableStateOf(initial) }
+private fun OptionSetter(
+    label: String, options: List<String>, enabled: Boolean, node: Int, current: Int?, unknownNote: String,
+    onSet: (Int) -> Unit
+) {
+    val known = current?.takeIf { it in options.indices }
+    var index by remember(node, known) { mutableStateOf(known ?: -1) }
     var open by remember { mutableStateOf(false) }
     Row(modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp), verticalAlignment = Alignment.CenterVertically) {
-        Text(label, color = Color.White, fontSize = 14.sp, modifier = Modifier.weight(1f))
+        Column(modifier = Modifier.weight(1f)) {
+            Text(label, color = Color.White, fontSize = 14.sp)
+            Text(
+                text = if (known != null) "On ESC now: ${options[known]}" else unknownNote,
+                color = if (known != null) Confirmed else Color.Gray,
+                fontSize = 13.sp,
+                fontWeight = if (known != null) FontWeight.Bold else FontWeight.Normal
+            )
+        }
         Box {
-            OutlinedButton(onClick = { open = true }) { Text(options[index], color = Color.White) }
+            OutlinedButton(onClick = { open = true }) { Text(options.getOrNull(index) ?: "Select…", color = Color.White) }
             DropdownMenu(expanded = open, onDismissRequest = { open = false }, modifier = Modifier.background(ScreenBg)) {
                 options.forEachIndexed { i, option ->
                     DropdownMenuItem(
-                        text = { Text(option, color = Color.White) },
+                        text = { Text(if (i == known) "$option (now)" else option, color = Color.White) },
                         onClick = { index = i; open = false }
                     )
                 }
@@ -365,7 +472,7 @@ private fun OptionSetter(label: String, options: List<String>, enabled: Boolean,
         }
         Spacer(Modifier.width(12.dp))
         Button(
-            enabled = enabled,
+            enabled = enabled && index >= 0 && index != known,
             onClick = { onSet(index) },
             colors = ButtonDefaults.buttonColors(containerColor = Accent, contentColor = Color.Black)
         ) { Text("Set", color = Color.Black) }
