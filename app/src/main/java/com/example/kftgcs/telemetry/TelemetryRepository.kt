@@ -1,5 +1,6 @@
 package com.example.kftgcs.telemetry
 
+import android.os.SystemClock
 import com.divpundir.mavlink.adapters.coroutines.tryConnect
 import com.divpundir.mavlink.adapters.coroutines.trySendUnsignedV2
 import com.divpundir.mavlink.api.MavEnumValue
@@ -135,17 +136,16 @@ object AltitudeLimits {
 /**
  * Sprayer tank-empty detection state machine.
  *
- * Replaces the old spaghetti of independent booleans, timestamps and sample
- * counters. Each state is time-boxed via [MavlinkTelemetryRepository] stateEntryTime,
- * which is reset on every transition — that single property is what makes the
- * priming grace period and the empty-debounce window immune to stale timestamps.
+ * Command state controls monitoring; validated flow confirms a persistent no-flow
+ * incident. Monotonic timers cover pump priming, debounce and healthy recovery.
+ * Session alert state survives intentional OFF connectors between survey lines.
  */
 enum class SprayerState {
     IDLE,                 // Sprayer off / not commanded — nothing to watch
     PRIMING,              // Pump just turned on; ignore flow while it primes
     ACTIVE_FLOW,          // Spraying with healthy flow; watch for flow dropping out
     DEBOUNCING_EMPTY,     // Flow dropped to ~0; confirming it's empty (not an air bubble)
-    TANK_EMPTY_LOCKED     // Confirmed empty; alert fired once, await sprayer-off to reset
+    TANK_EMPTY_LOCKED     // Persistent no-flow incident; re-arm after sustained healthy flow
 }
 
 /**
@@ -496,110 +496,40 @@ class MavlinkTelemetryRepository(
     // Tracks last BATT3 tank-level % to fire the "Tank Low" warning on the 15% crossing.
     private var lastTankLevelPercent: Int? = null
 
-    // ── Sprayer tank-empty state machine ───────────────────────────────────────
-    // Replaces the old spaghetti of booleans/timestamps/sample-counters (the
-    // removed zeroFlowStartTime / pumpTurnedOnTime / consecutiveZeroFlowSamples /
-    // tankEmptyNotificationShown). Fixes three field bugs:
-    //   1. "Missed Empty": TANK_EMPTY_LOCKED now releases to IDLE the moment the
-    //      sprayer is commanded off (pilot override / mode change), so a refilled
-    //      or re-emptied tank can trigger the alert again.
-    //   2. "5-Second Delay": empty is confirmed by a time-based debounce
-    //      (DEBOUNCE_DURATION_MS), not a consecutive-sample count that was slow at
-    //      ArduPilot's 1Hz BATT2 telemetry rate.
-    //   3. "Takeoff False Positive": stateEntryTime is reset on every transition,
-    //      so the PRIMING window always measures from pump-on and comfortably
-    //      covers a ~1.8s pump prime — it can't be short-circuited by a stale time.
-    // @Volatile: these are read on the BATT2 collector but also written via
-    // resetAutoModeSprayDetection() from the MISSION_CURRENT / MISSION_ITEM_REACHED
-    // collectors, so they cross coroutine threads — volatile guarantees visibility.
-    @Volatile private var sprayerState = SprayerState.IDLE
-    @Volatile private var stateEntryTime = 0L
-    private val PRIMING_DURATION_MS = 2000L         // Grace period after pump ON; flow ignored (covers pump prime)
-    private val DEBOUNCE_DURATION_MS = 1500L        // Low flow must persist this long to declare empty (air-bubble tolerant)
-    // Empty means flow ≈ 0 regardless of spray rate, so a small fixed L/min cut-off is both fast and robust.
-    private val LOW_FLOW_THRESHOLD_LPM = 0.2f       // Flow at/below 0.2 L/min while spraying = "no effective flow"
+    // All detector transitions and lifecycle resets share one lock: mission progress,
+    // heartbeat and BATT2 arrive on different collectors.
+    private val sprayDetectionLock = Any()
+    private var sprayerState = SprayerState.IDLE
+    private var stateEntryTime = 0L
+    private val PRIMING_DURATION_MS = 2000L
+    private val DEBOUNCE_DURATION_MS = 1500L
+    private val LOW_FLOW_THRESHOLD_LPM = 0.2f
+    private val FLOW_STALE_MS = 5000L
+    private val FLOW_RECOVERY_MS = 2000L
+    private var sprayMonitoringSuspended = false
+    private var sprayMonitoringStartedAtMs = 0L
+    private var lastDetectionFlowAtMs = 0L
+    private var healthyFlowSinceMs = 0L
+    private var sprayFailureReported = false
+    private var spraySessionGeneration = 0L
+    private var flowTelemetryWarned = false
+    private var configInvalidWarned = false
+    @Volatile private var lastTankLevelAtMs = 0L
 
-    // Flow-rate display hold: BATT2 occasionally reports -1 (no reading) for a frame, which would flick
-    // the on-screen flow to "N/A". Hold the last valid value briefly so the display stays stable.
+    // Display smoothing is separate from detection, which uses the validated raw flow.
     private var lastValidFlowLpm: Float? = null
-    private var lastValidFlowTime: Long = 0L
+    private var lastValidFlowTime = 0L
     private val FLOW_DISPLAY_HOLD_MS = 2000L
+    private var lastBatt2FrameTime = 0L
 
-    // Diagnostic: wall-clock of the previous BATT2 (flow sensor) frame, used to log the ACTUAL
-    // per-instance arrival rate. ArduPilot round-robins all battery instances through one
-    // BATTERY_STATUS slot, so this is the real rate BATT2 gets — the number to watch when
-    // chasing flow "lag" and to confirm the SET_MESSAGE_INTERVAL(147) request is honored.
-    private var lastBatt2FrameTime: Long = 0L
-
-    // ═══ Mission progress source arbitration ═══
-    // MISSION_CURRENT (the item being flown TO) and MISSION_ITEM_REACHED (the item just
-    // completed) both describe mission progress but are one apart, so mixing them corrupts
-    // the resume point. MISSION_CURRENT wins whenever the FC is sending it; this timestamp
-    // says whether it still is. @Volatile: written on the MISSION_CURRENT collector, read on
-    // the MISSION_ITEM_REACHED one.
+    // MISSION_CURRENT is the navigation target; reached messages are only a fallback.
     @Volatile private var lastMissionCurrentAtMs = 0L
     private val MISSION_CURRENT_STALE_MS = 5000L
 
-    // AUTO mode spray tracking
-    // In AUTO mode, sprayer is controlled by DO_SET_SERVO, DO_SPRAYER, or ArduPilot Sprayer library
-    // We detect spray activity by flow rate > 0 (which means spray command is active)
-    // When flow drops to 0 while spray was active, that indicates tank empty
-    private var autoModeSprayDetected = false  // TRUE when flow > 0 detected during current AUTO mission
-    private var lastPositiveFlowTime: Long? = null  // Timestamp when flow > 0 was last detected
-
-    // Mission-end phase detection
-    // Set TRUE when we detect the mission has reached its end phase (DO_SPRAYER(0), LOITER, RTL, LAND)
-    // This prevents false "Tank Empty" alerts when the sprayer is intentionally turned off by the mission
-    private var missionEndPhaseActive = false
-
-    // ═══ Tank-empty false-positive guard ═══
-    // A genuinely full tank ALWAYS produces healthy flow shortly after the pump turns on.
-    // A flow sensor that is disconnected / mis-wired / mis-calibrated reports a steady 0,
-    // which is indistinguishable from "empty" to the flow comparison. So we require at least
-    // one healthy-flow reading per spray pass BEFORE allowing the machine to latch TANK_EMPTY.
-    // If low flow persists but healthy flow was NEVER seen, it's a sensor/config fault — we
-    // warn the pilot instead of falsely declaring empty (and crucially do NOT change flight mode).
-    // Reset to false on every IDLE→PRIMING transition (start of a new spray pass).
-    @Volatile private var hasSeenHealthyFlow = false
-
-    /**
-     * Same proof, but scoped to the whole SPRAY SESSION rather than one pass.
-     *
-     * [hasSeenHealthyFlow] resets on every IDLE→PRIMING transition, and a spray mission
-     * embeds DO_SPRAYER(0) at each line-end / DO_SPRAYER(1) at each line-start — so the
-     * sprayer cycles IDLE→PRIMING at EVERY line. That made the per-pass latch ask for fresh
-     * proof of flow on each line, which the tank cannot give once it has run dry:
-     *
-     *   line N   : healthy flow → hasSeenHealthyFlow = true → a dry tank here latches EMPTY ✓
-     *   tank empties at the end of line N
-     *   line N+1 : PRIMING resets the latch → flow is 0 from the very first tick →
-     *              hasSeenHealthyFlow stays false → DEBOUNCING_EMPTY takes the
-     *              "sensor/config fault" branch → a warning, and NO tank-empty action ✗
-     *
-     * The tank empties once; the proof of a working sensor does not need re-earning every
-     * line. This latch remembers that the sprayer HAS produced real flow at some point in
-     * this spray session, so a later dry line is correctly read as an empty tank rather than
-     * a broken sensor. It is deliberately NOT reset in [transitionTo] — only when the spray
-     * session genuinely ends (leaving AUTO / mission end / disconnect), via
-     * [resetSprayFlowEvidence].
-     *
-     * The false-positive protection this was guarding is preserved: a truly dead sensor
-     * never sets this flag either, so it still reports a fault rather than an empty tank.
-     */
-    @Volatile private var hasSeenHealthyFlowThisSession = false
-
-    // One-shot guards so the field warnings fire once per spray pass, not every BATT2 tick.
-    private var sensorFaultWarned = false       // "no flow ever seen" warning (reset each PRIMING)
-    private var configInvalidWarned = false     // "monitoring inactive" warning (reset when sprayer off)
-
-    // One-shot guard for the "Spray system configured correctly" notification.
-    // validateSprayConfiguration() runs on EVERY BATT2_*/BATT3_* PARAM_VALUE, and the FC re-sends
-    // that whole block on each param refresh, so notifying on each valid pass spammed the panel with
-    // the same line many times in a row. Notify only on the transition into the valid state; reset
-    // when configuration goes invalid (or on disconnect) so a genuine re-configuration notifies again.
+    // Only a fallback for missions whose spray commands are unavailable. Known mission
+    // commands, rather than observed flow or RC switch position, own AUTO monitoring.
+    @Volatile private var autoModeSprayDetected = false
     private var sprayConfigValidNotified = false
-    private var lastZeroFlowWarnTime = 0L       // debounce for the raw-0-while-enabled warning
-    private val ZERO_FLOW_WARN_INTERVAL_MS = 10000L
 
     // ── Sprayer switch channel discovery (RCx_OPTION = 15) ──
     // Last known RCx_OPTION value per channel, so the resolved spray channel can be recomputed when
@@ -641,85 +571,207 @@ class MavlinkTelemetryRepository(
         }
     }
 
-    /**
-     * Reset all AUTO mode spray detection state.
-     * Called when spray is explicitly disabled (e.g., mode change from Auto)
-     * to prevent false "Tank Empty" alerts.
-     * NOTE: Does NOT reset missionEndPhaseActive — that flag persists until
-     * the drone leaves AUTO mode or a new spray pass starts (flow > 0 detected).
-     */
+    /** Explicit pump-off/failsafe override, independent of the RC switch's old position. */
     fun resetAutoModeSprayDetection() {
-        LogUtils.i("TankEmpty", "🔄 resetAutoModeSprayDetection() called - clearing spray/tank state (was: autoSpray=$autoModeSprayDetected, missionEnd=$missionEndPhaseActive, sprayerState=$sprayerState)")
-        autoModeSprayDetected = false
-        lastPositiveFlowTime = null
-        // Sprayer is being turned off → release the tank-empty state machine to IDLE.
-        transitionTo(SprayerState.IDLE)
-        // NOTE: hasSeenHealthyFlowThisSession is deliberately NOT cleared here. This runs at
-        // every mission-end detection and every AUTO exit — including the ones that happen
-        // between spray lines — which is exactly the churn the session latch exists to
-        // survive. It is cleared by resetSprayFlowEvidence() when the spray session truly
-        // ends (leaving AUTO, disarm, disconnect).
+        resetSprayDetectionSession("spray explicitly disabled", suspendMonitoring = true)
     }
 
-    /**
-     * Forget that the sprayer ever produced healthy flow.
-     *
-     * Ends the spray session for [hasSeenHealthyFlowThisSession], so the next session must
-     * earn its own proof before a dry tank can latch TANK_EMPTY. Without this the latch would
-     * persist across flights and a flow sensor that failed between flights would be reported
-     * as an empty tank instead of a sensor fault — the false positive the original per-pass
-     * latch was written to prevent.
-     */
-    private fun resetSprayFlowEvidence(reason: String) {
-        if (hasSeenHealthyFlowThisSession) {
-            LogUtils.i("TankEmpty", "🔄 Spray session ended ($reason) — flow evidence cleared, next session must re-prove the sensor")
-        }
-        hasSeenHealthyFlowThisSession = false
-    }
-
-    /**
-     * Sprayer state machine transition helper. Updates [sprayerState] and stamps
-     * [stateEntryTime] so each state can time-box itself (the PRIMING grace window
-     * and the empty-debounce window both measure from this).
-     *
-     * Entering [SprayerState.TANK_EMPTY_LOCKED] fires the tank-empty side effects
-     * exactly once: it is the only transition into that state, and same-state
-     * transitions are a no-op.
-     */
-    private fun transitionTo(newState: SprayerState) {
-        val previousState = sprayerState
-        if (newState == previousState) {
-            LogUtils.d("TankEmpty", "↩️ transitionTo($newState) ignored — already in $newState")
-            return
-        }
-        val timeInPrevious = System.currentTimeMillis() - stateEntryTime
-        LogUtils.i("TankEmpty", "🔀 Sprayer state: $previousState → $newState (spent ${timeInPrevious}ms in $previousState)")
-        sprayerState = newState
-        stateEntryTime = System.currentTimeMillis()
-
-        // Start of a new spray pass: require fresh proof of healthy flow before this pass
-        // can ever latch TANK_EMPTY, and re-arm the one-shot sensor-fault warning.
-        if (newState == SprayerState.PRIMING) {
-            hasSeenHealthyFlow = false
-            sensorFaultWarned = false
-        }
-        // Sprayer commanded off: re-arm the config/zero-flow warnings for the next pass.
-        if (newState == SprayerState.IDLE) {
+    /** A real session boundary, never a connector between survey lines. */
+    fun resetSprayDetectionSession(reason: String, suspendMonitoring: Boolean = false) {
+        synchronized(sprayDetectionLock) {
+            LogUtils.i("TankEmpty", "Spray session reset: $reason")
+            spraySessionGeneration++
+            sprayMonitoringSuspended = suspendMonitoring
+            autoModeSprayDetected = false
+            sprayerState = SprayerState.IDLE
+            stateEntryTime = SystemClock.elapsedRealtime()
+            sprayMonitoringStartedAtMs = 0L
+            lastDetectionFlowAtMs = 0L
+            healthyFlowSinceMs = 0L
+            sprayFailureReported = false
+            flowTelemetryWarned = false
             configInvalidWarned = false
-            lastZeroFlowWarnTime = 0L
+            lastTankLevelAtMs = 0L
+            lastValidFlowLpm = null
+            lastValidFlowTime = 0L
+            flowRateFilter.reset()
         }
+    }
 
-        if (newState == SprayerState.TANK_EMPTY_LOCKED) {
-            LogUtils.e("TankEmpty", "🚨 TANK EMPTY confirmed — dispatching notification + TTS + handleTankEmpty()")
-            sharedViewModel.addNotification(
-                Notification(
-                    message = "Tank Empty! Sprayer is ON but no flow detected.",
-                    type = NotificationType.WARNING
+    private fun resetSprayConnectionState(reason: String) {
+        resetSprayDetectionSession(reason, suspendMonitoring = true)
+        sprayConfigValidNotified = false
+        lastTankLevelPercent = null
+        lastMissionCurrentAtMs = 0L
+        sharedViewModel.onSprayConnectionLost()
+        _state.update { snapshot ->
+            snapshot.copy(
+                currentWaypoint = null,
+                lastAutoWaypoint = -1,
+                lastReachedWaypoint = -1,
+                sprayTelemetry = snapshot.sprayTelemetry.copy(
+                    sprayEnabled = false,
+                    sprayActive = false,
+                    rc7Value = null,
+                    flowRateLiterPerMin = null,
+                    formattedFlowRate = null,
+                    consumedLiters = null,
+                    formattedConsumed = null,
+                    tankLevelPercent = null,
+                    tankVoltageMv = null,
+                    batt2CapacityMah = 0,
+                    batt2MonitorType = null,
+                    batt2AmpPerVolt = null,
+                    batt2CurrPin = null,
+                    parametersReceived = false,
+                    configurationValid = false,
+                    configurationError = "Waiting for spray sensor parameters"
                 )
             )
-            sharedViewModel.announceTankEmpty()
-            sharedViewModel.handleTankEmpty()
-            LogUtils.i("TankEmpty", "✅ Tank-empty side effects dispatched (locked until sprayer commanded off)")
+        }
+    }
+
+    fun setSprayMonitoringEnabled(enabled: Boolean) {
+        resetSprayDetectionSession("pilot spray ${if (enabled) "enabled" else "disabled"}",
+            suspendMonitoring = !enabled)
+    }
+
+    /** Reject an action queued by a previous flight/session or an already recovered fault. */
+    fun isSprayFailureCurrent(sessionGeneration: Long): Boolean = synchronized(sprayDetectionLock) {
+        sessionGeneration == spraySessionGeneration && sprayFailureReported
+    }
+
+    // Called only under sprayDetectionLock. Connector OFF resets the pass, but preserves
+    // the one-shot incident latch until healthy flow recovers or the session really ends.
+    private fun transitionTo(newState: SprayerState) {
+        if (newState == sprayerState) return
+        LogUtils.i("TankEmpty", "Sprayer state: $sprayerState -> $newState")
+        sprayerState = newState
+        stateEntryTime = SystemClock.elapsedRealtime()
+        if (newState == SprayerState.TANK_EMPTY_LOCKED && !sprayFailureReported) {
+            sprayFailureReported = true
+            val snapshot = state.value
+            val spray = snapshot.sprayTelemetry
+            val confirmedEmpty = lastTankLevelAtMs > 0L &&
+                SystemClock.elapsedRealtime() - lastTankLevelAtMs <= FLOW_STALE_MS &&
+                spray.levelSensorEmptyMv != spray.levelSensorFullMv &&
+                spray.tankLevelPercent == 0
+            sharedViewModel.handleTankEmpty(
+                confirmedEmpty = confirmedEmpty,
+                detectedInAutoMode = snapshot.mode?.equals("Auto", ignoreCase = true) == true,
+                sessionGeneration = spraySessionGeneration
+            )
+        }
+    }
+
+    /**
+     * Evaluate real flow samples and, from the watchdog/progress collectors, command state.
+     * Missing samples never count as low flow. A stale gap breaks the debounce evidence.
+     */
+    private fun updateSprayerDetection(flowLpm: Float? = null, receivedFlowFrame: Boolean = false) {
+        synchronized(sprayDetectionLock) {
+            val snapshot = state.value
+            val now = SystemClock.elapsedRealtime()
+            val isAuto = snapshot.mode?.equals("Auto", ignoreCase = true) == true
+            val terminalMission = isAuto && (
+                sharedViewModel.isMissionEndSequence(snapshot.currentWaypoint ?: -1) ||
+                    (snapshot.lastReachedWaypoint >= 0 &&
+                        (snapshot.currentWaypoint ?: Int.MAX_VALUE) >= snapshot.lastReachedWaypoint &&
+                        sharedViewModel.isMissionEndSequence(snapshot.lastReachedWaypoint)))
+            val nonSprayMode = snapshot.mode?.uppercase(Locale.ROOT) in
+                setOf("BRAKE", "RTL", "LAND", "SMART_RTL", "AUTO_RTL")
+            val missionSprayOn = if (isAuto) {
+                sharedViewModel.isSprayCommandedActiveAt(snapshot.currentWaypoint ?: -1)
+            } else null
+            val commandedOn = if (isAuto) {
+                missionSprayOn ?: (snapshot.sprayTelemetry.sprayEnabled ||
+                    sharedViewModel.sprayEnabled.value || autoModeSprayDetected)
+            } else {
+                snapshot.sprayTelemetry.sprayEnabled || sharedViewModel.sprayEnabled.value
+            }
+            val monitoringOn = snapshot.connected && snapshot.fcuDetected && snapshot.armed &&
+                commandedOn && !nonSprayMode && !terminalMission && !sprayMonitoringSuspended
+
+            if (terminalMission) {
+                autoModeSprayDetected = false
+                sprayFailureReported = false
+            }
+            if (!monitoringOn) {
+                transitionTo(SprayerState.IDLE)
+                sprayMonitoringStartedAtMs = 0L
+                lastDetectionFlowAtMs = 0L
+                healthyFlowSinceMs = 0L
+                flowTelemetryWarned = false
+                configInvalidWarned = false
+                return
+            }
+            if (sprayMonitoringStartedAtMs == 0L) sprayMonitoringStartedAtMs = now
+            if (!snapshot.sprayTelemetry.configurationValid) {
+                transitionTo(SprayerState.IDLE)
+                healthyFlowSinceMs = 0L
+                lastDetectionFlowAtMs = 0L
+                if (!configInvalidWarned) {
+                    configInvalidWarned = true
+                    sharedViewModel.addNotification(Notification(
+                        "Tank-empty monitoring INACTIVE — " +
+                            (snapshot.sprayTelemetry.configurationError ?: "spray sensor parameters unavailable"),
+                        NotificationType.WARNING))
+                }
+                return
+            }
+            configInvalidWarned = false
+            val staleGap = lastDetectionFlowAtMs > 0L && now - lastDetectionFlowAtMs > FLOW_STALE_MS
+            val unknownSample = receivedFlowFrame && flowLpm == null
+            if (staleGap || unknownSample) {
+                healthyFlowSinceMs = 0L
+                if (sprayerState == SprayerState.DEBOUNCING_EMPTY) {
+                    transitionTo(SprayerState.ACTIVE_FLOW)
+                }
+            }
+            if (receivedFlowFrame && flowLpm != null) {
+                lastDetectionFlowAtMs = now
+                flowTelemetryWarned = false
+            }
+            val lastEvidenceAt = lastDetectionFlowAtMs.takeIf { it > 0L } ?: sprayMonitoringStartedAtMs
+            if (now - lastEvidenceAt > FLOW_STALE_MS) {
+                // Never continue crediting spray coverage using a stale positive reading.
+                _state.update { it.copy(sprayTelemetry = it.sprayTelemetry.copy(sprayActive = false)) }
+                if (!flowTelemetryWarned) {
+                    flowTelemetryWarned = true
+                    sharedViewModel.addNotification(Notification(
+                        "Spray flow telemetry unavailable — tank-empty detection cannot confirm flow. Check the sensor and connection.",
+                        NotificationType.WARNING))
+                }
+            }
+            val flowIsLow = receivedFlowFrame && flowLpm != null && flowLpm <= LOW_FLOW_THRESHOLD_LPM
+            val flowIsHealthy = receivedFlowFrame && flowLpm != null && flowLpm > LOW_FLOW_THRESHOLD_LPM
+            if (flowIsLow) healthyFlowSinceMs = 0L
+            if (flowIsHealthy) {
+                if (healthyFlowSinceMs == 0L) healthyFlowSinceMs = now
+                if (now - healthyFlowSinceMs >= FLOW_RECOVERY_MS) {
+                    sprayFailureReported = false
+                    if (sprayerState == SprayerState.TANK_EMPTY_LOCKED) {
+                        transitionTo(SprayerState.ACTIVE_FLOW)
+                    }
+                }
+            }
+            val timeInState = now - stateEntryTime
+            when (sprayerState) {
+                SprayerState.IDLE -> transitionTo(SprayerState.PRIMING)
+                SprayerState.PRIMING -> if (timeInState >= PRIMING_DURATION_MS) {
+                    transitionTo(SprayerState.ACTIVE_FLOW)
+                }
+                SprayerState.ACTIVE_FLOW -> if (flowIsLow) {
+                    transitionTo(SprayerState.DEBOUNCING_EMPTY)
+                }
+                SprayerState.DEBOUNCING_EMPTY -> when {
+                    flowIsHealthy -> transitionTo(SprayerState.ACTIVE_FLOW)
+                    flowIsLow && timeInState >= DEBOUNCE_DURATION_MS -> {
+                        transitionTo(SprayerState.TANK_EMPTY_LOCKED)
+                    }
+                }
+                SprayerState.TANK_EMPTY_LOCKED -> Unit
+            }
         }
     }
 
@@ -1030,6 +1082,9 @@ class MavlinkTelemetryRepository(
             // Request spray telemetry capacity parameters
             delay(500) // Small delay to let message rates stabilize
             requestSprayCapacityParameters()
+            // Command lookup must describe the FC mission after a reconnect, not a
+            // previously attached airframe. This download uses the mission protocol lock.
+            requestMissionAndLog(timeoutMs = 10000L)
 
             // Start monitoring fence status from FC
             startFenceMonitoring()
@@ -1242,6 +1297,7 @@ class MavlinkTelemetryRepository(
                         // may be a different pack size, and the learned cell count is what
                         // decides whether its frames are believed at all.
                         resetVoltageFilters("stream inactive")
+                        resetSprayConnectionState("stream inactive")
                         // Auto-reconnect disabled - user must manually reconnect via connection tab
                     }
                 }
@@ -1263,9 +1319,18 @@ class MavlinkTelemetryRepository(
                             lastClimbAtMs = 0L
                             climbEmaMps = null
                             resetVoltageFilters("heartbeat timeout")
+                            resetSprayConnectionState("heartbeat timeout")
                         }
                     }
                 }
+            }
+        }
+
+        // Missing BATT2 packets must be surfaced even if that collector never runs.
+        scope.launch {
+            while (isActive) {
+                delay(1000)
+                updateSprayerDetection()
             }
         }
 
@@ -1387,6 +1452,7 @@ class MavlinkTelemetryRepository(
                         }
 
 
+                        resetSprayDetectionSession("FCU connected")
                         // Set fcuDetected, connected, AND initial mode/armed state
                         _state.update { state ->
                             state.copy(
@@ -1878,50 +1944,20 @@ class MavlinkTelemetryRepository(
                         // pipeline is producing the zeros.
                         LogUtils.d("Flow", "BATT2 RAW: id=${b.id}, rawCurrentBattery(cA)=${b.currentBattery}, gap=${batt2GapMs}ms (~${"%.1f".format(batt2Hz)}Hz), currentConsumed=${b.currentConsumed}, batteryRemaining=${b.batteryRemaining}, voltages=${b.voltages.toList()}")
 
-                        // Check for spray enabled but no flow detected
-                        val currentSprayEnabled = state.value.sprayTelemetry.sprayEnabled
-                        val currentRc7 = state.value.sprayTelemetry.rc7Value
-
-                        if (currentSprayEnabled && b.currentBattery == 0.toShort()) {
-                            LogUtils.w("Flow", "WARN: Spray enabled (RC7=$currentRc7) but currentBattery=0 (no flow). Check BATT2_MONITOR=${state.value.sprayTelemetry.batt2MonitorType}, BATT2_CURR_PIN=${state.value.sprayTelemetry.batt2CurrPin}, BATT2_AMP_PERVLT=${state.value.sprayTelemetry.batt2AmpPerVolt}")
-
-                            // Surface the wiring/calibration hint to the pilot (debounced). Gated on
-                            // !hasSeenHealthyFlow so it NEVER fires during a genuine empty (which always
-                            // sees healthy flow first and reports "Tank Empty" instead) — avoiding a
-                            // contradictory "check wiring" message on a tank that simply ran dry.
-                            val nowZeroWarn = System.currentTimeMillis()
-                            if (!hasSeenHealthyFlow && nowZeroWarn - lastZeroFlowWarnTime >= ZERO_FLOW_WARN_INTERVAL_MS) {
-                                lastZeroFlowWarnTime = nowZeroWarn
-                                sharedViewModel.addNotification(
-                                    Notification(
-                                        message = "Spray ON but flow sensor reads 0 — verify flow sensor wiring / BATT2 calibration.",
-                                        type = NotificationType.WARNING
-                                    )
-                                )
-                            }
-                        }
-
-                        // â•â•â• IMPROVED: Input validation and conversion â•â•â•
                         val flowRateLiterPerHour = FlowRateValidator.validateAndConvert(b.currentBattery)
 
-                        // Apply filtering and spike detection for non-zero values
-                        val filteredFlowRate = if (flowRateLiterPerHour != null && flowRateLiterPerHour > 0f) {
-                            // Check for sensor spikes before adding to filter
-                            if (flowRateFilter.detectSpike(flowRateLiterPerHour, threshold = 2.0f)) {
-
-                                // Use current average instead of spike value
-                                flowRateFilter.getAverage()
+                        // Filtering is for display only and shares the reset lock.
+                        val filteredFlowRate = synchronized(sprayDetectionLock) {
+                            if (flowRateLiterPerHour != null && flowRateLiterPerHour > 0f) {
+                                if (flowRateFilter.detectSpike(flowRateLiterPerHour, threshold = 2.0f)) {
+                                    flowRateFilter.getAverage()
+                                } else {
+                                    flowRateFilter.addValue(flowRateLiterPerHour)
+                                }
                             } else {
-                                // Normal value - add to filter and get smoothed result
-                                val smoothed = flowRateFilter.addValue(flowRateLiterPerHour)
-                                smoothed
+                                if (flowRateLiterPerHour == 0f) flowRateFilter.reset()
+                                flowRateLiterPerHour
                             }
-                        } else {
-                            // Reset filter when flow stops
-                            if (flowRateLiterPerHour == 0f) {
-                                flowRateFilter.reset()
-                            }
-                            flowRateLiterPerHour
                         }
 
                         val flowRateLiterPerMin = filteredFlowRate?.let {
@@ -1930,8 +1966,8 @@ class MavlinkTelemetryRepository(
                         }
 
                         // Hold the last valid flow briefly so a single -1 (no-reading) frame doesn't
-                        // flicker the on-screen flow to "N/A". Detection below still uses the real
-                        // (possibly null) flowRateLiterPerMin — only the DISPLAY is smoothed here.
+                        // flicker the on-screen flow to "N/A". Detection uses validated raw
+                        // flow independently of this display average and hold.
                         val nowFlow = System.currentTimeMillis()
                         if (flowRateLiterPerMin != null) {
                             lastValidFlowLpm = flowRateLiterPerMin
@@ -1979,45 +2015,24 @@ class MavlinkTelemetryRepository(
                             else -> "%.2f L".format(consumedLiters)
                         }
 
-                        // ═══════════════════════════════════════════════════════════════════
-                        // AUTO MISSION SPRAY DETECTION
-                        // Spray is considered "active" when:
-                        // 1. RC7 is enabled (manual spray via RC), OR
-                        // 2. Flow rate > 0 (spray enabled via DO_SET_SERVO, DO_SPRAYER, or Sprayer library)
-                        // This ensures green spray lines are drawn even when RC7 is OFF during AUTO missions
-                        // ═══════════════════════════════════════════════════════════════════
+                        // Mission command state determines where spraying is expected;
+                        // actual flow determines whether coverage can be counted.
                         val rc7SprayEnabled = state.value.sprayTelemetry.sprayEnabled
                         val hasFlowDetected = flowRateLiterPerMin != null && flowRateLiterPerMin > 0f
                         val currentMode = state.value.mode
                         val isInAutoMode = currentMode?.equals("Auto", ignoreCase = true) == true
 
-                        // Track AUTO mode spray activity via flow detection
-                        // When flow > 0 is detected in AUTO mode, we know DO_SET_SERVO/DO_SPRAYER/Sprayer is active
-                        if (hasFlowDetected) {
-                            lastPositiveFlowTime = System.currentTimeMillis()
-                            if (isInAutoMode && !autoModeSprayDetected) {
-                                autoModeSprayDetected = true
-                                // Clear mission-end flag when new spray activity is detected
-                                // (handles mission restart or new mission without mode change)
-                                if (missionEndPhaseActive) {
-                                    LogUtils.i("TankEmpty", "🔄 Flow detected in AUTO mode — clearing missionEndPhaseActive (new spray pass)")
-                                    missionEndPhaseActive = false
-                                }
-                            }
+                        val missionSprayOn = if (isInAutoMode) {
+                            sharedViewModel.isSprayCommandedActiveAt(state.value.currentWaypoint ?: -1)
+                        } else null
+                        if (isInAutoMode && hasFlowDetected && missionSprayOn != false) {
+                            autoModeSprayDetected = true
                         }
-
-                        // sprayActive is TRUE when:
-                        // AUTO mode: flow detected OR spray was previously detected (covers brief flow sensor gaps)
-                        // MANUAL mode: RC7 is enabled AND actual flow > 0
-                        //   (RC7 on but flow=0 should NOT show green - pump may not be running)
-                        val sprayIsActive = if (isInAutoMode) {
-                            hasFlowDetected || autoModeSprayDetected
-                        } else {
-                            // Manual mode: require actual flow to confirm spraying
-                            rc7SprayEnabled && hasFlowDetected
-                        }
-
-                        LogUtils.d("Flow", "SPRAY: rc7=$rc7SprayEnabled, flowDetected=$hasFlowDetected, autoSpray=$autoModeSprayDetected, active=$sprayIsActive, consumed=$consumedLiters, remaining=$flowRemainingPercent%, mode=$currentMode")
+                        // Actual coverage needs flow; an AUTO latch must not paint a dry
+                        // connector or an empty-tank pass as successfully sprayed.
+                        val sprayIsActive = hasFlowDetected && (if (isInAutoMode) {
+                            missionSprayOn ?: (rc7SprayEnabled || sharedViewModel.sprayEnabled.value || autoModeSprayDetected)
+                        } else rc7SprayEnabled || sharedViewModel.sprayEnabled.value)
 
                         _state.update { state ->
                             state.copy(
@@ -2033,212 +2048,9 @@ class MavlinkTelemetryRepository(
                             )
                         }
 
-                        // ╔══════════════════════════════════════════════════════════════════╗
-                        // ║          FLOW-BASED TANK EMPTY DETECTION (state machine)         ║
-                        // ╠══════════════════════════════════════════════════════════════════╣
-                        // ║ Evaluated every BATT2 tick by the SprayerState machine below:    ║
-                        // ║   IDLE → PRIMING          when sprayerIsOn && configValid         ║
-                        // ║   PRIMING → ACTIVE_FLOW    after PRIMING_DURATION_MS (flow ignored)║
-                        // ║   ACTIVE_FLOW → DEBOUNCING_EMPTY   when flow ≤ LOW_FLOW_THRESHOLD ║
-                        // ║   DEBOUNCING_EMPTY → ACTIVE_FLOW   when flow recovers (air bubble) ║
-                        // ║   DEBOUNCING_EMPTY → TANK_EMPTY_LOCKED after DEBOUNCE_DURATION_MS ║
-                        // ║   any state → IDLE        when sprayerIsOn becomes false          ║
-                        // ║                                                                  ║
-                        // ║ sprayerIsOn already excludes non-spray modes (BRAKE/RTL/LAND)    ║
-                        // ║ and mission-end, so it is the single "pump should be flowing"    ║
-                        // ║ signal. A null flow reading (dropped frame) is neither low nor   ║
-                        // ║ healthy, so it HOLDS the current state — it can't trigger or      ║
-                        // ║ reset detection.                                                 ║
-                        // ╚══════════════════════════════════════════════════════════════════╝
-
-                        val currentSprayEnabledForEmpty = state.value.sprayTelemetry.sprayEnabled
-                        val configValid = state.value.sprayTelemetry.configurationValid
-
-                        // ═══ Tight absolute near-zero threshold for tank-empty detection ═══
-                        // null  = no BATT2 reading this frame → UNKNOWN (neither low nor healthy), so a
-                        //         dropped frame neither triggers nor resets the low-flow timer/counter.
-                        // <=thr = effectively empty (flow ≈ 0 while the pump should be pushing liquid).
-                        // > thr = healthy flow → resets the timer/counter.
-                        val flowIsLow = flowRateLiterPerMin != null && flowRateLiterPerMin <= LOW_FLOW_THRESHOLD_LPM
-                        val flowIsHealthy = flowRateLiterPerMin != null && flowRateLiterPerMin > LOW_FLOW_THRESHOLD_LPM
-
-                        // ═══ Skip tank empty detection in non-spray modes ═══
-                        // When failsafes (battery, geofence, RC) trigger a mode change to
-                        // BRAKE/RTL/LAND/Smart_RTL, the sprayer physically stops and flow drops to 0.
-                        // This is EXPECTED and should NOT trigger "Tank Empty".
-                        val isInNonSprayMode = currentMode?.let { mode ->
-                            mode.equals("Brake", ignoreCase = true) ||
-                            mode.equals("RTL", ignoreCase = true) ||
-                            mode.equals("Land", ignoreCase = true) ||
-                            mode.equals("Smart_RTL", ignoreCase = true) ||
-                            mode.equals("Auto_RTL", ignoreCase = true)
-                        } ?: false
-
-                        // ═══ LAYER 2: Real-time mission-end detection via stored mission items ═══
-                        // Check if current waypoint corresponds to a mission-end command
-                        // (DO_SPRAYER(0), NAV_LOITER_UNLIM, NAV_RTL, NAV_LAND).
-                        // This fires INSIDE the BATT2 handler on every telemetry tick, so it
-                        // catches mission-end even if MISSION_CURRENT was delayed by telemetry congestion.
-                        if (isInAutoMode && autoModeSprayDetected && !missionEndPhaseActive) {
-                            val currentWaypoint = state.value.currentWaypoint
-                            if (currentWaypoint != null && sharedViewModel.isMissionEndSequence(currentWaypoint)) {
-                                LogUtils.i("TankEmpty", "🛑 Mission-end detected in BATT2 handler (waypoint=$currentWaypoint is end-of-mission command) — resetting spray detection")
-                                missionEndPhaseActive = true
-                                resetAutoModeSprayDetection()
-                            }
-                        }
-
-                        // ═══ Transition-aware suppression ═══
-                        // Missions embed DO_SPRAYER(0) at each line-end and DO_SPRAYER(1) at each
-                        // line-start, so spray is intentionally OFF while flying the horizontal
-                        // connector between lines. During those transitions flow legitimately drops
-                        // to ~0 — which must NOT be read as "tank empty". Ask the mission whether spray
-                        // is commanded ON at the current sequence; when it is commanded OFF (a
-                        // transition), sprayerIsOn goes false → state machine returns to IDLE → no
-                        // false tank-empty. Unknown/manual missions return true (behavior unchanged).
-                        val missionCommandsSprayOn = if (isInAutoMode) {
-                            sharedViewModel.isSprayCommandedActiveAt(state.value.currentWaypoint ?: -1)
-                        } else true
-
-                        // In AUTO mode, spraying is done via mission commands (DO_SET_SERVO/DO_SPRAYER),
-                        // NOT via RC7. So we also check autoModeSprayDetected to know spray is active.
-                        // Also skip if missionEndPhaseActive — the mission has intentionally stopped spraying.
-                        val sprayerIsOn = (currentSprayEnabledForEmpty || (isInAutoMode && autoModeSprayDetected && missionCommandsSprayOn)) && !isInNonSprayMode && !missionEndPhaseActive
-
-                        // ═══ TANK EMPTY DEBUG LOGS ═══
-                        LogUtils.d("TankEmpty", "━━━ Tank Empty Check ━━━ mode=$currentMode | rawCA=${b.currentBattery} | flowRate=$flowRateLiterPerMin L/min | gap=${batt2GapMs}ms (~${"%.1f".format(batt2Hz)}Hz) | flowIsLow=$flowIsLow | flowIsHealthy=$flowIsHealthy | lowThreshold=$LOW_FLOW_THRESHOLD_LPM L/min | configValid=$configValid")
-                        LogUtils.d("TankEmpty", "  sprayEnabled=$currentSprayEnabledForEmpty | autoSprayDetected=$autoModeSprayDetected | isAutoMode=$isInAutoMode | missionSprayOn=$missionCommandsSprayOn | isInNonSprayMode=$isInNonSprayMode | missionEnd=$missionEndPhaseActive | sprayerIsOn=$sprayerIsOn")
-                        LogUtils.d("TankEmpty", "  sprayerState=$sprayerState | timeInState=${System.currentTimeMillis() - stateEntryTime}ms | lastPositiveFlow=$lastPositiveFlowTime")
-
-                        // ── Evaluate the sprayer state machine on this telemetry tick ──
-                        // flowIsLow/flowIsHealthy are both false when flow is null (dropped
-                        // frame), which naturally HOLDS the current state rather than
-                        // triggering or resetting it. timeInState drives the time-based
-                        // PRIMING grace and empty-debounce windows.
-                        val timeInState = System.currentTimeMillis() - stateEntryTime
-                        when (sprayerState) {
-                            SprayerState.IDLE -> {
-                                // Begin priming the moment the sprayer is commanded on with valid telemetry.
-                                if (sprayerIsOn && configValid) {
-                                    LogUtils.i("TankEmpty", "🟢 Sprayer ON → PRIMING (${PRIMING_DURATION_MS}ms grace, flow ignored)")
-                                    transitionTo(SprayerState.PRIMING)
-                                } else if (sprayerIsOn && !configValid && !configInvalidWarned) {
-                                    // Sprayer is ON but the spray config is invalid, so tank-empty
-                                    // monitoring is INACTIVE. Surface this once so the pilot doesn't
-                                    // assume they're protected. (Re-armed when the sprayer goes off.)
-                                    configInvalidWarned = true
-                                    val reason = state.value.sprayTelemetry.configurationError ?: "spray sensor parameters not configured"
-                                    LogUtils.w("TankEmpty", "⚠️ Sprayer ON but configValid=false — tank-empty monitoring INACTIVE ($reason)")
-                                    sharedViewModel.addNotification(
-                                        Notification(
-                                            message = "Tank-empty monitoring INACTIVE — $reason",
-                                            type = NotificationType.WARNING
-                                        )
-                                    )
-                                }
-                            }
-
-                            SprayerState.PRIMING -> {
-                                when {
-                                    // Pilot override / mode change before priming finished → reset.
-                                    !sprayerIsOn -> transitionTo(SprayerState.IDLE)
-                                    // Grace window elapsed (covers pump prime) → start watching flow.
-                                    timeInState >= PRIMING_DURATION_MS -> {
-                                        LogUtils.i("TankEmpty", "⏩ Priming complete (${timeInState}ms) → ACTIVE_FLOW")
-                                        transitionTo(SprayerState.ACTIVE_FLOW)
-                                    }
-                                    // else: still priming — flow telemetry intentionally ignored.
-                                }
-                            }
-
-                            SprayerState.ACTIVE_FLOW -> {
-                                // Record that this spray pass has produced real flow at least once.
-                                // This is the proof that the flow sensor is alive and the tank had
-                                // liquid — without it we can't distinguish "empty" from "dead sensor".
-                                if (flowIsHealthy && !hasSeenHealthyFlow) {
-                                    hasSeenHealthyFlow = true
-                                    LogUtils.i("TankEmpty", "💧 Healthy flow observed (${flowRateLiterPerMin} L/min) — tank-empty latch now armed")
-                                }
-                                // Session-scoped proof: survives the IDLE→PRIMING cycle that
-                                // happens at every line boundary, so a tank that empties
-                                // mid-mission still latches EMPTY on the following line.
-                                if (flowIsHealthy && !hasSeenHealthyFlowThisSession) {
-                                    hasSeenHealthyFlowThisSession = true
-                                    LogUtils.i("TankEmpty", "💧 First healthy flow this spray session — sensor proven, later dry lines will latch TANK_EMPTY")
-                                }
-                                when {
-                                    !sprayerIsOn -> transitionTo(SprayerState.IDLE)
-                                    // Flow fell to ~0 while spraying → start the empty debounce.
-                                    flowIsLow -> {
-                                        LogUtils.w("TankEmpty", "⏱️ Flow low (${flowRateLiterPerMin} L/min) → DEBOUNCING_EMPTY (${DEBOUNCE_DURATION_MS}ms)")
-                                        transitionTo(SprayerState.DEBOUNCING_EMPTY)
-                                    }
-                                    // else: healthy flow — stay ACTIVE_FLOW.
-                                }
-                            }
-
-                            SprayerState.DEBOUNCING_EMPTY -> {
-                                when {
-                                    !sprayerIsOn -> transitionTo(SprayerState.IDLE)
-                                    // Flow recovered (air bubble / transient) → back to ACTIVE_FLOW.
-                                    flowIsHealthy -> {
-                                        LogUtils.i("TankEmpty", "✅ Flow recovered (${flowRateLiterPerMin} L/min) → ACTIVE_FLOW (air bubble)")
-                                        transitionTo(SprayerState.ACTIVE_FLOW)
-                                    }
-                                    // Low flow persisted past the debounce window.
-                                    timeInState >= DEBOUNCE_DURATION_MS -> {
-                                        // Either proof works. The per-pass latch covers a tank
-                                        // that empties DURING this line; the session latch covers
-                                        // one that emptied on a previous line and left this line
-                                        // dry from its first tick — the case the per-pass latch
-                                        // alone misread as a sensor fault.
-                                        if (hasSeenHealthyFlow || hasSeenHealthyFlowThisSession) {
-                                            // We saw real flow earlier, then it stopped → tank really is empty.
-                                            val proof = if (hasSeenHealthyFlow) "this pass" else "earlier this session"
-                                            LogUtils.e("TankEmpty", "🚨 Low flow persisted ${timeInState}ms after healthy flow ($proof, mode=$currentMode) → TANK_EMPTY_LOCKED")
-                                            transitionTo(SprayerState.TANK_EMPTY_LOCKED)
-                                        } else {
-                                            // Flow was NEVER healthy this pass → this is a sensor/config fault,
-                                            // NOT an empty tank. Warn once and do NOT change flight mode.
-                                            // Stay in DEBOUNCING so a later genuine flow can still recover/arm.
-                                            if (!sensorFaultWarned) {
-                                                sensorFaultWarned = true
-                                                LogUtils.e("TankEmpty", "⚠️ No spray flow EVER seen this pass (${timeInState}ms low) — treating as sensor/config fault, NOT tank empty")
-                                                sharedViewModel.addNotification(
-                                                    Notification(
-                                                        message = "No spray flow detected — check flow sensor, wiring, and BATT2 calibration. (Tank-empty action suppressed.)",
-                                                        type = NotificationType.WARNING
-                                                    )
-                                                )
-                                            }
-                                        }
-                                    }
-                                    // else (flow null/unknown): HOLD — a dropped frame can't trigger or reset.
-                                }
-                            }
-
-                            SprayerState.TANK_EMPTY_LOCKED -> {
-                                // Alert already fired exactly once on entry (see transitionTo). Release
-                                // only when the sprayer is commanded off — pilot override back to Loiter,
-                                // mode change, or mission end — so a subsequent empty can re-trigger.
-                                if (!sprayerIsOn) {
-                                    LogUtils.i("TankEmpty", "⚪ Sprayer OFF → IDLE (tank-empty lock released)")
-                                    transitionTo(SprayerState.IDLE)
-                                }
-                            }
-                        }
-
-                        // Reset AUTO mode spray detection when leaving AUTO mode
-                        if (!isInAutoMode && (autoModeSprayDetected || missionEndPhaseActive)) {
-                            autoModeSprayDetected = false
-                            lastPositiveFlowTime = null
-                            missionEndPhaseActive = false
-                            // The spray session is genuinely over here (the drone has left
-                            // AUTO), as opposed to the between-lines sprayer cycling that
-                            // resetAutoModeSprayDetection() handles — so the flow evidence
-                            // goes with it.
-                            resetSprayFlowEvidence("left AUTO mode")
-                        }
+                        // Use raw validated flow for detection; display averaging must not
+                        // mask a real drop or extend healthy evidence through a sensor gap.
+                        updateSprayerDetection(flowRateLiterPerHour?.div(60f), receivedFlowFrame = true)
                     }
                     // Level sensor (BATT3 - id=2)
                     else if (b.id.toInt() == 2) {
@@ -2350,8 +2162,9 @@ class MavlinkTelemetryRepository(
                             )
                         }
 
-                        // NOTE: Tank empty detection is now handled by flow-based detection in BATT2 section
-                        // BATT3 level is still tracked for display purposes only
+                        // Fresh level telemetry corroborates an empty-tank diagnosis; flow
+                        // loss still drives the action so a level sensor is not mandatory.
+                        lastTankLevelAtMs = if (tankLevelPercent != null) SystemClock.elapsedRealtime() else 0L
                         // Low tank warning at 15% (still useful as an early warning)
                         if (tankLevelPercent != null) {
                             if (tankLevelPercent <= 15 && tankLevelPercent > 0 && lastTankLevelPercent != null && lastTankLevelPercent!! > 15) {
@@ -2428,6 +2241,14 @@ class MavlinkTelemetryRepository(
                     if (mode != state.value.mode || armed != state.value.armed) {
                         _state.update { it.copy(armed = armed, mode = mode) }
                     } else {
+                    }
+
+                    // Session resets must happen on HEARTBEAT, even if BATT2 stops arriving.
+                    if (lastArmed == true && !armed) {
+                        resetSprayDetectionSession("disarmed", suspendMonitoring = true)
+                    } else if (armed && (lastArmed != true ||
+                            (!mode.equals(lastMode, ignoreCase = true) && mode.equals("Auto", ignoreCase = true)))) {
+                        resetSprayDetectionSession("armed / entered AUTO")
                     }
 
                     // Arm/Disarm Notifications
@@ -2661,10 +2482,6 @@ class MavlinkTelemetryRepository(
                                 LogUtils.i("MissionClear", "Mission finished and drone disarmed — mission LEFT on the FC (clear it from the home screen if you want it gone)")
                                 sharedViewModel.onMissionLeftOnFcAfterCompletion()
                             }
-
-                            // The flight is over, so the next one must re-prove the flow
-                            // sensor before a dry tank counts as empty.
-                            resetSprayFlowEvidence("disarmed")
 
                             // Also disable spray when drone is disarmed for safety
                             sharedViewModel.disableSprayOnModeChange()
@@ -3024,23 +2841,7 @@ class MavlinkTelemetryRepository(
                     // Update SharedViewModel
                     sharedViewModel.updateCurrentWaypoint(currentSeq)
 
-                    // ═══ FIX: Reset spray detection when mission-end items reached ═══
-                    // When MISSION_CURRENT advances to the final mission items (DO_SPRAYER(0) + RTL/LAND/LOITER),
-                    // the sprayer is already off. Reset autoModeSprayDetected to prevent false
-                    // "Tank Empty" alerts while still in AUTO mode during RTL/landing/hovering.
-                    // Two independent checks for robustness:
-                    //   1. Count-based: currentSeq >= totalMissionItems - 3 (fails if lastUploadedCount is 0)
-                    //   2. Command-type: look up current item in stored mission items (fails if items not stored)
-                    val totalMissionItems = sharedViewModel.lastUploadedCount
-                    val isNearEnd = totalMissionItems > 0 && currentSeq >= totalMissionItems - 3
-                    val isEndCommand = sharedViewModel.isMissionEndSequence(currentSeq)
-                    if (isNearEnd || isEndCommand) {
-                        if (autoModeSprayDetected || !missionEndPhaseActive) {
-                            LogUtils.i("SprayControl", "🛑 Resetting auto spray detection - mission near end (currentSeq=$currentSeq, total=$totalMissionItems, isNearEnd=$isNearEnd, isEndCommand=$isEndCommand)")
-                            missionEndPhaseActive = true
-                            resetAutoModeSprayDetection()
-                        }
-                    }
+                    updateSprayerDetection()
 
                     if (currentSeq != lastMissionSeq) {
                         lastMissionSeq = currentSeq
@@ -3070,12 +2871,12 @@ class MavlinkTelemetryRepository(
                     _state.update { it.copy(lastReachedWaypoint = reachedSeq) }
 
                     // Fallback only, for firmware that does not emit MISSION_CURRENT. The
-                    // target is the item AFTER the one just reached, so the two sources agree
-                    // on what currentWaypoint means.
+                    // target is the next NAV item (skipping DO/CONDITION commands), so
+                    // the two sources agree on what currentWaypoint means.
                     val missionCurrentIsLive =
                         System.currentTimeMillis() - lastMissionCurrentAtMs < MISSION_CURRENT_STALE_MS
                     if (!missionCurrentIsLive) {
-                        val targetSeq = reachedSeq + 1
+                        val targetSeq = sharedViewModel.missionNavigationTargetAfter(reachedSeq)
                         _state.update { it.copy(currentWaypoint = targetSeq) }
                         if (currentMode?.equals("Auto", ignoreCase = true) == true) {
                             _state.update { it.copy(lastAutoWaypoint = targetSeq) }
@@ -3083,25 +2884,7 @@ class MavlinkTelemetryRepository(
                         sharedViewModel.updateCurrentWaypoint(targetSeq)
                     }
 
-                    // ═══ FIX: Reset spray detection when mission-end items reached ═══
-                    // When the drone reaches the final mission items (DO_SPRAYER(0) + RTL/LAND/LOITER),
-                    // the sprayer is already off but autoModeSprayDetected is still true.
-                    // This causes a false "Tank Empty" alert because:
-                    //   sprayCommandActive = isInAutoMode && autoModeSprayDetected = true
-                    //   flow = 0 (sprayer was turned off by mission) → triggers tank empty after 3s
-                    // Fix: Reset spray detection via dual check:
-                    //   1. Count-based: seq near end of mission (fails if lastUploadedCount is 0)
-                    //   2. Command-type: item at seq is a terminal command (fails if items not stored)
-                    val totalMissionItems = sharedViewModel.lastUploadedCount
-                    val isNearEnd = totalMissionItems > 0 && reachedSeq >= totalMissionItems - 3
-                    val isEndCommand = sharedViewModel.isMissionEndSequence(reachedSeq)
-                    if (isNearEnd || isEndCommand) {
-                        if (autoModeSprayDetected || !missionEndPhaseActive) {
-                            LogUtils.i("SprayControl", "🛑 Resetting auto spray detection - last waypoint reached (seq=$reachedSeq, total=$totalMissionItems, isNearEnd=$isNearEnd, isEndCommand=$isEndCommand)")
-                            missionEndPhaseActive = true
-                            resetAutoModeSprayDetection()
-                        }
-                    }
+                    updateSprayerDetection()
 
                     // NOTE: Removed "Reached waypoint" notification from notification panel
                     // The UI already shows current waypoint progress in the telemetry display
@@ -3180,6 +2963,11 @@ class MavlinkTelemetryRepository(
                     // Check if spray status changed
                     val previousSprayEnabled = state.value.sprayTelemetry.sprayEnabled
                     if (sprayEnabled != previousSprayEnabled) {
+                        // In AUTO the mission remains authoritative. In manual flight a
+                        // real switch edge starts/ends the pilot's spray session.
+                        if (state.value.mode?.equals("Auto", ignoreCase = true) != true) {
+                            setSprayMonitoringEnabled(sprayEnabled)
+                        }
                         // Spray status changed - add notification and show popup
                         val notificationMessage = if (sprayEnabled) "Sprayer Enabled" else "Sprayer Disabled"
                         val notificationType = if (sprayEnabled) NotificationType.SUCCESS else NotificationType.INFO
@@ -3793,7 +3581,7 @@ class MavlinkTelemetryRepository(
             }
 
             // Confirm against the heartbeat's reported mode.
-            if (state.value.mode?.contains(expectedMode, ignoreCase = true) == true) {
+            if (state.value.mode?.equals(expectedMode, ignoreCase = true) == true) {
                 if (attempts > 1) {
                     LogUtils.i("ModeChange", "✓ $expectedMode confirmed after $attempts attempts (${System.currentTimeMillis() - start}ms)")
                 }
@@ -4209,6 +3997,7 @@ class MavlinkTelemetryRepository(
             watchdogJob.cancel()
 
             if (success) {
+                resetSprayDetectionSession("mission uploaded")
                 // Progress tracked for the previous mission means nothing against the new one -
                 // and a stale (larger) lastReachedWaypoint would push the next resume past the
                 // end of this mission. Sequence numbering restarts, so clear it.
@@ -4560,7 +4349,9 @@ class MavlinkTelemetryRepository(
         // Serialize against uploadMissionWithAck. A download and an upload interleaving on the
         // same link is exactly what corrupted the resume handshake: the FC runs ONE mission
         // transfer state machine, so two overlapping transfers steal each other's acks.
-        return missionProtocolMutex.withLock { getAllWaypointsLocked(timeoutMs) }
+        return missionProtocolMutex.withLock {
+            getAllWaypointsLocked(timeoutMs)?.also { sharedViewModel.updateMissionItemsFromReadback(it) }
+        }
     }
 
     /** Body of [getAllWaypoints]. Callers must already hold [missionProtocolMutex]. */
@@ -5053,6 +4844,7 @@ class MavlinkTelemetryRepository(
             // Mark this as an intentional disconnect to prevent auto-reconnect
             intentionalDisconnect = true
             resetVoltageFilters("user disconnect")
+            resetSprayConnectionState("user disconnect")
             // Attempt to close the TCP connection gracefully
             connection.close()
         } catch (e: Exception) {
@@ -5231,7 +5023,7 @@ class MavlinkTelemetryRepository(
         // Validate configuration correctness
         val monitorCorrect = spray.batt2MonitorType == 11
         val capacitySet = spray.batt2CapacityMah > 0
-        val calibrationSet = (spray.batt2AmpPerVolt ?: 0f) != 0f
+        val calibrationSet = spray.batt2AmpPerVolt?.let { it.isFinite() && it > 0f } == true
         val pinConfigured = (spray.batt2CurrPin ?: -1) > 0
 
         val configurationValid = monitorCorrect && capacitySet && calibrationSet && pinConfigured

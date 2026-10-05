@@ -181,6 +181,11 @@ fun OptionsScreen(
 
             // Section: Tank Empty — separate action for Manual flight vs Auto missions
             SectionCard(title = "Tank Empty") {
+                Text(
+                    text = "These actions also apply when spray flow stays near zero while spraying is enabled. Check the tank and spray system when alerted.",
+                    style = MaterialTheme.typography.bodySmall
+                )
+                Spacer(modifier = Modifier.height(8.dp))
                 SubLabel("Manual Mode")
                 ActionRadioGroup(
                     selected = options.tankEmptyActionManual,

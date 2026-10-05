@@ -2578,43 +2578,53 @@ class SharedViewModel : ViewModel() {
         ttsManager?.speak("Warning! RC battery critical at $batteryPercent percent. Emergency RTL activated.")
     }
 
-    fun announceTankEmpty() {
-        ttsManager?.speak("Warning! Tank is empty. Please refill the tank.")
-    }
-
     /**
-     * Handle tank empty detection in ANY flight mode (AUTO or MANUAL).
+     * Handle persistent no flow in AUTO or MANUAL using the tank-empty action.
+     * Flow alone cannot distinguish an empty tank from a pump/blockage/sensor fault.
      * This will:
-     * 1. Change mode to the user's selected tank empty action (LOITER/RTL/LAND)
+     * 1. Apply the selected tank empty action (BRAKE/RTL/LAND/REPORT_ONLY)
      * 2. The mode change detection will automatically trigger appropriate actions
      *
      * Called from TelemetryRepository when tank empty is detected.
      */
-    fun handleTankEmpty() {
+    fun handleTankEmpty(confirmedEmpty: Boolean, detectedInAutoMode: Boolean, sessionGeneration: Long) {
         viewModelScope.launch {
             try {
-                val currentMode = _telemetryState.value.mode
-                val currentWp = _telemetryState.value.currentWaypoint
-                val lastAutoWp = _telemetryState.value.lastAutoWaypoint
+                if (repo?.isSprayFailureCurrent(sessionGeneration) != true) return@launch
+                val snapshot = repo?.state?.value ?: _telemetryState.value
+                val currentMode = snapshot.mode
+                val currentWp = snapshot.currentWaypoint
+                val lastAutoWp = snapshot.lastAutoWaypoint
                 
                 // Check if we're in AUTO mode (for mission status updates)
                 val isInAutoMode = currentMode?.equals("Auto", ignoreCase = true) == true
                 
-                // Skip if already in a safe mode (RTL or LAND)
-                if (currentMode?.equals("RTL", ignoreCase = true) == true ||
-                    currentMode?.equals("Land", ignoreCase = true) == true) {
-                    LogUtils.d("SharedVM", "Tank empty detected but already in safe mode ($currentMode) - skipping")
+                // Do not override a pilot/failsafe mode change queued after detection.
+                if (!snapshot.armed || detectedInAutoMode != isInAutoMode ||
+                    currentMode?.uppercase(java.util.Locale.ROOT) in
+                        setOf("BRAKE", "RTL", "LAND", "SMART_RTL", "AUTO_RTL")) {
+                    LogUtils.d("SharedVM", "No-flow action skipped: flight state changed ($currentMode)")
                     return@launch
                 }
 
-                // Get the user's selected tank empty action from settings.
-                // Manual flight and Auto missions have separate configured actions.
+                // Manual flight and AUTO retain their separate configured actions.
                 val context = GCSApplication.getInstance()
                 val tankEmptyAction = if (context != null) {
                     getTankEmptyAction(context, isInAutoMode)
+                } else "HOVER"
+                val alertTitle = if (confirmedEmpty) "Tank Empty" else "Tank Empty / No Spray Flow"
+                val alertMessage = if (confirmedEmpty) {
+                    "Tank Empty! No spray flow and tank level reads empty. Refill the tank."
                 } else {
-                    "HOVER" // Default fallback
+                    "Tank empty / no spray flow while spraying is commanded ON. Check the tank, pump, lines and flow sensor."
                 }
+                val actionMessage = if (tankEmptyAction.equals("REPORT_ONLY", ignoreCase = true)) {
+                    "Report Only: drone continues flying."
+                } else "Configured action: $tankEmptyAction."
+                addNotification(Notification("$alertMessage $actionMessage", NotificationType.WARNING))
+                ttsManager?.speak(if (confirmedEmpty) "Warning! Tank is empty. Please refill the tank."
+                    else "Warning! No spray flow. Check the tank and spray system.")
+                showFailsafePopup(alertTitle)
 
                 LogUtils.i("SharedVM", "=== TANK EMPTY DETECTED ===")
                 LogUtils.i("SharedVM", "Current flight mode: $currentMode (isAuto=$isInAutoMode)")
@@ -2625,19 +2635,11 @@ class SharedViewModel : ViewModel() {
                 // we simply notify the user and backend that the tank is empty.
                 if (tankEmptyAction.equals("REPORT_ONLY", ignoreCase = true)) {
                     LogUtils.i("SharedVM", "Report Only selected - reporting tank empty without changing mode")
-                    ttsManager?.speak("Tank Empty")
-                    addNotification(
-                        Notification(
-                            message = "Tank empty - report only (drone continues flying)",
-                            type = NotificationType.WARNING
-                        )
-                    )
-                    showFailsafePopup("Tank Empty")
                     try {
                         WebSocketManager.getInstance().sendMissionEvent(
                             eventType = "TANK_EMPTY_REPORT",
                             eventStatus = "WARNING",
-                            description = "Tank empty in ${currentMode ?: "Unknown"} mode - action: Report Only"
+                            description = "$alertTitle in ${currentMode ?: "Unknown"} mode - action: Report Only"
                         )
                     } catch (e: Exception) {
                         LogUtils.e("SharedVM", "Failed to send tank empty report status", e)
@@ -2674,10 +2676,6 @@ class SharedViewModel : ViewModel() {
                 if (result) {
                     LogUtils.i("SharedVM", "$modeName mode command sent successfully")
                     
-                    // TTS announcement for tank empty
-                    ttsManager?.speak("Tank Empty")
-                    showFailsafePopup("Tank Empty")
-
                     // Send mission status to backend (only in AUTO mode)
                     try {
                         if (isInAutoMode) {
@@ -2686,7 +2684,7 @@ class SharedViewModel : ViewModel() {
                         WebSocketManager.getInstance().sendMissionEvent(
                             eventType = "TANK_EMPTY_PAUSE",
                             eventStatus = "WARNING",
-                            description = "Tank empty in ${currentMode ?: "Unknown"} mode - action: $modeName"
+                            description = "$alertTitle in ${currentMode ?: "Unknown"} mode - action: $modeName"
                         )
                     } catch (e: Exception) {
                         LogUtils.e("SharedVM", "Failed to send tank empty pause status", e)
@@ -2695,7 +2693,7 @@ class SharedViewModel : ViewModel() {
                     LogUtils.e("SharedVM", "Failed to send $modeName mode command for tank empty")
                     addNotification(
                         Notification(
-                            message = "Failed to switch to $modeName mode for tank refill",
+                            message = "Failed to switch to $modeName mode for tank empty / no spray flow",
                             type = NotificationType.ERROR
                         )
                     )
@@ -4206,7 +4204,7 @@ class SharedViewModel : ViewModel() {
     var lastUploadedCount by mutableStateOf(0)
 
     // Store the full uploaded mission items list for command-type lookup
-    // Used by tank-empty detection to identify mission-end sequences (DO_SPRAYER(0), LOITER, RTL, LAND)
+    // Used by tank-empty detection for spray command state and terminal navigation lookup.
     @Volatile
     var lastUploadedMissionItems: List<MissionItemInt> = emptyList()
         private set
@@ -4217,58 +4215,53 @@ class SharedViewModel : ViewModel() {
     private val MAV_CMD_NAV_RETURN_TO_LAUNCH_ID = 20u
     private val MAV_CMD_NAV_LAND_ID = 21u
 
-    /**
-     * Check if the given mission sequence number is in the "mission end" phase.
-     * Returns true if:
-     * - The item at [seq] is a terminal nav command (LOITER_UNLIM, RTL, LAND)
-     * - The item at [seq] is DO_SPRAYER with param1=0 (sprayer OFF)
-     * - seq is within the last 3 items of the stored mission
-     * This is used to prevent false "Tank Empty" alerts at end-of-mission.
-     */
+    /** Only terminal navigation commands end a mission; line OFF is temporary. */
     fun isMissionEndSequence(seq: Int): Boolean {
-        val items = lastUploadedMissionItems
-        if (items.isEmpty()) return false
-
-        // Check if seq is within the last 3 items
-        if (seq >= items.size - 3) return true
-
-        // Check the command type of the item at this sequence
-        val item = items.find { it.seq.toInt() == seq } ?: return false
-        val cmdValue = item.command.value
-
-        return when (cmdValue) {
-            MAV_CMD_NAV_LOITER_UNLIM_ID -> true
-            MAV_CMD_NAV_RETURN_TO_LAUNCH_ID -> true
-            MAV_CMD_NAV_LAND_ID -> true
-            MAV_CMD_DO_SPRAYER_ID -> item.param1 == 0f  // Only DO_SPRAYER(0) = sprayer OFF
-            else -> false
-        }
+        val command = lastUploadedMissionItems.firstOrNull { it.seq.toInt() == seq }?.command?.value
+        return command in setOf(MAV_CMD_NAV_LOITER_UNLIM_ID,
+            MAV_CMD_NAV_RETURN_TO_LAUNCH_ID, MAV_CMD_NAV_LAND_ID)
     }
 
     /**
-     * Whether the mission has spray COMMANDED ON at the given (current) sequence.
-     *
-     * Missions embed DO_SPRAYER(1) after each line-start and DO_SPRAYER(0) after each
-     * line-end, so spray is intentionally OFF while the drone flies the horizontal
-     * connector between lines. Tank-empty detection must NOT fire during those
-     * transitions (flow legitimately drops to ~0). ArduPilot executes DO_ commands the
-     * instant they are reached and advances the reported "current" sequence to the next
-     * NAV item, so we key off the most recent DO_SPRAYER with seq STRICTLY LESS than the
-     * current sequence (i.e. already executed) rather than expecting current to land on
-     * the DO_SPRAYER item itself.
-     *
-     * Returns true (spray assumed on / behavior unchanged) when the mission is unknown or
-     * contains no DO_SPRAYER commands (e.g. uploaded from another GCS, or manual spray),
-     * so this only ever suppresses tank-empty during a genuine commanded-off transition.
+     * Resolve the latest spray command before the current NAV target. DO items between
+     * the previous and current NAV are executed as the FC advances to that NAV target.
+     * Known spray missions start OFF until an ON command precedes the target. An
+     * unavailable sequence in a known spray mission stays OFF. null means no command
+     * cache or no DO_SPRAYER items, so use manual/flow evidence instead. A known OFF always wins over a still-high RC switch.
      */
-    fun isSprayCommandedActiveAt(seq: Int): Boolean {
+    fun isSprayCommandedActiveAt(seq: Int): Boolean? {
         val items = lastUploadedMissionItems
-        if (items.isEmpty()) return true            // unknown mission → don't change behavior
-        val lastSprayer = items
+        if (items.none { it.command.value == MAV_CMD_DO_SPRAYER_ID }) return null
+        if (seq < 0 || items.none { it.seq.toInt() == seq }) return false
+        val lastSprayer = items.asSequence()
             .filter { it.command.value == MAV_CMD_DO_SPRAYER_ID && it.seq.toInt() < seq }
             .maxByOrNull { it.seq.toInt() }
-            ?: return true                          // no sprayer cmd executed yet → assume on
+            ?: return false
         return lastSprayer.param1 == 1f
+    }
+
+    /**
+     * MISSION_ITEM_REACHED fallback must skip intervening DO/CONDITION items. The
+     * next navigation target, rather than reached+1, is what MISSION_CURRENT reports.
+     * MAV_CMD navigation items occupy the range below NAV_LAST (95).
+     */
+    fun missionNavigationTargetAfter(reachedSeq: Int): Int {
+        return lastUploadedMissionItems.asSequence()
+            .filter { it.seq.toInt() > reachedSeq && it.command.value < 95u }
+            .minByOrNull { it.seq.toInt() }?.seq?.toInt()
+            ?: if (isMissionEndSequence(reachedSeq)) reachedSeq else reachedSeq + 1
+    }
+
+    /** Forget commands from the previous link without sending a command to a new FC. */
+    fun onSprayConnectionLost() {
+        _sprayEnabled.value = false
+        updateMissionItemsFromReadback(emptyList())
+    }
+
+    /** Use a complete FC readback for command lookup, including after reconnect. */
+    fun updateMissionItemsFromReadback(items: List<MissionItemInt>) {
+        lastUploadedMissionItems = items.sortedBy { it.seq.toInt() }
+        lastUploadedCount = items.size
     }
 
     // --- Current Mission Names (for tracking which template/mission is active) ---
@@ -6768,6 +6761,7 @@ class SharedViewModel : ViewModel() {
     }
 
     fun setSprayEnabled(enabled: Boolean) {
+        repo?.setSprayMonitoringEnabled(enabled)
         _sprayEnabled.value = enabled
         controlSpray(enabled)
         LogUtils.i("SprayControl", "Spray ${if (enabled) "ENABLED" else "DISABLED"} at rate: ${_sprayRate.value.toInt()}%")
