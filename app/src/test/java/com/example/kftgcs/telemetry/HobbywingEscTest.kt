@@ -27,11 +27,11 @@ class HobbywingEscTest {
         assertEquals(HwEscReply(5, HW_SET_ID, listOf(6, 2)), hwParseReply(0x98D27F85u, bytes(6, 2, 0xC1), 3))
         // SetBaud response: empty payload, tail byte only
         assertEquals(HwEscReply(5, HW_SET_BAUD, emptyList()), hwParseReply(0x98D37F85u, bytes(0xC0), 1))
-        // A GetEscID request, another data type, a reply to another node, a multi-frame start
+        // A GetEscID request, another data type, a reply to another node, a multi-frame continuation
         assertNull(hwParseReply(0x984E2D0Au, bytes(0, 0xC0), 2))
         assertNull(hwParseReply(0x984E5205u, bytes(5, 3, 0xC0), 3))
         assertNull(hwParseReply(0x98D20A85u, bytes(6, 2, 0xC1), 3))
-        assertNull(hwParseReply(0x98F27F85u, bytes(1, 2, 3, 4, 5, 6, 7, 0x80), 8))
+        assertNull(hwParseReply(0x98F27F85u, bytes(1, 2, 3, 4, 5, 6, 7, 0x20), 8))
     }
 
     @Test
@@ -44,6 +44,9 @@ class HobbywingEscTest {
         val config = hwMergeConfig(HwEscConfig(), reply)!!
         assertEquals(HwEscConfig(ccw = true, pwm = false, msgRates = mapOf(1 to 5, 2 to 7)), config)
         assertNull(hwMergeConfig(config, HwEscReply(5, HW_GET_MAJOR_CONFIG, listOf(0x80))))
+        // A longer, multi-frame GetMajorConfig answer: the first frame (2 CRC bytes, then payload) is enough.
+        val first = hwParseReply(0x98F27F85u, bytes(0xAA, 0xBB, 0x43, 0, 0x57, 0, 0, 0x80), 8)!!
+        assertEquals(HwEscConfig(ccw = false, pwm = true, msgRates = mapOf(1 to 7, 2 to 5)), hwMergeConfig(HwEscConfig(), first))
         // Set responses echo the value the ESC now holds and leave the rest alone.
         assertEquals(config.copy(ccw = false), hwMergeConfig(config, HwEscReply(5, HW_SET_DIRECTION, listOf(0))))
         assertEquals(config.copy(pwm = true), hwMergeConfig(config, HwEscReply(5, HW_SET_THROTTLE_SOURCE, listOf(1))))

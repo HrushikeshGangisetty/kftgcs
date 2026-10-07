@@ -238,7 +238,7 @@ fun MotorHealthScreen(
                     var readTimedOut by remember(node) { mutableStateOf(false) }
                     LaunchedEffect(node) { delay(8000); readTimedOut = true }
                     val reading = if (readTimedOut) "Unknown: the ESC has not answered the settings read" else "Reading from ESC…"
-                    val notReported = "The ESC does not report this value"
+                    val notReported = "The ESC does not report its baud rate"
                     OptionSetter("Direction", listOf("CW", "CCW"), canSet, node, config?.ccw?.let { if (it) 1 else 0 }, reading) {
                         pendingChange = PendingChange(
                             title = "Change motor direction?",
@@ -256,7 +256,7 @@ fun MotorHealthScreen(
                     }
                     // Option order = SetBaud's enum values.
                     val bauds = listOf("1000000", "500000", "250000", "200000", "100000", "50000")
-                    OptionSetter("Baud rate", bauds, canSet, node, null, notReported) {
+                    OptionSetter("Baud rate", bauds, canSet, node, config?.ackedBaud, notReported, knownLabel = "Accepted by ESC") {
                         pendingChange = PendingChange(
                             title = "Change CAN baud rate?",
                             message = "$escName: set baud rate to ${bauds[it]}.",
@@ -444,7 +444,7 @@ private fun EscIdRow(
 @Composable
 private fun OptionSetter(
     label: String, options: List<String>, enabled: Boolean, node: Int, current: Int?, unknownNote: String,
-    onSet: (Int) -> Unit
+    knownLabel: String = "On ESC now", onSet: (Int) -> Unit
 ) {
     val known = current?.takeIf { it in options.indices }
     var index by remember(node, known) { mutableStateOf(known ?: -1) }
@@ -453,7 +453,7 @@ private fun OptionSetter(
         Column(modifier = Modifier.weight(1f)) {
             Text(label, color = Color.White, fontSize = 14.sp)
             Text(
-                text = if (known != null) "On ESC now: ${options[known]}" else unknownNote,
+                text = if (known != null) "$knownLabel: ${options[known]}" else unknownNote,
                 color = if (known != null) Confirmed else Color.Gray,
                 fontSize = 13.sp,
                 fontWeight = if (known != null) FontWeight.Bold else FontWeight.Normal

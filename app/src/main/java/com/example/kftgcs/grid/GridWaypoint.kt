@@ -27,7 +27,8 @@ data class GridSurveyParams(
     val holdNosePosition: Boolean = false,  // Hold yaw throughout mission for battery efficiency
     val indentation: Float = 0f,      // meters - padding from polygon boundary (safe zone)
     val obstacles: List<List<LatLng>> = emptyList(),  // List of obstacle polygons
-    val obstacleBoundary: Float = 2f  // meters - buffer distance from obstacles (1-5m)
+    val obstacleBoundary: Float = 2f,  // meters - buffer distance from obstacles (1-5m)
+    val reverse: Boolean = false      // Fly the same path backwards (start and end points swap)
 )
 
 /**

@@ -126,9 +126,9 @@
     "semantic_hash": "c33d816798cbbc0e2e1d168a79528094"
   },
   "app/src/main/java/com/example/kftgcs/calibration/CalibrationViewModel.kt": {
-    "mtime": 1791035824.0179994,
-    "seen": 1791036008.654464,
-    "ast_hash": "f83cdccc37219ad1d99366140e3954c8",
+    "mtime": 1791266130.7797303,
+    "seen": 1791266149.7060719,
+    "ast_hash": "b519ba0c61c388c065cd043d7771e6d9",
     "semantic_hash": ""
   },
   "app/src/main/java/com/example/kftgcs/calibration/CompassCalibrationScreen.kt": {
@@ -198,10 +198,10 @@
     "semantic_hash": "a1473e1e17a20619a40ef0b4425dd012"
   },
   "app/src/main/java/com/example/kftgcs/database/MissionTemplateEntity.kt": {
-    "mtime": 1773753795.6689415,
-    "seen": 1789573354.355936,
-    "ast_hash": "bc7c7726ec383204fb9c5bbae0f4ae12",
-    "semantic_hash": "bc7c7726ec383204fb9c5bbae0f4ae12"
+    "mtime": 1791266096.8085072,
+    "seen": 1791266149.7060719,
+    "ast_hash": "94c7608c8a85f8b201789cc8abda9b62",
+    "semantic_hash": ""
   },
   "app/src/main/java/com/example/kftgcs/database/MissionTemplateTypeConverters.kt": {
     "mtime": 1774239926.5406988,
@@ -282,9 +282,9 @@
     "semantic_hash": "9293bb7046f3bd2b9c76af08aedcb721"
   },
   "app/src/main/java/com/example/kftgcs/grid/GridGenerator.kt": {
-    "mtime": 1791035824.0190017,
-    "seen": 1791036008.656145,
-    "ast_hash": "11c110cc162155408612b37b7a5dae0d",
+    "mtime": 1791266096.8085072,
+    "seen": 1791266149.7060719,
+    "ast_hash": "4382310c9b3179703f143bd4a0c0ed9a",
     "semantic_hash": ""
   },
   "app/src/main/java/com/example/kftgcs/grid/GridMissionConverter.kt": {
@@ -300,10 +300,10 @@
     "semantic_hash": ""
   },
   "app/src/main/java/com/example/kftgcs/grid/GridWaypoint.kt": {
-    "mtime": 1773753795.6847277,
-    "seen": 1789573354.355936,
-    "ast_hash": "7d32421b6e7e3b4f4b0e85dbb455b7a4",
-    "semantic_hash": "7d32421b6e7e3b4f4b0e85dbb455b7a4"
+    "mtime": 1791266096.8085072,
+    "seen": 1791266149.7060719,
+    "ast_hash": "066a6cd0c5153da0066ac9a64bf6463b",
+    "semantic_hash": ""
   },
   "app/src/main/java/com/example/kftgcs/integration/TlogIntegration.kt": {
     "mtime": 1773753795.6847277,
@@ -606,9 +606,9 @@
     "semantic_hash": ""
   },
   "app/src/main/java/com/example/kftgcs/telemetry/SharedViewModel.kt": {
-    "mtime": 1791180585.5845811,
-    "seen": 1791180597.1972754,
-    "ast_hash": "0a8def66afcacd51ffcb69817994abc0",
+    "mtime": 1791182491.037529,
+    "seen": 1791182497.3380187,
+    "ast_hash": "b4dc6b37b20ae7053e034b1888076ddc",
     "semantic_hash": ""
   },
   "app/src/main/java/com/example/kftgcs/telemetry/SprayTelemetryUtils.kt": {
@@ -618,9 +618,9 @@
     "semantic_hash": ""
   },
   "app/src/main/java/com/example/kftgcs/telemetry/TelemetryRepository.kt": {
-    "mtime": 1791037179.5008762,
-    "seen": 1791037191.85711,
-    "ast_hash": "3ad799f96f87768eb1c66209a43228ad",
+    "mtime": 1791182106.5692284,
+    "seen": 1791182497.3380187,
+    "ast_hash": "6c03fca94e76f1df7c510c6f88c9af3b",
     "semantic_hash": ""
   },
   "app/src/main/java/com/example/kftgcs/telemetry/WebSocketManager.kt": {
@@ -870,9 +870,9 @@
     "semantic_hash": "5fa420e8fb88fd81f03541f82171ab61"
   },
   "app/src/main/java/com/example/kftgcs/uimain/MainPage.kt": {
-    "mtime": 1789972225.0317423,
-    "seen": 1789972235.1079848,
-    "ast_hash": "71b43a1318d4c9344255c381dda05c03",
+    "mtime": 1791266130.7797303,
+    "seen": 1791266149.7210765,
+    "ast_hash": "c1f184411a8dcecef42e457a944b9dfa",
     "semantic_hash": ""
   },
   "app/src/main/java/com/example/kftgcs/uimain/NotificationPanel.kt": {
@@ -882,15 +882,15 @@
     "semantic_hash": "657f5d81e2962d7bf66b542d417ba0a2"
   },
   "app/src/main/java/com/example/kftgcs/uimain/OptionsScreen.kt": {
-    "mtime": 1791035951.649444,
-    "seen": 1791036008.662333,
-    "ast_hash": "64307b4e21affbdbe14f1b86e9769228",
+    "mtime": 1791181802.6621094,
+    "seen": 1791182497.360694,
+    "ast_hash": "5de7a289763c970779baee03e853c8e6",
     "semantic_hash": ""
   },
   "app/src/main/java/com/example/kftgcs/uimain/PlanScreen.kt": {
-    "mtime": 1789702969.0410123,
-    "seen": 1789714339.6559844,
-    "ast_hash": "80d2de4a831719fcc23ee161c7e4f04d",
+    "mtime": 1791266096.8226418,
+    "seen": 1791266149.7210765,
+    "ast_hash": "9f18d16e5efdca89ff1c7e4cd644a18e",
     "semantic_hash": ""
   },
   "app/src/main/java/com/example/kftgcs/uimain/ProximityOverlay.kt": {
@@ -1410,27 +1410,33 @@
     "semantic_hash": ""
   },
   "app/src/main/java/com/example/kftgcs/uimain/MotorHealthScreen.kt": {
-    "mtime": 1791180564.0052116,
-    "seen": 1791180568.878003,
-    "ast_hash": "605773af83d69819c9505be94f3c6e5b",
+    "mtime": 1791182491.0381672,
+    "seen": 1791182497.360694,
+    "ast_hash": "8645105d0333b1fa28b945478a555392",
     "semantic_hash": ""
   },
   "app/src/main/java/com/example/kftgcs/telemetry/HobbywingEsc.kt": {
-    "mtime": 1791180563.9864025,
-    "seen": 1791180568.8671236,
-    "ast_hash": "72f1561150c44217ead907a408022d0b",
+    "mtime": 1791182491.031586,
+    "seen": 1791182497.3380187,
+    "ast_hash": "7715d2ada7055b1b2550754867b51c47",
     "semantic_hash": ""
   },
   "app/src/test/java/com/example/kftgcs/telemetry/HobbywingEscTest.kt": {
-    "mtime": 1791180563.9864025,
-    "seen": 1791180568.8789442,
-    "ast_hash": "3f5bcafe5e41aa29cabef1531744f68e",
+    "mtime": 1791182491.031586,
+    "seen": 1791182497.371647,
+    "ast_hash": "de7b624475b6321e0521d3ccdbfb774b",
     "semantic_hash": ""
   },
   "app/src/main/java/com/example/kftgcs/telemetry/LimitFailsafePolicy.kt": {
     "mtime": 1791034119.8888097,
     "seen": 1791036008.6614466,
     "ast_hash": "cf4c4236f0be5484ef78b21da3b6f565",
+    "semantic_hash": ""
+  },
+  "app/src/test/java/com/example/kftgcs/grid/GridGeneratorReverseTest.kt": {
+    "mtime": 1791266145.5901735,
+    "seen": 1791266149.7227905,
+    "ast_hash": "8dc8f7ca0afa5f054c49d8f8279d31f2",
     "semantic_hash": ""
   }
 }

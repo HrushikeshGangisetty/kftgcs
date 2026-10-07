@@ -311,7 +311,9 @@ fun MainPage(
             StatusPanel(
                 modifier = Modifier
                     .align(Alignment.BottomStart)
-                    .padding(12.dp),
+                    // End padding keeps the panel clear of the FloatingButtons column
+                    // (70dp wide + its own 12dp padding) on screens too narrow for both.
+                    .padding(start = 12.dp, bottom = 12.dp, end = 94.dp),
                 telemetryState = telemetryState,
                 waypointAreaFormatted = waypointAreaToDisplay,
                 fenceAreaFormatted = fenceAreaToDisplay
@@ -904,6 +906,10 @@ fun StatusPanel(
         color = Color.Black.copy(alpha = 0.22f),
         shape = RoundedCornerShape(10.dp)
     ) {
+        BoxWithConstraints {
+        // Text shrinks with the panel so the five columns still fit on small screens:
+        // 11sp at the full 660dp, down to 8.5sp at ~510dp and below.
+        val fontSize = (maxWidth.value / 60f).coerceIn(8.5f, 11f).sp
         Column(
             modifier = Modifier.padding(6.dp),
             verticalArrangement = Arrangement.spacedBy(2.dp)
@@ -917,7 +923,7 @@ fun StatusPanel(
                 Text(
                     "${AppStrings.alt}: $formattedAltitude",
                     color = Color.White,
-                    fontSize = 11.sp,
+                    fontSize = fontSize,
                     modifier = Modifier.weight(1f),
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis
@@ -925,7 +931,7 @@ fun StatusPanel(
                 Text(
                     "${AppStrings.speedLabel}: ${telemetryState.formattedGroundspeed ?: "N/A"}",
                     color = Color.White,
-                    fontSize = 11.sp,
+                    fontSize = fontSize,
                     modifier = Modifier.weight(1f),
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis
@@ -935,7 +941,7 @@ fun StatusPanel(
                 Text(
                     "${AppStrings.wpArea}: $waypointAreaFormatted",
                     color = Color.White,
-                    fontSize = 11.sp,
+                    fontSize = fontSize,
                     modifier = Modifier.weight(1f),
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis
@@ -944,7 +950,7 @@ fun StatusPanel(
                     "${AppStrings.fenceArea}: ${fenceAreaFormatted ?: "N/A"}",
                     // Yellow to match the geofence's colour on the map and its area label.
                     color = if (fenceAreaFormatted != null) Color(0xFFFFEB3B) else Color.White,
-                    fontSize = 11.sp,
+                    fontSize = fontSize,
                     modifier = Modifier.weight(1f),
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis
@@ -952,7 +958,7 @@ fun StatusPanel(
                 Text(
                     "${AppStrings.flow}: ${telemetryState.sprayTelemetry.formattedFlowRate ?: "N/A"}",
                     color = Color.White,
-                    fontSize = 11.sp,
+                    fontSize = fontSize,
                     modifier = Modifier.weight(1f),
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis
@@ -977,7 +983,7 @@ fun StatusPanel(
                 Text(
                     "obs-alt: $obsAltStr",
                     color = Color.White,
-                    fontSize = 11.sp,
+                    fontSize = fontSize,
                     modifier = Modifier.weight(1f),
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis
@@ -995,7 +1001,7 @@ fun StatusPanel(
                 Text(
                     "${AppStrings.time}: $timeStr",
                     color = Color.White,
-                    fontSize = 11.sp,
+                    fontSize = fontSize,
                     modifier = Modifier.weight(1f),
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis
@@ -1008,7 +1014,7 @@ fun StatusPanel(
                 Text(
                     "${AppStrings.distance}: $distStr",
                     color = Color.White,
-                    fontSize = 11.sp,
+                    fontSize = fontSize,
                     modifier = Modifier.weight(1f),
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis
@@ -1016,7 +1022,7 @@ fun StatusPanel(
                 Text(
                     "${AppStrings.consumed}: ${telemetryState.sprayTelemetry.formattedConsumed ?: "N/A"}",
                     color = Color.White,
-                    fontSize = 11.sp,
+                    fontSize = fontSize,
                     modifier = Modifier.weight(1f),
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis
@@ -1029,12 +1035,13 @@ fun StatusPanel(
                 Text(
                     "${AppStrings.homeDistance}: $homeDistStr",
                     color = Color.White,
-                    fontSize = 11.sp,
+                    fontSize = fontSize,
                     modifier = Modifier.weight(1f),
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis
                 )
             }
+        }
         }
     }
 }

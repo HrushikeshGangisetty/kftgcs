@@ -128,6 +128,7 @@ fun PlanScreen(
     // Grid survey parameters
     var lineSpacing by remember { mutableStateOf(2f) }
     var gridAngle by remember { mutableStateOf(0f) }
+    var reverseWaypoints by remember { mutableStateOf(false) }
     var surveySpeed by remember { mutableStateOf(1f) }
     var surveyAltitude by remember { mutableStateOf(1f) }
     var holdNosePosition by remember { mutableStateOf(true) }
@@ -339,7 +340,8 @@ fun PlanScreen(
                 includeSpeedCommands = true,
                 indentation = indentation,
                 obstacles = obstacles,
-                obstacleBoundary = obstacleBoundary
+                obstacleBoundary = obstacleBoundary,
+                reverse = reverseWaypoints
             )
             gridResult = gridGenerator.generateGridSurvey(surveyPolygon, params)
 
@@ -490,6 +492,7 @@ fun PlanScreen(
                 val gridParams = template.gridParameters
                 lineSpacing = gridParams.lineSpacing
                 gridAngle = gridParams.gridAngle
+                reverseWaypoints = gridParams.reverse
                 surveySpeed = gridParams.surveySpeed
                 surveyAltitude = gridParams.surveyAltitude
                 surveyPolygon = gridParams.surveyPolygon
@@ -564,7 +567,7 @@ fun PlanScreen(
     }
 
     // Update grid when parameters change (only after grid is generated)
-    LaunchedEffect(lineSpacing, gridAngle, surveySpeed, surveyAltitude, indentation, surveyPolygon, obstacles, obstacleBoundary) {
+    LaunchedEffect(lineSpacing, gridAngle, reverseWaypoints, surveySpeed, surveyAltitude, indentation, surveyPolygon, obstacles, obstacleBoundary) {
         if (isGridSurveyMode && isGridGenerated) {
             regenerateGrid()
         }
@@ -2032,6 +2035,26 @@ fun PlanScreen(
                             }
                         }
 
+                        // Reverse Waypoints - fly the same grid backwards (start and end swap)
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Text("Reverse Waypoints", color = Color.White, modifier = Modifier.weight(1f))
+                            FilledIconButton(
+                                onClick = { reverseWaypoints = !reverseWaypoints },
+                                enabled = !isPlanSaved,
+                                modifier = Modifier.size(32.dp),
+                                colors = IconButtonDefaults.filledIconButtonColors(
+                                    containerColor = if (reverseWaypoints) MaterialTheme.colorScheme.primary else Color.DarkGray
+                                )
+                            ) {
+                                Icon(
+                                    Icons.Default.SwapHoriz,
+                                    contentDescription = "Reverse Waypoints",
+                                    tint = Color.White,
+                                    modifier = Modifier.size(18.dp)
+                                )
+                            }
+                        }
+
                         // Survey Speed
                         Column(modifier = Modifier.padding(vertical = 4.dp)) {
                             Row(verticalAlignment = Alignment.CenterVertically) {
@@ -3345,7 +3368,8 @@ fun PlanScreen(
                                 surveySpeed = surveySpeed,
                                 surveyAltitude = surveyAltitude,
                                 surveyPolygon = surveyPolygon,
-                                obstacles = obstacles
+                                obstacles = obstacles,
+                                reverse = reverseWaypoints
                             )
                         } else null
 

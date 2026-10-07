@@ -308,6 +308,10 @@ class SharedViewModel : ViewModel() {
                     .map { it.message }
                     .filterIsInstance<CanFrame>()
                     .collect { f ->
+                        // Raw GetMajorConfig traffic, to see on hardware what the ESCs really answer.
+                        if ((f.id shr 16) and 0xFFu == HW_GET_MAJOR_CONFIG.toUInt() && f.id and 0x80u != 0u) {
+                            LogUtils.d("EscId", "GetMajorConfig frame id=${f.id.toString(16)} len=${f.len} data=${f.data}")
+                        }
                         val reply = hwParseReply(f.id, f.data, f.len.toInt()) ?: return@collect
                         when (reply.typeId) {
                             HW_GET_ESC_ID -> _hobbywingEscs.update { it + (reply.srcNode to reply.payload[1]) }
@@ -456,6 +460,12 @@ class SharedViewModel : ViewModel() {
                     if (!confirmed) {
                         _escIdStatus.value = "No reply from ESC node $nodeId: ${request.what} was NOT confirmed."
                         return@launch
+                    }
+                    if (request.serviceId == HW_SET_BAUD) {
+                        // The acknowledgement is empty, so remember which baud code it was for.
+                        _hobbywingEscConfigs.update {
+                            it + (nodeId to (it[nodeId] ?: HwEscConfig()).copy(ackedBaud = request.payload[0]))
+                        }
                     }
                     _escIdStatus.value = "ESC node $nodeId: ${request.what} saved."
                 }

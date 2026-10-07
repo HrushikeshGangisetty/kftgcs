@@ -476,9 +476,23 @@ class GridGenerator {
         val estimatedTime = if (params.speed > 0) totalDistance / params.speed else 0.0
         val polygonArea = GridUtils.calculateAndFormatPolygonArea(polygon)
 
+        // Reverse Waypoints: the same path flown backwards, so the start and end points swap.
+        // Lines are renumbered from the new start; a detour point keeps the index of the line
+        // it leads INTO, same as above.
+        val lastLine = gridLines.size - 1
+        val orderedWaypoints = if (!params.reverse) waypoints else waypoints.asReversed().map { wp ->
+            if (wp.isTransition) wp.copy(lineIndex = lastLine - wp.lineIndex + 1)
+            else wp.copy(
+                isLineStart = wp.isLineEnd,
+                isLineEnd = wp.isLineStart,
+                lineIndex = lastLine - wp.lineIndex
+            )
+        }
+        val orderedLines = if (!params.reverse) gridLines else gridLines.asReversed().map { Pair(it.second, it.first) }
+
         return GridSurveyResult(
-            waypoints = waypoints,
-            gridLines = gridLines,
+            waypoints = orderedWaypoints,
+            gridLines = orderedLines,
             totalDistance = totalDistance,
             estimatedTime = estimatedTime,
             numLines = gridLines.size,

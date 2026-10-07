@@ -33,5 +33,6 @@ data class GridParameters(
     val surveySpeed: Float,
     val surveyAltitude: Float,
     val surveyPolygon: List<LatLng>,
-    val obstacles: List<List<LatLng>> = emptyList()
+    val obstacles: List<List<LatLng>> = emptyList(),
+    val reverse: Boolean = false  // absent in templates saved before Reverse Waypoints -> false
 )

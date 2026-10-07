@@ -4,16 +4,17 @@ package com.example.kftgcs.telemetry
  * Hobbywing DroneCAN ESC setup, tunnelled through the FC with MAVLink CAN forwarding
  * (MAV_CMD_CAN_FORWARD + CAN_FRAME) - what the DroneCAN GUI Tool's "Hobbywing ESC Panel" does.
  *
- * Everything used here fits in a single CAN frame (<= 7 payload bytes), so there is no
- * multi-frame transfer / CRC handling:
+ * Everything sent here fits in a single CAN frame (<= 7 payload bytes), and of a longer answer
+ * only the first frame is used, so there is no multi-frame reassembly / CRC handling:
  *  - com.hobbywing.esc.GetEscID (message 20013): broadcast payload [0]; every ESC answers with
  *    [node_id, throttle_channel].
  *  - Services, request payloads: SetID (210) [node_id, throttle_channel], SetBaud (211) [baud],
  *    SetDirection (213) [direction], SetReportingFrequency (214) [option, MSG_ID lo, hi, rate],
  *    SetThrottleSource (215) [source].
- *  - GetMajorConfig (242): request [0]; the 7-byte answer holds the ESC's current direction,
- *    throttle source and message 1 / 2 rates. The responses to 213 / 214 / 215 echo the value
- *    the ESC now holds too (see [hwMergeConfig]). Baud rate is never reported.
+ *  - GetMajorConfig (242): request [0]; the answer (7 bytes in the DSDL, but ESC firmware may
+ *    send more) starts with the ESC's current direction, throttle source and message 1 / 2
+ *    rates. The responses to 213 / 214 / 215 echo the value the ESC now holds too (see
+ *    [hwMergeConfig]). Baud rate is never reported.
  *
  * Transfer IDs count per (data type, destination): an ESC drops a request whose ID is exactly
  * one ahead of the one it expects, which a counter shared between data types produces.
@@ -42,13 +43,17 @@ internal val HW_FORWARDED_IDS = listOf(
 private const val CAN_EFF_FLAG = 0x80000000u   // CAN_FRAME.id: extended-frame flag
 private const val PRIORITY = 24u               // CANARD_TRANSFER_PRIORITY_LOW
 private const val TAIL_SINGLE_FRAME = 0xC0     // start-of-transfer | end-of-transfer, toggle 0
+private const val TAIL_START = 0x80            // start-of-transfer
+private const val TAIL_END = 0x40              // end-of-transfer
+private const val TAIL_TOGGLE = 0x20
 
 /** A CAN frame as CAN_FRAME carries it: [id] with the extended flag, [data] incl. tail byte. */
 internal data class HwCanFrame(val id: UInt, val data: List<UByte>)
 
 /**
- * A single-frame transfer from an ESC: a GetEscID answer ([typeId] = [HW_GET_ESC_ID]) or a
- * response to one of our service requests ([typeId] = the service ID).
+ * The first (normally only) frame of a transfer from an ESC: a GetEscID answer ([typeId] =
+ * [HW_GET_ESC_ID]) or a response to one of our service requests ([typeId] = the service ID).
+ * [payload] of a multi-frame transfer is just the part its first frame carries.
  */
 internal data class HwEscReply(val srcNode: Int, val typeId: Int, val payload: List<Int>)
 
@@ -56,7 +61,13 @@ internal data class HwEscReply(val srcNode: Int, val typeId: Int, val payload: L
  * What an ESC has itself reported; a field is null / absent until the ESC reports it.
  * [msgRates]: message number (1-3) to SetReportingFrequency code (1 = 500 Hz … 9 = off).
  */
-data class HwEscConfig(val ccw: Boolean? = null, val pwm: Boolean? = null, val msgRates: Map<Int, Int> = emptyMap())
+data class HwEscConfig(
+    val ccw: Boolean? = null,
+    val pwm: Boolean? = null,
+    val msgRates: Map<Int, Int> = emptyMap(),
+    /** SetBaud code the ESC last acknowledged. The ESC never reports its baud rate itself. */
+    val ackedBaud: Int? = null
+)
 
 /**
  * [old] updated with what [reply] says the ESC holds, or null when the reply carries no setting.
@@ -68,7 +79,7 @@ data class HwEscConfig(val ccw: Boolean? = null, val pwm: Boolean? = null, val m
 internal fun hwMergeConfig(old: HwEscConfig, reply: HwEscReply): HwEscConfig? {
     val p = reply.payload
     return when {
-        reply.typeId == HW_GET_MAJOR_CONFIG && p.size == 7 -> old.copy(
+        reply.typeId == HW_GET_MAJOR_CONFIG && p.size >= 3 -> old.copy(
             ccw = p[0] and 0x80 != 0,
             pwm = p[0] and 0x40 != 0,
             msgRates = old.msgRates + mapOf(1 to (p[2] and 0x0F), 2 to (p[2] shr 4 and 0x0F))
@@ -97,13 +108,19 @@ internal fun hwServiceFrame(serviceId: Int, destNode: Int, payload: List<Int>, t
     data = withTail(payload, transferId)
 )
 
-/** Decodes a forwarded CAN frame; null unless it is a GetEscID answer or a service response to us. */
+/**
+ * Decodes a forwarded CAN frame; null unless it is the first frame of a GetEscID answer or of a
+ * service response to us.
+ */
 internal fun hwParseReply(id: UInt, data: List<UByte>, len: Int): HwEscReply? {
-    if (len !in 1..8 || data.size < len || (data[len - 1].toInt() and 0xE0) != TAIL_SINGLE_FRAME) return null
+    if (len !in 1..8 || data.size < len) return null
+    val tail = data[len - 1].toInt()
+    if (tail and (TAIL_START or TAIL_TOGGLE) != TAIL_START) return null
     val canId = id and 0x1FFFFFFFu
     val src = (canId and 0x7Fu).toInt()
     if (src == 0) return null // anonymous
-    val payload = data.take(len - 1).map { it.toInt() }
+    // A multi-frame transfer starts with its 2-byte CRC.
+    val payload = data.take(len - 1).drop(if (tail and TAIL_END == 0) 2 else 0).map { it.toInt() }
     return if ((canId and 0x80u) != 0u) {
         // Service frame: type | request flag | destination node
         val isResponseToUs = (canId and 0x8000u) == 0u && ((canId shr 8) and 0x7Fu).toInt() == HW_GCS_NODE_ID
