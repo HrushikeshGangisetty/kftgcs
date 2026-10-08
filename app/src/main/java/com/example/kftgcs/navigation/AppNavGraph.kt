@@ -1,6 +1,12 @@
 package com.example.kftgcs.navigation
 
 import android.app.Application
+import com.example.kftgcs.FeatureFlags
+import com.example.kftgcs.aquaculture.ui.OperationSelectionScreen
+import com.example.kftgcs.aquaculture.ui.AquacultureCategoryScreen
+import com.example.kftgcs.aquaculture.ui.AquacultureScreen
+import com.example.kftgcs.aquaculture.ui.AquacultureViewModel
+import com.example.kftgcs.aquaculture.repository.AquaculturePreferences
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
 import androidx.compose.material3.Text
@@ -89,6 +95,9 @@ import com.example.kftgcs.usersettings.UserSettingsViewModel
 sealed class Screen(val route: String) {
     object Welcome : Screen("welcome")
     object Connection : Screen("connection")
+    object OperationSelection : Screen("operation_selection")
+    object AquacultureCategory : Screen("aquaculture_category")
+    object AquaculturePrawn : Screen("aquaculture_prawn")
     object Main : Screen("main")
     object Login : Screen("login")
     object Signup : Screen("signup")
@@ -149,6 +158,8 @@ fun AppNavGraph(
 ) {
     val context = LocalContext.current
     val application = context.applicationContext as Application
+    // Centralized gate: disabled APKs have no Aquaculture entry or registered Aquaculture routes.
+    val aquacultureAvailable = FeatureFlags.enableAquaculture
 
     // Create SharedViewModel at the top level so it can be shared across screens
     val sharedViewModel: SharedViewModel = viewModel()
@@ -231,7 +242,38 @@ fun AppNavGraph(
 
         composable(Screen.Connection.route) {
             // Pass the shared SharedViewModel to ConnectionPage for TTS announcements
-            ConnectionPage(navController, sharedViewModel)
+            ConnectionPage(navController, sharedViewModel, destinationRoute = Screen.OperationSelection.route)
+        }
+
+        composable(Screen.OperationSelection.route) {
+            OperationSelectionScreen(
+                aquacultureAvailable = aquacultureAvailable,
+                onAgriculture = {
+                    navController.navigate(Screen.SelectMethod.route) {
+                        popUpTo(Screen.OperationSelection.route) { inclusive = true }
+                    }
+                },
+                onAquaculture = { navController.navigate(Screen.AquacultureCategory.route) }
+            )
+        }
+
+        if (aquacultureAvailable) {
+            composable(Screen.AquacultureCategory.route) {
+                AquacultureCategoryScreen(
+                    onPrawn = { navController.navigate(Screen.AquaculturePrawn.route) },
+                    onBack = { navController.popBackStack() }
+                )
+            }
+            composable(Screen.AquaculturePrawn.route) {
+                val aquacultureViewModel: AquacultureViewModel = viewModel {
+                    AquacultureViewModel(settings = AquaculturePreferences(context))
+                }
+                AquacultureScreen(
+                    viewModel = aquacultureViewModel, telemetry = sharedViewModel,
+                    onBack = { navController.popBackStack() },
+                    onFlightView = { navController.navigate(Screen.Main.route) { launchSingleTop = true } }
+                )
+            }
         }
 
         composable(Screen.Main.route) {

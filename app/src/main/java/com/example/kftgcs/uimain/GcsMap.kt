@@ -30,6 +30,42 @@ import java.util.Locale
 // Helper constant for lemon yellow color (255, 244, 79)
 private val LEMON_YELLOW = Color(red = 255f / 255f, green = 244f / 255f, blue = 79f / 255f)
 
+private fun createCompactMarker(color: Int, size: Int): BitmapDescriptor {
+    val bitmap = Bitmap.createBitmap(size, size, Bitmap.Config.ARGB_8888)
+    val canvas = Canvas(bitmap)
+    val paint = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG)
+    paint.color = android.graphics.Color.WHITE
+    canvas.drawCircle(size / 2f, size / 2f, size / 2f - 1f, paint)
+    paint.color = color
+    canvas.drawCircle(size / 2f, size / 2f, size / 2f - 3f, paint)
+    return BitmapDescriptorFactory.fromBitmap(bitmap)
+}
+
+private fun createBoundaryWaypointMarker(number: Int): BitmapDescriptor {
+    val size = 40
+    val bitmap = Bitmap.createBitmap(size, size, Bitmap.Config.ARGB_8888)
+    val canvas = Canvas(bitmap)
+    val paint = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG)
+    paint.color = android.graphics.Color.rgb(10, 14, 39)
+    canvas.drawCircle(size / 2f, size / 2f, size / 2f - 1f, paint)
+    paint.style = android.graphics.Paint.Style.STROKE
+    paint.strokeWidth = 3f
+    paint.color = if (number == 1) android.graphics.Color.rgb(105, 240, 174) else android.graphics.Color.CYAN
+    canvas.drawCircle(size / 2f, size / 2f, size / 2f - 3f, paint)
+    paint.style = android.graphics.Paint.Style.FILL
+    paint.color = android.graphics.Color.WHITE
+    paint.typeface = android.graphics.Typeface.create(android.graphics.Typeface.DEFAULT, android.graphics.Typeface.BOLD)
+    paint.textSize = when {
+        number < 100 -> 20f
+        number < 1000 -> 15f
+        else -> 11f
+    }
+    paint.textAlign = android.graphics.Paint.Align.CENTER
+    val baseline = size / 2f - (paint.ascent() + paint.descent()) / 2f
+    canvas.drawText(number.toString(), size / 2f, baseline, paint)
+    return BitmapDescriptorFactory.fromBitmap(bitmap)
+}
+
 // Helper function to create larger marker icons for waypoints - easier to interact with
 private fun createMediumMarker(hue: Float): BitmapDescriptor {
     // Create a larger bitmap for better touch targets (72px for mobile-friendly interaction)
@@ -550,7 +586,11 @@ fun GcsMap(
     dronePathPoints: List<DronePathPoint> = emptyList(),
     onDronePathPoint: (LatLng, Boolean) -> Unit = { _, _ -> },
     // User-customizable drone path line color (non-spraying segments)
-    dronePathColor: Color = Color.Red
+    dronePathColor: Color = Color.Red,
+    // Optional edge-only mission overlay, independent of grid survey rendering.
+    boundaryWaypoints: List<LatLng> = emptyList(),
+    polygonEditingEnabled: Boolean = true,
+    compactBoundaryMarkers: Boolean = false
 ) {
     val context = LocalContext.current
     val cameraState = cameraPositionState ?: rememberCameraPositionState()
@@ -607,6 +647,8 @@ fun GcsMap(
     val mediumOrangeMarker = remember { createMediumMarker(BitmapDescriptorFactory.HUE_ORANGE) }
     val mediumYellowMarker = remember { createLemonYellowMarker() } // For selected waypoint - Lemon yellow (255, 244, 79)
     val mediumRedMarker = remember { createMediumMarker(BitmapDescriptorFactory.HUE_RED) } // For obstacles
+    val compactPondMarker = remember { createCompactMarker(android.graphics.Color.rgb(66, 165, 245), 30) }
+    val compactSelectedPondMarker = remember { createCompactMarker(android.graphics.Color.YELLOW, 30) }
 
     // Markers with text labels for grid waypoints
     val startMarker = remember { createMarkerWithText("S", android.graphics.Color.GREEN) }
@@ -654,6 +696,21 @@ fun GcsMap(
                     Timber.d("Map tiles loaded successfully (attempt ${mapLoadAttempt + 1})")
                 }
             ) {
+        if (boundaryWaypoints.size >= 2) {
+            // Dark outline keeps the cyan route visible over both bright and dark satellite tiles.
+            Polyline(points = boundaryWaypoints, color = Color(0xFF0A0E27), width = 12f, zIndex = 5.5f)
+            Polyline(points = boundaryWaypoints, color = Color.Cyan, width = 6f, zIndex = 6f)
+            // The closing point coincides with the first; avoid two markers at that location.
+            val markerPoints = if (boundaryWaypoints.first() == boundaryWaypoints.last()) boundaryWaypoints.dropLast(1) else boundaryWaypoints
+            val markerIcons = remember(markerPoints.size) { List(markerPoints.size) { createBoundaryWaypointMarker(it + 1) } }
+            markerPoints.forEachIndexed { index, point ->
+                key("boundary_${index}_${point.latitude}_${point.longitude}") {
+                    Marker(state = MarkerState(position = point), title = "Boundary waypoint ${index + 1}",
+                        snippet = if (index == 0) "Start of selected lap" else "Selected boundary lap",
+                        icon = markerIcons[index], anchor = Offset(0.5f, 0.5f), zIndex = 12f)
+                }
+            }
+        }
         // Max range boundary — the FC's home-centred cylinder fence (FENCE_RADIUS).
         // Drawn from the radius actually read off the vehicle, and only when the FC has the
         // circle bit armed, so the ring on the map is never a promise the FC isn't keeping.
@@ -1194,7 +1251,9 @@ fun GcsMap(
                     }
 
                     // Determine the marker icon based on selection state
-                    val markerIcon = if (selectedPolygonPointIndex == index) {
+                    val markerIcon = if (compactBoundaryMarkers) {
+                        if (selectedPolygonPointIndex == index) compactSelectedPondMarker else compactPondMarker
+                    } else if (selectedPolygonPointIndex == index) {
                         mediumYellowMarker // Selected polygon point - Yellow
                     } else {
                         mediumVioletMarker // Default - Purple
@@ -1205,7 +1264,7 @@ fun GcsMap(
                         title = "P${index + 1}",
                         icon = markerIcon,
                         anchor = Offset(0.5f, 0.5f),
-                        draggable = true,  // Enable dragging
+                        draggable = polygonEditingEnabled,
                         zIndex = 11f, // Above geofence corner markers so mission vertices stay reachable
                         onClick = {
                             // Marker clicked, can be dragged now
