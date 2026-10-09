@@ -3931,6 +3931,9 @@ class SharedViewModel : ViewModel() {
             null
         }
 
+        readParameter("SPRAY_SPEED_MIN")?.let { _spraySpeedMinMs.value = it / 100f }
+            ?: LogUtils.w("SprayControl", "⚠ Could not read SPRAY_SPEED_MIN — tank-empty speed gate keeps ${_spraySpeedMinMs.value} m/s")
+
         val enable = readParameter("SPRAY_ENABLE")
         _sprayEnableParam.value = enable?.let { it >= 0.5f }
         if (enable != null && enable < 0.5f) {
@@ -5000,6 +5003,13 @@ class SharedViewModel : ViewModel() {
 
     private val _sprayEnableParam = MutableStateFlow<Boolean?>(null)
     val sprayEnableParam: StateFlow<Boolean?> = _sprayEnableParam.asStateFlow()
+
+    // SPRAY_SPEED_MIN in m/s (the param is cm/s). Doubles as the spray-type flag for tank-empty
+    // detection: 0 = Type A (continuous spray, flow expected even in a hover), >0 = Type B (spray
+    // stops at low speed, so zero flow in a hover/turn is not an empty tank).
+    // 1 m/s is the ArduPilot default (Type B), used until the connect-time read lands.
+    private val _spraySpeedMinMs = MutableStateFlow(1f)
+    val spraySpeedMinMs: StateFlow<Float> = _spraySpeedMinMs.asStateFlow()
 
     // ── Pump mode: AUTO (speed-scaled) vs MANUAL (direct duty cycle) ───────────
     //

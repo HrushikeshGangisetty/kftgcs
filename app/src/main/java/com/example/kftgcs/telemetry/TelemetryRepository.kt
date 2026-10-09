@@ -506,6 +506,10 @@ class MavlinkTelemetryRepository(
     private val LOW_FLOW_THRESHOLD_LPM = 0.2f
     private val FLOW_STALE_MS = 5000L
     private val FLOW_RECOVERY_MS = 2000L
+    // Type B only: below this computed pump output (groundspeed × SPRAY_PUMP_RATE) the pump is
+    // not expected to push flow past LOW_FLOW_THRESHOLD_LPM. Tune per pump on the bench.
+    // ponytail: estimated from speed, not measured; read the pump's SERVO_OUTPUT_RAW if this misfires.
+    private val MIN_MONITORED_PUMP_OUTPUT_PCT = 30f
     private var sprayMonitoringSuspended = false
     private var sprayMonitoringStartedAtMs = 0L
     private var lastDetectionFlowAtMs = 0L
@@ -689,8 +693,22 @@ class MavlinkTelemetryRepository(
             } else {
                 snapshot.sprayTelemetry.sprayEnabled || sharedViewModel.sprayEnabled.value
             }
+            // SPRAY_SPEED_MIN picks the spray type:
+            //   0  = Type A, continuous spray: flow is expected whenever the pump is commanded,
+            //        hover included, so monitoring is never gated.
+            //   >0 = Type B, spray stops in a hover/turn: zero flow at low speed is commanded,
+            //        not an empty tank. Monitor only while the FC is commanding real pump output.
+            // Going IDLE here means the pump re-primes (PRIMING) once the drone moves again.
+            // Unknown groundspeed never gates.
+            val spraySpeedMinMs = sharedViewModel.spraySpeedMinMs.value
+            val pumpHeldOffBySpeed = spraySpeedMinMs > 0f && (
+                (!sharedViewModel.sprayManualMode.value &&
+                    snapshot.groundspeed?.let { it < spraySpeedMinMs } == true) ||
+                    sharedViewModel.sprayEffectiveOutputPct.value
+                        ?.let { it < MIN_MONITORED_PUMP_OUTPUT_PCT } == true)
             val monitoringOn = snapshot.connected && snapshot.fcuDetected && snapshot.armed &&
-                commandedOn && !nonSprayMode && !terminalMission && !sprayMonitoringSuspended
+                commandedOn && !nonSprayMode && !terminalMission && !sprayMonitoringSuspended &&
+                !pumpHeldOffBySpeed
 
             if (terminalMission) {
                 autoModeSprayDetected = false
