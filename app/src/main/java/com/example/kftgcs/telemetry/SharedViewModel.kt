@@ -2558,6 +2558,8 @@ class SharedViewModel : ViewModel() {
     }
 
     fun announceSelectedManual() {
+        // Auto -> Manual: drop the flown lines/mission graphics, same as "Clear Map".
+        if (_userSelectedFlightMode.value == UserFlightMode.AUTOMATIC) clearMapLinesOnly()
         _userSelectedFlightMode.value = UserFlightMode.MANUAL
         LogUtils.i("SharedVM", "User selected MANUAL mode - pause/resume DISABLED")
         ttsManager?.announceSelectedManual()
@@ -4533,7 +4535,14 @@ class SharedViewModel : ViewModel() {
     fun recordDronePathPoint(position: LatLng, isSpraying: Boolean) {
         val current = _dronePathPoints.value
         val last = current.lastOrNull()
-        if (last != null && last.position == position && last.isSpraying == isSpraying) return
+        if (last != null && last.isSpraying == isSpraying) {
+            // Drop sub-metre jitter: at 5-10 Hz a long spray flight otherwise piles up tens of
+            // thousands of points, and the map stops rendering the polyline.
+            val dLat = (position.latitude - last.position.latitude) * 111_320.0
+            val dLon = (position.longitude - last.position.longitude) * 111_320.0 *
+                Math.cos(Math.toRadians(position.latitude))
+            if (dLat * dLat + dLon * dLon < 1.0) return
+        }
 
         _dronePathPoints.value = current + DronePathPoint(position, isSpraying)
     }
@@ -8085,6 +8094,17 @@ class SharedViewModel : ViewModel() {
             return
         }
         lastFenceBreachAlertTime = now
+
+        // On the ground the FC isn't "handling" anything: it is refusing to arm because the
+        // drone is outside the fence. Say that instead of announcing a breach.
+        if (!_telemetryState.value.armed) {
+            val msg = "Drone outside Fence! , Cannot arm"
+            LogUtils.w("Geofence", "⚠️ $msg (via $source)")
+            addNotification(Notification(message = "⚠️ $msg", type = NotificationType.WARNING))
+            showFailsafePopup(msg)
+            viewModelScope.launch { speak("Drone outside fence. Cannot arm.") }
+            return
+        }
 
         // Every pilot-facing channel names the action the FC is ACTUALLY configured to take,
         // not a GCS assumption. The popup is what a pilot looks at mid-flight, so it has to

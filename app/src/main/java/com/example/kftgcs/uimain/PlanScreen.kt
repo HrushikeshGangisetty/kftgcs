@@ -2120,8 +2120,8 @@ fun PlanScreen(
                                 Slider(
                                     value = surveyAltitude,
                                     onValueChange = { surveyAltitude = it },
-                                    valueRange = 1f..30f,
-                                    steps = 60,
+                                    valueRange = 1f..100f,
+                                    steps = 198,
                                     modifier = Modifier.weight(1f),
                                     colors = SliderDefaults.colors(
                                         thumbColor = MaterialTheme.colorScheme.primary,
@@ -2130,7 +2130,7 @@ fun PlanScreen(
                                     )
                                 )
                                 IconButton(
-                                    onClick = { surveyAltitude = (surveyAltitude + 1f).coerceAtMost(30f) },
+                                    onClick = { surveyAltitude = (surveyAltitude + 1f).coerceAtMost(100f) },
                                     modifier = Modifier.size(32.dp)
                                 ) {
                                     Icon(
@@ -2707,8 +2707,8 @@ fun PlanScreen(
                                 Slider(
                                     value = surveyAltitude,
                                     onValueChange = { surveyAltitude = it },
-                                    valueRange = 1f..30f,
-                                    steps = 60,
+                                    valueRange = 1f..100f,
+                                    steps = 198,
                                     modifier = Modifier.weight(1f),
                                     colors = SliderDefaults.colors(
                                         thumbColor = MaterialTheme.colorScheme.primary,
@@ -2717,7 +2717,7 @@ fun PlanScreen(
                                     )
                                 )
                                 IconButton(
-                                    onClick = { surveyAltitude = (surveyAltitude + 1f).coerceAtMost(30f) },
+                                    onClick = { surveyAltitude = (surveyAltitude + 1f).coerceAtMost(100f) },
                                     modifier = Modifier.size(32.dp)
                                 ) {
                                     Icon(

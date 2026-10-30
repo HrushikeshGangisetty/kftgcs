@@ -1525,42 +1525,37 @@ fun GcsMap(
         // Spray-aware polylines showing the drone's traveled path
         // Green for sprayed areas, Red for non-sprayed areas
         if (visitedPathPoints.size > 1) {
-            // Group consecutive points by spray status to create segments
-            val segments = mutableListOf<Pair<List<LatLng>, Boolean>>() // (points, isSpraying)
-            var currentSegment = mutableListOf<LatLng>()
-            var currentSprayStatus: Boolean? = null
-
-            visitedPathPoints.forEach { pathPoint ->
-                if (currentSprayStatus == null || currentSprayStatus != pathPoint.isSpraying) {
-                    // Start a new segment
-                    if (currentSegment.isNotEmpty() && currentSprayStatus != null) {
-                        // Add the previous segment
-                        segments.add(Pair(currentSegment.toList(), currentSprayStatus!!))
+            // Built once per trail change (not per telemetry recomposition) and split into
+            // <=300-point chunks: one multi-thousand-point polyline is slow to update on every
+            // sample and is what made long green lines drop off the map. Each new run starts at
+            // the previous point so red/green and chunk joins leave no gap.
+            val segments = remember(visitedPathPoints) {
+                val out = mutableListOf<Pair<List<LatLng>, Boolean>>()
+                var cur = mutableListOf<LatLng>()
+                var curSpray = visitedPathPoints.first().isSpraying
+                var prev: LatLng? = null
+                visitedPathPoints.forEach { pt ->
+                    if (pt.isSpraying != curSpray || cur.size >= 300) {
+                        if (cur.size > 1) out.add(cur.toList() to curSpray)
+                        cur = mutableListOf()
+                        prev?.let { cur.add(it) }
+                        curSpray = pt.isSpraying
                     }
-                    // Start new segment with current point
-                    currentSegment = mutableListOf(pathPoint.position)
-                    currentSprayStatus = pathPoint.isSpraying
-                } else {
-                    // Continue current segment
-                    currentSegment.add(pathPoint.position)
+                    cur.add(pt.position)
+                    prev = pt.position
+                }
+                if (cur.size > 1) out.add(cur.toList() to curSpray)
+                out
+            }
+            segments.forEachIndexed { i, (points, isSpraying) ->
+                key(i) {
+                    Polyline(
+                        points = points,
+                        width = 7.5f,
+                        color = if (isSpraying) Color.Green else dronePathColor
+                    )
                 }
             }
-
-            // Add the final segment
-            if (currentSegment.isNotEmpty() && currentSprayStatus != null) {
-                segments.add(Pair(currentSegment.toList(), currentSprayStatus!!))
-            }
-
-            // Draw polylines for each segment
-    segments.forEach { (points, isSpraying) ->
-        if (points.size > 1) {
-            Polyline(
-                points = points,
-                width = 7.5f,
-                color = if (isSpraying) Color.Green else dronePathColor
-            )
-        }
-    }
         }
 
         // ===== RESUME POINT MARKER =====

@@ -994,9 +994,10 @@ fun StatusPanel(
                 // It is cleared only when the next mission starts, so acknowledging the completion
                 // dialog no longer blanks the field.
                 val timeStr = (telemetryState.missionElapsedSec ?: telemetryState.lastMissionElapsedSec)?.let { sec ->
+                    val h = sec / 3600
                     val m = (sec % 3600) / 60
                     val s = sec % 60
-                    "%02d:%02d".format(m, s)
+                    if (h > 0) "%d:%02d:%02d".format(h, m, s) else "%02d:%02d".format(m, s)
                 } ?: "N/A"
                 Text(
                     "${AppStrings.time}: $timeStr",

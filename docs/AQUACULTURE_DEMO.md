@@ -115,7 +115,7 @@ remain transient.
 
 Demo validation limits: culture days 1–120; sessions 1–24; positive finite quantities;
 simple polygons with 3–200 distinct vertices and 1–5000 m edges; no date-line crossing;
-speed 0.3–10 m/s; altitude 2–30 m; spacing 2–100 m; indentation 3–50 m; at most 100 passes/session,
+speed 0.3–10 m/s; altitude 2–100 m; spacing 2–100 m; indentation 3–50 m; at most 100 passes/session,
 2000 waypoints/load and 5000/session. The application uses only the biological demo
 table and the separately replaceable mission strategy.
 

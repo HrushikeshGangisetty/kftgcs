@@ -10,7 +10,7 @@ class BoundaryMissionGenerator {
         require(parameters.passes in 1..100) { "supports 1–100 boundary passes" }
         require(parameters.targetSpeedMetersPerSecond.isFinite() && parameters.targetSpeedMetersPerSecond in 0.3..10.0) { "Mission speed must be 0.3–10 m/s" }
         require(parameters.waypointSpacingMeters.isFinite() && parameters.waypointSpacingMeters in 2.0..100.0) { "Waypoint spacing must be 2–100 m" }
-        require(parameters.altitudeMeters.isFinite() && parameters.altitudeMeters in 2.0..30.0) { "altitude must be 2–30 m" }
+        require(parameters.altitudeMeters.isFinite() && parameters.altitudeMeters in 2.0..100.0) { "altitude must be 2–100 m" }
         require(parameters.feedReleaseSecondsPerPass.isFinite() && parameters.feedReleaseSecondsPerPass >= 0) { "Invalid feed release duration" }
         val vertices = pond.vertices
         val samples = vertices.indices.map {
